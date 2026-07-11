@@ -1798,8 +1798,10 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         // DroidVM: push_descriptor needs the guest template->typed unroll (the
         // host drops raw push-with-template ops) and multi_draw has no host
         // decoder yet — both pending proper cereal codegen work (task #6).
-        // "VK_KHR_push_descriptor",
-        // "VK_EXT_multi_draw",
+        // zink is barred from push descriptors driver-side (MESA_TURNIP case in
+        // zink_screen.c, docker gallium build) — the typed path is fine for MC.
+        "VK_KHR_push_descriptor",
+        "VK_EXT_multi_draw",
         // DroidVM 2026-07-11: zink/DXVK/Minecraft wants, verified against the
         // generated encoder/marshaling (structs+entrypoints present). Anything
         // whose feature structs the cereal codegen cannot marshal must NOT be
