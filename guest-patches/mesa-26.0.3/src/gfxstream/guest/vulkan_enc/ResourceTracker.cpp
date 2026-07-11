@@ -1795,21 +1795,26 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_EXT_swapchain_colorspace",
         "VK_EXT_image_robustness",
         "VK_EXT_robustness2",
-        "VK_KHR_push_descriptor",
-        "VK_EXT_multi_draw",
+        // DroidVM: push_descriptor needs the guest template->typed unroll (the
+        // host drops raw push-with-template ops) and multi_draw has no host
+        // decoder yet — both pending proper cereal codegen work (task #6).
+        // "VK_KHR_push_descriptor",
+        // "VK_EXT_multi_draw",
         // DroidVM 2026-07-11: zink/DXVK/Minecraft wants, verified against the
         // generated encoder/marshaling (structs+entrypoints present). Anything
         // whose feature structs the cereal codegen cannot marshal must NOT be
         // listed here (the chain gets silently dropped host-side).
-        "VK_KHR_maintenance5",
-        "VK_KHR_maintenance6",
-        "VK_KHR_dynamic_rendering_local_read",
-        "VK_EXT_host_image_copy",
-        "VK_KHR_load_store_op_none",
-        "VK_KHR_swapchain_mutable_format",
-        "VK_EXT_post_depth_coverage",
-        "VK_EXT_shader_subgroup_ballot",
-        "VK_EXT_shader_subgroup_vote",
+        // A/B: the 9 zink/DXVK adds temporarily disabled while bisecting the
+        // black-scanout regression (zink changes strategies on several of them).
+        // "VK_KHR_maintenance5",
+        // "VK_KHR_maintenance6",
+        // "VK_KHR_dynamic_rendering_local_read",
+        // "VK_EXT_host_image_copy",
+        // "VK_KHR_load_store_op_none",
+        // "VK_KHR_swapchain_mutable_format",
+        // "VK_EXT_post_depth_coverage",
+        // "VK_EXT_shader_subgroup_ballot",
+        // "VK_EXT_shader_subgroup_vote",
         "VK_EXT_custom_border_color",
         "VK_EXT_shader_stencil_export",
         "VK_KHR_image_format_list",
