@@ -1,58 +1,69 @@
-# gfxstream Production Arena — 实作计画(接地版)
+# gfxstream host-visible folio backing — 實作記錄(task #15)
 
-目标:gfxstream host-visible 记忆体祝福一次,消灭 per-BO share/unshare churn
-(= EPERM/毒化/RM残留/长期开机崩溃的根源)。task #15。
+目標:gfxstream production 化。host-visible 記憶體的 share/RM 交易變成
+「乾淨、有界、可回收」:每個 host VkDeviceMemory ↔ n 個 2MB order-9 folio,
+生命週期綁定(create = order-9 alloc,destroy = unshare + free 回 reserve 池)。
+user 定案 2026-07-11(取代原 blessed-pool arena 設計)。
 
-## 已确认的现状(2026-07-11 侦察)
+## 定案設計(單一機制)
 
-DroidVM 的 host-visible 路径 = **`VulkanAllocateHostVisibleAsUdmabuf`**
-(`virtio-gpu-gfxstream-renderer.cpp:160` 起,条件 `IsAndroidKernel6_6() && HasUdmabufDevice()`
-→ DroidVM 恒 TRUE)。流程在 `VkDecoderGlobalState.cpp` 的
-`on_vkAllocateMemory` impl(6113;host-visible 段 6609):
+host `on_vkAllocateMemory` udmabuf 分支(所有 emulateHostVisible 都走這):
+memfd 向上取整 2MB 倍數 → `MADV_COLLAPSE` 成 order-9 folio(**必須在建 udmabuf
+之前**,udmabuf 會 pin 頁擋掉 collapse)→ udmabuf → dmabuf import 照舊。
+free = 現行 on_vkFreeMemory:SharedMemory 銷毀 → blob unshare → memfd close
+→ folio 整顆 order-9 free → gh_hugepage_reserve free hook 回收進池。
 
-```
-emulateHostVisible (6611) = hostVisible && !importEmulatedExternalMemory
-  → udmabuf 分支(6673):每次 alloc 建一个 per-alloc SharedMemory
-    → createNoMapping → udmabuf descriptor → importFdInfo(dmabuf)
-    → 成为 VkDeviceMemory → memoryInfo.blobId(6902)→ 导出 blob → share 给 guest
-free: on_vkFreeMemory(6998)→ 销毁 SharedMemory + unshare blob  ← churn 在这
-```
+供頁迴路(現成,RingBlob 已驗證):crosvm 是 tracked gunyah-VM owner,
+order-9 分配被模組攔截、從 reserve 池供給(吃 VM reserve 額度,不搶 app RAM);
+order-9 free 被 hook 回收。**folio 不可拆**(不能 partial unmap/hole-punch
+2MB 塊,否則 4K free 池看不到,頁流失到 owner 死亡)。
 
-已有可复用件:
-- **RingBlob 池**(`VirtioGpuResource.cpp:95` `GetGunyahRingBlobPool`):祝福一次/按
-  rounded size 回收/永不 unshare/PMD 对齐 `MADV_COLLAPSE` folio 背书。**arena 的雏形**。
-- **SubAllocator**(`host/address_space/`):现成的 offset 子分配器(v2 用)。
-- guest 子分配的 CoherentMemory 机制在 **guest mesa gfxstream_vk 的 ResourceTracker**
-  (不在此 host tree;v2 才需要,待在 guest 定位)。
+## 為什麼不是「全部擴 2MB」(user 顧慮:1000 個 8K/512K 撐不住)
 
-## Config(user 定案 2026-07-11,全 env 可调不写死)
+guest ICD 尺寸規則(已核實 guest ResourceTracker.cpp:3200-3211):
+- 非 dedicated:`max(round-1MB, 16MB)` → host 看到一律 ≥16MB 塊,folio 化零浪費。
+- dedicated(BDA flag):只對齊 64KB(`kLargestPageSize`)→ 以原始尺寸抵達 host。
+  這條路小分配多起來會付 2MB 稅 → **閾值擋掉**:小分配留在 4K 動態路
+  (entry 本來就少:8KB=2 條、512KB≤128 條,RM 扛得住)。
+- guest 空塊立即死(shared_ptr 歸零即析構)、BDA 全繞過子分配 → churn 頻率
+  由 app 決定,本機制讓每筆交易乾淨化(8 條 entry/16MB,失敗不毒化),
+  不是消滅 churn。若長期測試仍見 RM 退化,可在同機制上疊「免 unshare 回收
+  快取」(= arena 變成可選 cache 層,和本機制不衝突)。
 
-- `GFXSTREAM_ARENA_MB` = 预分配总量(祝福上限),预设 1024。
-- `GFXSTREAM_ARENA_THRESHOLD_KB` = size 阈值(KB):
-  - `>0`:BO `< threshold` → arena,`>= threshold` → 动态 per-blob(混合)
-  - `0` = 全动态(arena 关闭 = 现行行为)
-  - `-1` = 全预分配(所有 host-visible 进 arena;arena 满/放不下 → `VK_ERROR_OUT_OF_DEVICE_MEMORY`)
+## Config(env,全可調)
 
-## 分层实作
+- `GFXSTREAM_ARENA_MB`:folio 總配額(MiB,預設 1024;測試時設 = BAR 大小)。
+  超額:threshold 模式降級 4K 路,strict 模式回 OOM。
+- `GFXSTREAM_ARENA_THRESHOLD_KB`(預設 **1024 = 1MB**,最壞浪費率 50%,user 接受):
+  - `>0`:分配 `>= threshold` → folio 背書;quota 滿/collapse 失敗 → 降級 4K 路
+  - `0`:全關(現行 4K 行為)
+  - `-1`:strict 全 folio;quota 滿或 collapse 失敗 → `VK_ERROR_OUT_OF_DEVICE_MEMORY`
 
-### v1(本阶段):host 端 blessed recycle pool,**guest 透明**
-把 RingBlob 池推广到 host-visible udmabuf memory:
-- 池按 rounded-size bucket 持有 folio-backed `SharedMemory`(+udmabuf desc + VkDeviceMemory),
-  祝福后**永不 unshare**,free 时归还 bucket 复用。
-- 总量受 `GFXSTREAM_ARENA_MB` cap;超出走动态(hybrid)或回 OOM(strict/-1)。
-- 每个 alloc 仍 = 一个 blob(整块),guest 照旧整块 map → **零 guest 改动**。
-- 效果:blob 永不 unshare/re-share → churn=0 → EPERM/毒化结构性消失。
-- 代价:整块粒度(小 alloc 占整个 bucket),不如子分配紧;但直接杀 churn。
-- 插入点:`on_vkAllocateMemory` udmabuf 分支(6673)取池、`on_vkFreeMemory`(6998)归还。
-- 新档:`host/vulkan/HostVisibleArena.{h,cpp}`;抽 RingBlob 的 collapse recipe 成共用 helper。
+## 改動(gfxstream repo,base 5d72b52aa)
 
-### v2(后续):offset 子分配,紧打包,需 guest ICD 配合
-- 复用 guest gfxstream_vk ResourceTracker 的 CoherentMemory 子分配(map 大块一次,
-  vkAllocateMemory 回 (block, offset),vkMapMemory = block_ptr+offset)。
-- host 端 arena 提供 (blob_id, offset);协议传 offset;guest 按 offset map。
-- 碎片化:块池 buddy;溢出走 v1 整块或动态。
+- `host/vulkan/HostVisibleFolio.h`(新,header-only):config/fromEnv、
+  `HostVisibleFolioQuota`(process-global atomic 配額)、`HostVisibleFolioCharge`
+  (RAII,early-return 自動退款,`transfer()` 移交給 MemoryInfo)、
+  `CollapseMemfdToFolios()`(RingBlob 配方:PMD 對齊暫時映射 + MADV_HUGEPAGE
+  + memset fault-in + MADV_COLLAPSE,回傳 errno)。
+- `VkDecoderGlobalState.cpp`:udmabuf 分支 alignedSize 後路由+取整+charge;
+  createNoMapping 後、`handleFromSharedMemory`(udmabuf 建立)**前** collapse;
+  `memoryInfo.folioBytes = folioCharge.transfer()`;
+  `destroyMemoryWithExclusiveInfo` 釋放配額(涵蓋 freeMemory + device teardown)。
+- `VkDecoderInternalStructs.h`:`MemoryInfo::folioBytes`。
+- blob export 不受影響:crosvm 拿到的是 memfd(`STREAM_HANDLE_TYPE_MEM_SHM`),
+  guest 只 map 自己的 blob size,rounded 尾巴透明。
 
-## 风险
-- 巨型 blob 物理碎片 → 池块一律 folio 背书(size/2MB entries,见 nctx 统一原则)。
-- VkDeviceMemory 复用需同 device/同 memoryTypeIndex bucket。
-- dedicated allocation / VkExportMemory / scanout → 强制走动态路。
+## 驗收(user 定,2026-07-11)
+
+llama 小模型推理(qwen2.5-1.5b)+ Minecraft OpenGL(zink) + Minecraft VK
+三者運作;關閉後記憶體回收:gfxstream free → 模組 reclaim →
+`gh_hugepage_reserve/parameters/pool_avail` 回升、`gunyah_share_66/outstanding`
+回落。host log 觀測:`VKFOLIO:` 行(mode/collapse errno/used quota)。
+
+## 遺留
+
+- 遠端 Droid-VM/gfxstream `wip-3d-accel` 還停在被丟棄的 scaffold commit
+  (d3d42c1),下次推送需 `--force-with-lease`(user 說先不推)。
+- guest 端可選優化(後續):CoherentMemory 空塊滯留池(hysteresis)降 churn 頻率。
+- strict(-1)模式是測試用;生產建議 threshold 模式。
