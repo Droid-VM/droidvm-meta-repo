@@ -1795,6 +1795,8 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_EXT_swapchain_colorspace",
         "VK_EXT_image_robustness",
         "VK_EXT_robustness2",
+        "VK_KHR_push_descriptor",
+        "VK_EXT_multi_draw",
         "VK_EXT_custom_border_color",
         "VK_EXT_shader_stencil_export",
         "VK_KHR_image_format_list",
@@ -6957,8 +6959,14 @@ void ResourceTracker::on_vkUpdateDescriptorSetWithTemplate(
                 // Convert mesa to internal for objects in the user buffer
                 VkDescriptorBufferInfo* internalBufferInfo =
                     (VkDescriptorBufferInfo*)(((uint8_t*)bufferInfos) + currBufferInfoOffset);
-                VK_FROM_HANDLE(gfxstream_vk_buffer, gfxstream_buffer, internalBufferInfo->buffer);
-                internalBufferInfo->buffer = gfxstream_buffer->internal_object;
+                // nullDescriptor (VK_EXT_robustness2): zink legitimately writes
+                // VK_NULL_HANDLE buffers; the non-template path already guards
+                // this (transformDescriptorSetList), mirror it here.
+                if (internalBufferInfo->buffer) {
+                    VK_FROM_HANDLE(gfxstream_vk_buffer, gfxstream_buffer,
+                                   internalBufferInfo->buffer);
+                    internalBufferInfo->buffer = gfxstream_buffer->internal_object;
+                }
 #endif
                 currBufferInfoOffset += sizeof(VkDescriptorBufferInfo);
             }
