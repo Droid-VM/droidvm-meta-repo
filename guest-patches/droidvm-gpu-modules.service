@@ -1,0 +1,12 @@
+[Unit]
+Description=Load patched virtio-gpu + gunyah_guest modules for DroidVM 3D accel
+Before=gdm.service display-manager.service
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "modprobe virtio_dma_buf || true; insmod /lib/modules/$(uname -r)/updates/gunyah_guest.ko || true; insmod /lib/modules/$(uname -r)/updates/virtio-gpu.ko || true"
+
+[Install]
+WantedBy=multi-user.target
