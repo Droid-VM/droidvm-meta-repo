@@ -1,0 +1,8 @@
+crosvm_build/
+crosvm_out/
+kgsl-ref/
+virglrenderer-upstream/
+lateautumn233_attemp/
+hujk_attemp/
+.claude/
+*.bin
