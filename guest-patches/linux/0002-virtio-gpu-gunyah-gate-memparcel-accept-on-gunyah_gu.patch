@@ -1,0 +1,37 @@
+From 704751ca6b7cc5ad3ba8720f863841588f6f0408 Mon Sep 17 00:00:00 2001
+From: HuJK <gh@hujk.oeg>
+Date: Sun, 12 Jul 2026 22:39:23 +0800
+Subject: [PATCH 2/3] virtio-gpu/gunyah: gate memparcel accept on
+ gunyah_guest_available()
+
+The blob-mmap path took the Gunyah mem_accept branch whenever the host set a
+non-zero gunyah_handle in the map response. On a non-Gunyah hypervisor (KVM,
+gzvm, ...) or any host that leaves that field non-zero, the accept would fail
+with -ENODEV and abort the mmap instead of falling back to the stock
+io_remap_pfn_range path. Gate on gunyah_guest_available() (false unless the
+gunyah-resource-manager DT node was found at init) so a non-Gunyah guest never
+touches the memparcel path and degrades to plain virtio-gpu behaviour. No HVC
+is ever issued off-Gunyah, so there is no panic risk either way.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Smu6N2o945D86k4hE1i9jr
+---
+ drivers/gpu/drm/virtio/virtgpu_vram.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vram.c b/drivers/gpu/drm/virtio/virtgpu_vram.c
+index edf042cc0ca9..bfd16e8021fc 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vram.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vram.c
+@@ -66,7 +66,7 @@ static int virtio_gpu_vram_mmap(struct drm_gem_object *obj,
+ 	 * protected guest's stage-2. Accept the memparcel here (sleepable context)
+ 	 * so the IPA at vram_node.start becomes accessible before io_remap.
+ 	 */
+-	if (vram->gunyah_handle && !vram->gunyah_accepted) {
++	if (gunyah_guest_available() && vram->gunyah_handle && !vram->gunyah_accepted) {
+ 		ret = gunyah_guest_mem_accept(vram->gunyah_handle,
+ 					      vram->vram_node.start,
+ 					      vram->vram_node.size);
+-- 
+2.43.0
+

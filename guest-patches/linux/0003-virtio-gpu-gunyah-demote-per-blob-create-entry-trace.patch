@@ -1,0 +1,35 @@
+From eb54ddb7fceedf85ece632ecdb335e4710b34be0 Mon Sep 17 00:00:00 2001
+From: HuJK <gh@hujk.oeg>
+Date: Mon, 13 Jul 2026 22:20:36 +0800
+Subject: [PATCH 3/3] virtio-gpu/gunyah: demote per-blob-create entry trace to
+ pr_debug
+
+The unconditional pr_err on every host-visible blob allocation logged
+hundreds of lines per desktop session and dominated guest dmesg. The FAILED
+paths stay at pr_err.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LpwuQ9DJL8g9NKARsbur8Z
+---
+ drivers/gpu/drm/virtio/virtgpu_ioctl.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_ioctl.c b/drivers/gpu/drm/virtio/virtgpu_ioctl.c
+index 935d11d596b6..5d48e061142f 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_ioctl.c
++++ b/drivers/gpu/drm/virtio/virtgpu_ioctl.c
+@@ -515,7 +515,10 @@ static int virtio_gpu_resource_create_blob_ioctl(struct drm_device *dev,
+ 		return -EINVAL;
+ 	}
+ 
+-	pr_err("VGBLOB-DBG: enter mem=%u flags=0x%x size=%llu cmd_size=%u guest=%d host3d=%d\n",
++	/* Per-blob-create entry trace: demoted from pr_err to pr_debug -- this fired unconditionally on
++	 * every host-visible blob allocation (hundreds per desktop session) and dominated guest dmesg.
++	 * The FAILED paths below stay at pr_err since they only fire on real errors. */
++	pr_debug("VGBLOB-DBG: enter mem=%u flags=0x%x size=%llu cmd_size=%u guest=%d host3d=%d\n",
+ 	       rc_blob->blob_mem, rc_blob->blob_flags,
+ 	       (unsigned long long)rc_blob->size, rc_blob->cmd_size,
+ 	       guest_blob, host3d_blob);
+-- 
+2.43.0
+
