@@ -9,3 +9,13 @@ repo init -u https://github.com/Droid-VM/crosvm-minimal-manifest.git -b main -m 
 repo sync -c
 
 cd ..
+
+# Staging view for pushing to the Droid-VM org: the build-tree repos keep their
+# single checkout inside crosvm_build (soong/nsjail can't follow out-of-tree
+# symlinks, so the real dirs must stay here); the org-named folder next to this
+# repo just symlinks into them.
+STAGE="$(cd .. && pwd)/DroidVM_3daccel_gfxstream"
+mkdir -p "$STAGE"
+ln -sfn ../DroidVM_3d_accel/crosvm_build/external/crosvm            "$STAGE/crosvm"
+ln -sfn ../DroidVM_3d_accel/crosvm_build/hardware/google/gfxstream  "$STAGE/gfxstream"
+ln -sfn ../DroidVM_3d_accel/crosvm_build/external/virglrenderer     "$STAGE/virglrenderer"
