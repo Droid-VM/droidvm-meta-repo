@@ -11,15 +11,24 @@ the workspace that ties them together (sub-repo folders are gitignored).
 |---|---|---|
 | 1 | `1_build_crosvm_prepare.sh` | repo-sync the crosvm soong tree (manifest branch pins all Droid-VM forks to `3d-accel-gfxstream`) |
 | 2 | `2_build_crosvm.sh` | build crosvm (+ gfxstream/virglrenderer) for the device |
-| 3 | `3_collect_crosvm.sh` | collect crosvm + linked .so into `crosvm_out/` (called by step 2) |
-| 3-1 | `3-1_crosvm_out_to_adb.sh` | push `crosvm_out/` to the device for manual testing |
-| 3-2 | `3-2_crosvm_run_ubuntu.sh` | run the manual test VM on the device |
-| 4 | `4_build_apk_prepare.sh` | clone app + prebuilt-root, overlay crosvm/EDK2 artifacts into `manual-build/` |
-| 5 | `5_build_apk.sh` | build the DroidVM APK with the local prebuilts baked in |
-| 6 | `6_build_guest_mesa.sh` | build the guest mesa (gfxstream ICD + zink) tarball, aarch64-native |
+| 2-1 | `2-1_collect_crosvm.sh` | collect crosvm + linked .so into `crosvm_out/` (called by step 2) |
+| 2-2 | `2-2_crosvm_out_to_adb.sh` | push `crosvm_out/` to the device for manual testing |
+| 2-3 | `2-3_crosvm_run_ubuntu.sh` | run the manual test VM on the device |
+| 3 | `3_build_edk2.sh` | build the EDK2 firmware (`edk2-gunyah && ./build.sh -DPCI_CAM_MODE=FALSE`) |
+| 4 | `4_build_gunyah_host.sh` | build the host GuestAccept module `gunyah-host-share-gki-<ver>.ko` for each GKI KMI → `gunyah_host_mod/dist/` (docker/ddk-min) |
+| 5 | `5_prepare_turnip.sh` | build the host turnip Vulkan driver (mesa-tu8 gen8/KGSL, via Adreno-Tools-Drivers) → `turnip/libvulkan_freedreno.so` |
+| 6 | `6_build_apk_prepare.sh` | clone app + prebuilt-root, overlay crosvm/EDK2/gunyah/turnip artifacts into `manual-build/` |
+| 7 | `7_build_apk.sh` | build the DroidVM APK with the local prebuilts baked in |
+| 8 | `8_build_guest_mesa.sh` | build the guest mesa (gfxstream ICD + zink) tarball, aarch64-native |
 
-EDK2 firmware is built separately: `cd edk2-gunyah && ./build.sh -DPCI_CAM_MODE=FALSE`
-(step 4 picks up the resulting `edk2-gunyah.fd`).
+Build artifacts (crosvm step 2, EDK2 step 3, gunyah module step 4, turnip step 5) each
+land in their own component dir; step 6 (`6_build_apk_prepare.sh`) is the single place that
+pulls them all (crosvm/EDK2/gunyah/turnip) into `manual-build/` before the APK is packed.
+
+Turnip is the host GPU Vulkan driver (hwvulkan HAL): without it gfxstream falls back to the
+closed Adreno blob (AHB-only, `supportsDmaBuf=0`) and host-visible coherent memory fails.
+Step 5 builds it from source (mesa-tu8 gen8/KGSL) via StevenMXZ/Adreno-Tools-Drivers — a
+self-contained build (own NDK + mesa fork). See `turnip/README.md`.
 
 ## Layout
 

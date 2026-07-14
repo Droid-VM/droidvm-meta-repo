@@ -12,6 +12,8 @@
 /Virtualization
 /crosvm_build
 /crosvm_build/
+# Worktree backups left by the worktree->symlink migration
+/*.wt-bak/
 # Build outputs
 /crosvm_out/
 /crosvm_out_*/

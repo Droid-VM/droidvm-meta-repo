@@ -7,7 +7,6 @@
 # produce no match (lib not in tree -> handled by the else branch below);
 # with pipefail, grep's exit 1 would abort the whole script via set -e.
 set -eu
-
 ARCH="${ARCH:-android_arm64}"
 DEEP=0; DEST="out/crosvm_pkg"
 for a in "$@"; do [ "$a" = "--deep" ] && DEEP=1 || DEST="$a"; done
@@ -42,4 +41,3 @@ while [ -n "$queue" ]; do
   queue="$next"
 done
 echo "==> $DEST"; ls -1 "$DEST"
-
