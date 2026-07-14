@@ -1,6 +1,5 @@
 # Sub-repos pulled/managed by the numbered scripts (one folder per Droid-VM org repo)
 /DroidVM/
-/Virtualization/
 /edk2-gunyah/
 /gunyah_host_mod/
 /mesa/
@@ -10,12 +9,18 @@
 /crosvm
 /gfxstream
 /virglrenderer
+/Virtualization
 /crosvm_build
 /crosvm_build/
 # Build outputs
 /crosvm_out/
 /crosvm_out_*/
 mesa-guest-aarch64.tar.gz
+# turnip host ICD: built/cached blob + build checkout (5_prepare_turnip.sh); README tracked
+/turnip/*.so
+/turnip/turnip_probe
+/turnip/*.zip
+/turnip/adreno-tools-drivers/
 # Scratch
 kgsl-ref/
 virglrenderer-upstream/

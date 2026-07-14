@@ -17,3 +17,4 @@ cd ..
 ln -sfn crosvm_build/external/crosvm                 crosvm
 ln -sfn crosvm_build/hardware/google/gfxstream       gfxstream
 ln -sfn crosvm_build/external/virglrenderer          virglrenderer
+ln -sfn crosvm_build/packages/modules/Virtualization Virtualization
