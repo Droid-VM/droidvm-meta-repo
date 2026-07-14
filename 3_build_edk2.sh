@@ -1,7 +1,7 @@
 #!/bin/bash
-# Pull the crosvm soong tree pinned to the 3d-accel-gfxstream branches.
+# Pull the crosvm soong tree pinned to the wip/3d-accel-gfxstream branches.
 # The manifest branch pins every Droid-VM fork (crosvm, gfxstream,
-# virglrenderer, Virtualization) to its 3d-accel-gfxstream branch.
+# virglrenderer, Virtualization) to its wip/3d-accel-gfxstream branch.
 set -e
 cd "$(dirname "$0")"
 

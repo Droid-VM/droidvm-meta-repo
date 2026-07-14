@@ -8,6 +8,6 @@
 set -e
 cd "$(dirname "$0")"
 
-[ -d gunyah_host_mod ] || git clone -b 3d-accel-gfxstream https://github.com/Droid-VM/gunyah_host_mod.git
+[ -d gunyah_host_mod ] || git clone -b wip/3d-accel-gfxstream https://github.com/Droid-VM/gunyah_host_mod.git
 cd gunyah_host_mod
 ./build.sh arm64

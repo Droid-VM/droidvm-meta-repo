@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")"
 
-[ -d DroidVM ] || git clone -b 3d-accel-gfxstream https://github.com/Droid-VM/DroidVM.git
+[ -d DroidVM ] || git clone -b wip/3d-accel-gfxstream https://github.com/Droid-VM/DroidVM.git
 [ -d DroidVM/DroidVM-Prebuilt-Root ] || git clone https://github.com/Droid-VM/DroidVM-Prebuilt-Root.git DroidVM/DroidVM-Prebuilt-Root
 
 

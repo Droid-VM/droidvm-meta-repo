@@ -16,7 +16,7 @@ if [ "$(uname -m)" != "aarch64" ]; then
     exit 1
 fi
 
-[ -d mesa ] || git clone -b 3d-accel-gfxstream https://github.com/Droid-VM/mesa.git
+[ -d mesa ] || git clone -b wip/3d-accel-gfxstream https://github.com/Droid-VM/mesa.git
 cd mesa
 
 meson setup build-guest \
