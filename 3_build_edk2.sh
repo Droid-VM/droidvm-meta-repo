@@ -1,9 +1,10 @@
 #!/bin/bash
-# Pull the crosvm soong tree pinned to the wip/3d-accel-gfxstream branches.
-# The manifest branch pins every Droid-VM fork (crosvm, gfxstream,
-# virglrenderer, Virtualization) to its wip/3d-accel-gfxstream branch.
+# Build the EDK2 UEFI firmware (edk2-gunyah) that boots the Linux/Windows guests.
+# Cloned at this meta repo's branch if not already present.
 set -e
 cd "$(dirname "$0")"
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
+[ -d edk2-gunyah ] || git clone -b "$BRANCH" https://github.com/Droid-VM/edk2-gunyah.git
 cd edk2-gunyah
 ./build.sh -DPCI_CAM_MODE=FALSE

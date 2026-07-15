@@ -9,6 +9,7 @@
 # aarch64 box, or via `docker run --platform linux/arm64` with qemu binfmt.
 set -e
 cd "$(dirname "$0")"
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
 if [ "$(uname -m)" != "aarch64" ]; then
     echo "error: guest mesa must be built on aarch64 (run inside the guest VM" >&2
@@ -16,7 +17,7 @@ if [ "$(uname -m)" != "aarch64" ]; then
     exit 1
 fi
 
-[ -d mesa ] || git clone -b wip/3d-accel-gfxstream https://github.com/Droid-VM/mesa.git
+[ -d mesa ] || git clone -b "$BRANCH" https://github.com/Droid-VM/mesa.git
 cd mesa
 
 meson setup build-guest \

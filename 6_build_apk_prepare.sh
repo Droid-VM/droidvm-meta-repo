@@ -4,8 +4,11 @@
 # them into the APK instead of the cloud prebuilts.
 set -e
 cd "$(dirname "$0")"
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
-[ -d DroidVM ] || git clone -b wip/3d-accel-gfxstream https://github.com/Droid-VM/DroidVM.git
+[ -d DroidVM ] || git clone -b "$BRANCH" https://github.com/Droid-VM/DroidVM.git
+# Prebuilt root is the exception: always its main branch. The build overlays the
+# freshly built crosvm/EDK2/gunyah/turnip on top (below), rather than tracking a dev branch.
 [ -d DroidVM/DroidVM-Prebuilt-Root ] || git clone https://github.com/Droid-VM/DroidVM-Prebuilt-Root.git DroidVM/DroidVM-Prebuilt-Root
 
 
