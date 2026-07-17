@@ -1,0 +1,57 @@
+From c12337dfea29b4266e615c917e1cd349fc9be759 Mon Sep 17 00:00:00 2001
+From: HuJK <s920361@gmail.com>
+Date: Thu, 16 Jul 2026 15:38:04 +0800
+Subject: [PATCH 5/5] virtio-gpu: don't detach resources from a context the
+ host never saw
+
+On devices with VIRTIO_GPU_F_CONTEXT_INIT, virtio_gpu_gem_object_open()
+only creates a host context / attaches the resource once userspace has
+issued DRM_IOCTL_VIRTGPU_CONTEXT_INIT (vfpriv->context_created).
+virtio_gpu_gem_object_close() has no such check, so any DRM fd that
+holds GEM handles without ever initializing a 3D context (KMS-only fds
+with dumb cursor/scanout BOs: mutter, plymouth, Xwayland teardown, ...)
+sends CTX_DETACH_RESOURCE with a ctx_id the host never created.
+
+Hosts that validate the id (crosvm/rutabaga) reply with an error:
+
+  [drm:virtio_gpu_dequeue_ctrl_func [virtio_gpu]] *ERROR* response 0x1200 (command 0x203)
+
+i.e. VIRTIO_GPU_RESP_ERR_UNSPEC for VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE
+(crosvm logs CtxDetachResource: ErrRutabaga(InvalidContextId)), once per
+GEM handle close on such fds. QEMU+virglrenderer merely ignores the
+bogus detach silently. Verified with kprobe tracing on a GNOME guest:
+every failing detach came from an fd whose ctx_id had no matching
+context create, while interleaved detaches on CONTEXT_INIT'd fds of the
+same process succeeded.
+
+Mirror the open() condition in close(): nothing was attached, so there
+is nothing to detach.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_gem.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_gem.c b/drivers/gpu/drm/virtio/virtgpu_gem.c
+index f22dc5c..6504edf 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_gem.c
++++ b/drivers/gpu/drm/virtio/virtgpu_gem.c
+@@ -139,6 +139,15 @@ void virtio_gpu_gem_object_close(struct drm_gem_object *obj,
+ 	if (!vgdev->has_virgl_3d)
+ 		return;
+ 
++	/* If this file never created a host context (context_init devices only
++	 * get one via DRM_IOCTL_VIRTGPU_CONTEXT_INIT), nothing was ever
++	 * attached: gem_object_open skips the attach for the same reason, and
++	 * a detach would name a ctx_id the host has never seen (crosvm answers
++	 * VIRTIO_GPU_RESP_ERR_UNSPEC, spamming dmesg on every handle close).
++	 */
++	if (!vfpriv->context_created)
++		return;
++
+ 	objs = virtio_gpu_array_alloc(1);
+ 	if (!objs)
+ 		return;
+-- 
+2.43.0
+

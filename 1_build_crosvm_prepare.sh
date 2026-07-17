@@ -6,6 +6,10 @@ set -e
 cd "$(dirname "$0")"
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
+[ -d crosvm-minimal-manifest ] || git clone https://github.com/Droid-VM/crosvm-minimal-manifest.git
+[ -d droidvm-guest-additions ] || git clone -b "$BRANCH" https://github.com/Droid-VM/droidvm-guest-additions.git
+[ -d mesa ] || git clone -b "$BRANCH" https://github.com/Droid-VM/mesa.git
+
 mkdir -p crosvm_build
 cd crosvm_build
 repo init -u https://github.com/Droid-VM/crosvm-minimal-manifest.git -b main -m crosvm-minimal.xml --depth 1
@@ -27,10 +31,9 @@ for p in external/crosvm hardware/google/gfxstream external/virglrenderer packag
     d="crosvm_build/$p"
     git -C "$d" remote get-url droidvm >/dev/null 2>&1 \
         || git -C "$d" remote add droidvm "https://github.com/Droid-VM/$(basename "$p").git"
-    git -C "$d" fetch --depth 1 droidvm "$BRANCH"
+    git -C "$d" fetch droidvm "$BRANCH"
     git -C "$d" checkout -B "$BRANCH" FETCH_HEAD
 done
 
 
-[ -d crosvm-minimal-manifest ] || git clone -b "$BRANCH" https://github.com/Droid-VM/crosvm-minimal-manifest.git
 
