@@ -2,7 +2,9 @@
 # Manual crosvm launch for the ubuntu VM in GFXSTREAM (runtime-host) mode.
 # Same direct-kernel boot / disk / net / vnc as the kgsl script, but the guest
 # runs the gfxstream Vulkan ICD and crosvm uses the gfxstream backend + guest-
-# accept SHARE, with vm-accept=sync: the generic in-VM accept module (virtio_gunyah_accept.ko)
+# accept SHARE: the guest-side accept is always driven host-side over the virtio-gunyah-accept
+# transport (the in-VM module in gunyah_guest.ko), so this script is now identical to the plain
+# one -- kept as the historical name used in SETUP.md
 # the gunyah guest-accept path.
 set -u
 DIR=/data/local/tmp/crosvm_gfx
@@ -46,7 +48,7 @@ exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debu
   --smbios "processor-version=Qualcomm Snapdragon 8 Elite" \
   --block "$QCOW,lock=false" \
   --net "tap-name=$TAP,mac=$MAC" \
-  --gpu "backend=gfxstream,context-types=gfxstream-vulkan,egl=true,gles=true,external-blob=true,vulkan=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296,vram-limit=2048,gunyah-pvm=true,vm-accept=sync" \
+  --gpu "backend=gfxstream,context-types=gfxstream-vulkan,egl=true,gles=true,external-blob=true,vulkan=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296,vram-limit=2048,gunyah-pvm=true" \
   --vnc-server "host=0.0.0.0,port=5900,input=tablet" \
   --initrd "$INITRD" \
   --params "root=/dev/vda2 rw console=ttyS0 loglevel=4" \

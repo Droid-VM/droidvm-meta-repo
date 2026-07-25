@@ -55,9 +55,9 @@ guest 端:
 
 手機端:`deploy/gfxstream/run_ubuntu_gfx.sh`(DIR=/data/local/tmp/crosvm_gfx)
 - `--gpu backend=gfxstream,context-types=gfxstream-vulkan,...,vram-limit=2048,gunyah-pvm=true`
-- host-visible blob 走 runtime_share + guest-accept(`VmAccept::Off`:virtio-gpu 自己 accept)
-- **sync 變體** `run_ubuntu_gfx_sync.sh`:`--gpu ...,vm-accept=sync` → accept 改由
-  guest 的 virtio_gunyah_accept.ko(泛用 accept 模組)經 virtio transport 執行
+- host-visible blob 走 runtime_share + guest-accept(一律 `VmAccept::Sync`:host 端經 transport 驅動)
+- **sync 變體** `run_ubuntu_gfx_sync.sh`:與主腳本等價(accept 一律由
+  gunyah_guest.ko 的泛用 accept 裝置經 virtio transport 執行)
 
 guest 端:
 1. `/etc/environment` 的 ICD 指向 gfxstream:
