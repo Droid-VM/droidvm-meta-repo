@@ -6,16 +6,26 @@
 # world, same camera, same overlay every run -- without that, one run is at the main menu and the
 # next is in a forest, and the numbers are not comparable.
 #
-# HOLD THE GPU CLOCK. This is not optional hygiene, it decides whether a run means anything: the
-# adreno governor only raises the GPU for what Android considers a foreground game, and the VM is
-# not one -- so the GPU sits at its 160 MHz floor while Minecraft renders inside it. Three
-# measurements of the same code came back 127, 58 and 56 fps purely because of where the clock
-# happened to be. --gpu-mhz pins it (734 matches the kgsl-native-context reference point) and the
-# run aborts if the clock or the thermal level drifts while measuring.
+# HOLD BOTH CLOCKS. This is not optional hygiene, it decides whether a run means anything.
+#
+# The GPU, because the adreno governor only raises it for what Android considers a foreground game
+# and a VM is not one -- so it sits at its 160 MHz floor while Minecraft renders inside it. Three
+# measurements of the same code came back 127, 58 and 56 fps purely from where the clock was.
+#
+# The CPU, because that is what actually sets the submit rate, and on this SoC the two clocks trade
+# against each other through a shared power/thermal budget: the same build measured 637 submits/s
+# with the GPU at 660 MHz and 564 with it at 734, twice each, reproducible to within 0.05%. A
+# faster GPU left less headroom for the cores doing the encode and decode. Pinning only the GPU
+# therefore does not hold the experiment still -- it just moves the uncontrolled variable.
+#
+# --gpu-mhz / --cpu-mhz pin them (660 GPU is what this phone can hold through a run; 734 was taken
+# at temperature and quietly lowered underneath the pin). A run whose clock does not match what was
+# asked for is reported INVALID rather than given a number.
 #
 #   ./mc_bench.sh                      launch MC, walk the menus, capture
 #   ./mc_bench.sh --no-launch          MC is already in a world, just capture
-#   ./mc_bench.sh --gpu-mhz 734        pin the GPU (0 = leave the governor alone)
+#   ./mc_bench.sh --gpu-mhz 660        pin the GPU (0 = leave the governor alone)
+#   ./mc_bench.sh --cpu-mhz 2400       pin every CPU cluster (0 = leave the governor alone)
 #   ./mc_bench.sh --label ladder-v2    tag the capture filename
 set -u
 PHONE=${PHONE:-172.22.74.2:5568}
@@ -26,16 +36,47 @@ A="adb -s $PHONE shell"
 KGSL=/sys/class/kgsl/kgsl-3d0
 
 mkdir -p "$OUT"
-launch=1; gpu_mhz=734; label=""
+launch=1; gpu_mhz=660; cpu_mhz=2400; label=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-launch) launch=0 ;;
         --gpu-mhz) shift; gpu_mhz=$1 ;;
+        --cpu-mhz) shift; cpu_mhz=$1 ;;
         --label) shift; label=$1 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
     shift
 done
+# One representative CPU per cluster; scaling_max_freq is per-policy, so writing one core in each
+# cluster covers all of them.
+CPUS="0 4 7"
+cpu_read() { $A "su -c 'cat /sys/devices/system/cpu/cpu$1/cpufreq/$2'" 2>/dev/null | tr -d '\r'; }
+cpu_write() { $A "su -c 'echo $3 > /sys/devices/system/cpu/cpu$1/cpufreq/$2'" 2>/dev/null; }
+cpu_pin() {
+    local hz=$(( $1 * 1000 ))
+    for c in $CPUS; do
+        # The prime core's floor is above 2.4 GHz, so clamp the request to what the cluster offers.
+        local lo
+        lo=$(cpu_read "$c" scaling_available_frequencies | tr ' ' '\n' | grep -v '^$' | sort -n | head -1)
+        local want=$hz
+        [ -n "$lo" ] && [ "$hz" -lt "$lo" ] && want=$lo
+        cpu_write "$c" scaling_min_freq "$want"
+        cpu_write "$c" scaling_max_freq "$want"
+    done
+}
+cpu_unpin() {
+    for c in $CPUS; do
+        local hi lo
+        hi=$(cpu_read "$c" cpuinfo_max_freq); lo=$(cpu_read "$c" cpuinfo_min_freq)
+        [ -n "$lo" ] && cpu_write "$c" scaling_min_freq "$lo"
+        [ -n "$hi" ] && cpu_write "$c" scaling_max_freq "$hi"
+    done
+}
+cpu_line() {
+    local out=""
+    for c in $CPUS; do out="$out cpu$c=$(( $(cpu_read "$c" scaling_cur_freq) / 1000 ))MHz"; done
+    echo "$out"
+}
 
 kgsl_read() { $A "su -c 'cat $KGSL/$1'" 2>/dev/null | tr -d '\r'; }
 cat_temp() { $A "su -c 'cat /sys/class/thermal/thermal_zone0/temp'" 2>/dev/null | tr -d '\r'; }
@@ -81,6 +122,13 @@ if [ "$gpu_mhz" != 0 ]; then
     echo "    restore with: min_freq=160000000 max_freq=1100000000"
 fi
 
+if [ "$cpu_mhz" != 0 ]; then
+    echo "==> pinning CPUs at ${cpu_mhz}MHz"
+    cpu_pin "$cpu_mhz"
+    echo "   $(cpu_line)"
+    echo "    restore by writing cpuinfo_min_freq/cpuinfo_max_freq back into scaling_*"
+fi
+
 env_line() {
     # Single-quoted inside su -c: the command substitutions have to run as root, or they read
     # nothing and the line comes back blank.
@@ -93,8 +141,8 @@ env_line() {
     $A 'dumpsys power | grep -m1 mWakefulness=' 2>/dev/null | tr -d '\r' | sed -E 's/.*mWakefulness=([A-Za-z]+).*/\1/'
     printf ' foreground='
     $A 'dumpsys activity activities | grep -m1 topResumedActivity' 2>/dev/null \
-        | tr -d '\r' | grep -oE '[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+/' | head -1 | tr -d '/'
-    echo
+        | tr -d '\r' | grep -oE '[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+/' | head -1 | tr -d '/' | tr -d '\n'
+    cpu_line
 }
 
 # Which graphics backend Minecraft actually chose. It silently falls back to OpenGL-on-zink when
