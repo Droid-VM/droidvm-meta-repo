@@ -30,10 +30,14 @@ setsid sh -c "exec tail -f /dev/null > $DIR/con.in" </dev/null >/dev/null 2>&1 &
 
 if ! ip link show "$TAP" >/dev/null 2>&1; then
     ip tuntap add dev "$TAP" mode tap
-    ip link set "$TAP" master "$BR"
-    ip link set "$TAP" up
-    echo "recreated tap $TAP on $BR"
+    echo "created tap $TAP"
 fi
+# Attach every time, not just when the tap is created. The app rebuilds br-wifi on each start,
+# which orphans an existing tap: the device stays present and up, so an "is there a tap" check
+# passes while nothing is enslaved to the bridge and the guest has no path to the network. That
+# failure is silent and looks exactly like a guest networking bug from inside the VM.
+ip link set "$TAP" master "$BR"
+ip link set "$TAP" up
 
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
@@ -42,6 +46,7 @@ export LD_LIBRARY_PATH="$DIR:/data/data/cn.classfun.droidvm/usr/lib"
 export ANDROID_EMU_VK_LOADER_PATH=/data/data/cn.classfun.droidvm/usr/lib/libvulkan_freedreno.so
 export GFXSTREAM_DEVICE_LOCAL_MEMORY_TYPE=1
 export GPU_SCANOUT_TRACE=1
+export GFXSTREAM_LOG_LEVEL=${GFXSTREAM_LOG_LEVEL:-info}
 export NCTX_GFX_POOL_MB=256
 export NCTX_GFX_GUEST_POOL_MB=1024
 
@@ -62,5 +67,5 @@ export RUST_LOG=info,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_cont
   --vnc-server "host=0.0.0.0,port=5900,input=tablet" \
   --initrd "$INITRD" \
   --params "root=/dev/vda2 rw console=ttyS0 loglevel=4" \
-  --serial "type=stdout,hardware=serial,num=1,earlycon,console" \
+  --serial "type=file,hardware=serial,num=1,earlycon,console,path=$DIR/serial.log,input=$DIR/con.in" \
   "$KERNEL" 2>&1
