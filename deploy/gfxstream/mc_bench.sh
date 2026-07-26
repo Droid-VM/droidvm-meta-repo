@@ -18,14 +18,16 @@
 # faster GPU left less headroom for the cores doing the encode and decode. Pinning only the GPU
 # therefore does not hold the experiment still -- it just moves the uncontrolled variable.
 #
-# --gpu-mhz / --cpu-mhz pin them (660 GPU is what this phone can hold through a run; 734 was taken
-# at temperature and quietly lowered underneath the pin). A run whose clock does not match what was
-# asked for is reported INVALID rather than given a number.
+# --gpu-mhz / --cpu-mhz pin them. The defaults are what this phone can hold through a run without
+# cooking: 660 MHz GPU (734 was taken at temperature and then quietly lowered underneath the pin)
+# and 1400 MHz CPU, which also matches the clocks the kgsl-native-context reference numbers were
+# taken at. A run whose clock does not match what was asked for is reported INVALID rather than
+# given a number.
 #
 #   ./mc_bench.sh                      launch MC, walk the menus, capture
 #   ./mc_bench.sh --no-launch          MC is already in a world, just capture
 #   ./mc_bench.sh --gpu-mhz 660        pin the GPU (0 = leave the governor alone)
-#   ./mc_bench.sh --cpu-mhz 2400       pin every CPU cluster (0 = leave the governor alone)
+#   ./mc_bench.sh --cpu-mhz 1400       pin every CPU cluster (0 = leave the governor alone)
 #   ./mc_bench.sh --label ladder-v2    tag the capture filename
 set -u
 PHONE=${PHONE:-172.22.74.2:5568}
@@ -36,7 +38,7 @@ A="adb -s $PHONE shell"
 KGSL=/sys/class/kgsl/kgsl-3d0
 
 mkdir -p "$OUT"
-launch=1; gpu_mhz=660; cpu_mhz=2400; label=""
+launch=1; gpu_mhz=660; cpu_mhz=1400; label=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-launch) launch=0 ;;
@@ -55,11 +57,15 @@ cpu_write() { $A "su -c 'echo $3 > /sys/devices/system/cpu/cpu$1/cpufreq/$2'" 2>
 cpu_pin() {
     local hz=$(( $1 * 1000 ))
     for c in $CPUS; do
-        # The prime core's floor is above 2.4 GHz, so clamp the request to what the cluster offers.
-        local lo
-        lo=$(cpu_read "$c" scaling_available_frequencies | tr ' ' '\n' | grep -v '^$' | sort -n | head -1)
-        local want=$hz
-        [ -n "$lo" ] && [ "$hz" -lt "$lo" ] && want=$lo
+        # Snap to the nearest frequency the cluster actually offers. The steps differ per cluster --
+        # a 1400 MHz request lands on 1363200 for the little/mid cores and 1401600 for the prime
+        # one -- and writing an off-step value leaves the governor to round it somewhere unstated.
+        # Nearest, not highest-at-or-below: the prime cluster's next step down is 1209600, so
+        # rounding down would silently run it 14% slower than asked.
+        local steps want
+        steps=$(cpu_read "$c" scaling_available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n)
+        want=$(echo "$steps" | awk -v t="$hz" '{d=$1>t?$1-t:t-$1; if(best==""||d<best){best=d;v=$1}} END{print v}')
+        [ -z "$want" ] && want=$hz
         cpu_write "$c" scaling_min_freq "$want"
         cpu_write "$c" scaling_max_freq "$want"
     done
