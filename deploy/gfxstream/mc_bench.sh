@@ -6,36 +6,82 @@
 # world, same camera, same overlay every run -- without that, one run is at the main menu and the
 # next is in a forest, and the numbers are not comparable.
 #
-# It also records what the phone was doing at the time. Thermal throttling and the GPU governor
-# move the result by more than most code changes do: an identical build measured 60 fps warm with
-# another app in the foreground and 120 fps cool, so a number without its environment is noise.
+# HOLD THE GPU CLOCK. This is not optional hygiene, it decides whether a run means anything: the
+# adreno governor only raises the GPU for what Android considers a foreground game, and the VM is
+# not one -- so the GPU sits at its 160 MHz floor while Minecraft renders inside it. Three
+# measurements of the same code came back 127, 58 and 56 fps purely because of where the clock
+# happened to be. --gpu-mhz pins it (734 matches the kgsl-native-context reference point) and the
+# run aborts if the clock or the thermal level drifts while measuring.
 #
-#   ./mc_bench.sh                 launch MC, walk the menus, capture
-#   ./mc_bench.sh --no-launch     MC is already in a world, just capture
-#   ./mc_bench.sh --pin-clock     hold the GPU at its current max first (removes the DVFS variable)
+#   ./mc_bench.sh                      launch MC, walk the menus, capture
+#   ./mc_bench.sh --no-launch          MC is already in a world, just capture
+#   ./mc_bench.sh --gpu-mhz 734        pin the GPU (0 = leave the governor alone)
+#   ./mc_bench.sh --label ladder-v2    tag the capture filename
 set -u
 PHONE=${PHONE:-172.22.74.2:5568}
 GUEST=${GUEST:-root@172.22.68.12}
 VNC=${VNC:-172.22.74.2::5900}
 OUT=${OUT:-/tmp/mc_bench}
 A="adb -s $PHONE shell"
+KGSL=/sys/class/kgsl/kgsl-3d0
 
 mkdir -p "$OUT"
-launch=1; pin=0
-for a in "$@"; do
-    case "$a" in
+launch=1; gpu_mhz=734; label=""
+while [ $# -gt 0 ]; do
+    case "$1" in
         --no-launch) launch=0 ;;
-        --pin-clock) pin=1 ;;
-        *) echo "unknown option: $a" >&2; exit 1 ;;
+        --gpu-mhz) shift; gpu_mhz=$1 ;;
+        --label) shift; label=$1 ;;
+        *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
+    shift
 done
+
+kgsl_read() { $A "su -c 'cat $KGSL/$1'" 2>/dev/null | tr -d '\r'; }
+kgsl_write() { $A "su -c 'echo $2 > $KGSL/$1'" 2>/dev/null; }
+
+# Wait out the thermal cap before pinning: with thermal_pwrlevel non-zero the pin lands on a
+# ceiling the hardware has already lowered, and the run measures the heat of the previous run.
+# Unpin first -- a pin left over from the previous run keeps min_freq at the target, the thermal
+# governor cannot step down, and thermal_pwrlevel then stays high forever whatever the temperature
+# is. (That reads as "still throttled" and burns the whole timeout.)
+cool_for_pin() {
+    local want_khz=$(( gpu_mhz * 1000000 ))
+    kgsl_write devfreq/min_freq 160000000
+    kgsl_write devfreq/max_freq 1100000000
+    for i in $(seq 1 40); do
+        local thr max
+        thr=$(kgsl_read thermal_pwrlevel); max=$(kgsl_read devfreq/max_freq)
+        if [ "${thr:-9}" = 0 ] && [ "${max:-0}" -ge "$want_khz" ]; then
+            echo "    thermal clear after $((i*10))s (max_freq=$max)"
+            return 0
+        fi
+        sleep 10
+    done
+    echo "    WARNING: still throttled (thermal_pwrlevel=${thr:-?} max_freq=${max:-?}); ${gpu_mhz}MHz is not reachable"
+    return 1
+}
+
+if [ "$gpu_mhz" != 0 ]; then
+    hz=$(( gpu_mhz * 1000000 ))
+    $A "su -c 'grep -qw $hz $KGSL/devfreq/available_frequencies'" 2>/dev/null \
+        || { echo "$gpu_mhz MHz is not an available frequency" >&2; exit 1; }
+    echo "==> pinning GPU at ${gpu_mhz}MHz"
+    cool_for_pin
+    # max first: min_freq above the current max is rejected.
+    kgsl_write devfreq/max_freq "$hz"
+    kgsl_write devfreq/min_freq "$hz"
+    got=$(kgsl_read devfreq/cur_freq)
+    [ "$got" = "$hz" ] || echo "    WARNING: cur_freq=$got, wanted $hz"
+    echo "    restore with: min_freq=160000000 max_freq=1100000000"
+fi
 
 env_line() {
     # Single-quoted inside su -c: the command substitutions have to run as root, or they read
     # nothing and the line comes back blank.
-    $A "su -c 'cat /sys/class/kgsl/kgsl-3d0/gpuclk /sys/class/kgsl/kgsl-3d0/thermal_pwrlevel /sys/class/kgsl/kgsl-3d0/devfreq/max_freq /sys/class/thermal/thermal_zone0/temp'" 2>/dev/null \
+    $A "su -c 'cat $KGSL/gpuclk $KGSL/thermal_pwrlevel $KGSL/devfreq/max_freq /sys/class/thermal/thermal_zone0/temp'" 2>/dev/null \
         | tr -d '\r' | paste -sd' ' \
-        | awk '{printf "clk=%s thermal_pwrlevel=%s max_freq=%s temp=%.1fC", $1, $2, $3, $4/1000}'
+        | awk '{printf "clk=%.0fMHz thermal_pwrlevel=%s max=%.0fMHz temp=%.1fC", $1/1000000, $2, $3/1000000, $4/1000}'
     # Screen state matters as much as the clock: with the display dozing the governor has no
     # reason to raise the GPU, so an otherwise identical run lands at the bottom of the table.
     printf ' screen='
@@ -46,15 +92,23 @@ env_line() {
     echo
 }
 
-if [ "$pin" = 1 ]; then
-    cap=$($A 'su -c "cat /sys/class/kgsl/kgsl-3d0/devfreq/max_freq"' 2>/dev/null | tr -d '\r')
-    $A "su -c 'echo $cap > /sys/class/kgsl/kgsl-3d0/devfreq/min_freq'" 2>/dev/null
-    echo "pinned GPU at $cap (restore with: min_freq=160000000)"
-fi
+# Which graphics backend Minecraft actually chose. It silently falls back to OpenGL-on-zink when
+# the Vulkan backend fails to start, and rewrites options.txt to "default" after a crash -- an
+# fps from the zink path is not comparable with one from the Vulkan path, and the overlay is the
+# only place the difference shows.
+backend_line() {
+    ssh -o ConnectTimeout=10 "$GUEST" 'grep -h "Using graphics backend" /home/droidvm/mc_diag.log 2>/dev/null | tail -1' 2>/dev/null \
+        | sed -E 's/.*Using graphics backend ([A-Za-z]+).*/\1/'
+}
 
 if [ "$launch" = 1 ]; then
     echo "==> launching Minecraft"
     ssh -o ConnectTimeout=10 "$GUEST" 'pkill -f "[p]ortablemc" 2>/dev/null; pkill -x java 2>/dev/null; sleep 2
+        # A crash resets this to "default", which silently demotes the next run to zink.
+        sed -i "s/^preferredGraphicsBackend:.*/preferredGraphicsBackend:\"vulkan\"/" /home/droidvm/.minecraft/options.txt
+        mv -f /home/droidvm/mc_diag.log /home/droidvm/mc_diag.log.old 2>/dev/null
+        # No droidvm session means no :0, and Minecraft dies on "Failed to open display".
+        [ -S /run/user/1001/wayland-0 ] || { systemctl restart gdm; sleep 25; }
         sudo -u droidvm bash /home/droidvm/launch_mc_vk.sh' >/dev/null 2>&1
     # The main menu takes a while; the first click only focuses the window.
     sleep 50
@@ -68,27 +122,60 @@ if [ "$launch" = 1 ]; then
     sleep 45
 fi
 
-# F6 toggles, so a second run would switch the overlay back off. Capture, and if the overlay
-# is not there (the top-left corner stays dark), press again.
+# The primary number: guest vkQueueSubmit calls per second, from the host's own SUBMITPROF line
+# (emitted every 1000 submits, so the counter and a timestamp are both already there). Minecraft
+# issues a fixed number of submits per frame in a fixed scene, so this tracks fps -- and unlike the
+# overlay it needs no keyboard input, no window focus, and no screen scraping. Keep the overlay as
+# the human-readable cross-check.
+submit_snap() {
+    $A 'su -c "logcat -d -b all | grep SUBMITPROF | tail -1"' 2>/dev/null | tr -d '\r' \
+        | awk '{split($2,t,":"); n=$0; sub(/.*n=/,"",n); sub(/ .*/,"",n);
+                printf "%s %.3f\n", n, t[1]*3600+t[2]*60+t[3]}'
+}
+
+# Let the frame rate settle before measuring: the seconds right after entering a world are still
+# loading chunks.
+echo "==> settling 40s"
+sleep 40
+
+echo "==> measuring submit rate over 40s"
+read -r sn1 st1 <<< "$(submit_snap)"
+sleep 40
+read -r sn2 st2 <<< "$(submit_snap)"
+rate=$(awk -v n1="${sn1:-0}" -v t1="${st1:-0}" -v n2="${sn2:-0}" -v t2="${st2:-0}" \
+    'BEGIN{d=t2-t1; if(d<=0){print "n/a"; exit} printf "%.1f/s over %.0fs", (n2-n1)/d, d}')
+
+# F6 toggles, so pressing it blind flips the overlay off half the time. Detect it by the
+# debug-chart legend -- a fixed block of text on a dark backing plate, so the crop holds both very
+# dark and very bright pixels no matter what the world looks like behind it. (Sampling the fps
+# line instead, as an earlier version did, read a bright sky as "already on".) Keep whichever
+# capture has the overlay rather than assuming the first press turned it on.
 overlay_on() { python3 -c "
 import sys
 from PIL import Image
-im = Image.open(sys.argv[1]).convert('L').crop((0, 92, 200, 108))
-sys.exit(0 if max(im.getdata()) > 150 else 1)" "$1" 2>/dev/null; }
+d = list(Image.open(sys.argv[1]).convert('L').crop((0, 296, 430, 334)).getdata())
+sys.exit(0 if sum(p < 60 for p in d) > 150 and sum(p > 180 for p in d) > 150 else 1)" "$1" 2>/dev/null; }
 
-shot="$OUT/mc_$(date +%H%M%S).png"
+shot="$OUT/mc_$(date +%H%M%S)${label:+_$label}.png"
 echo "==> F6 overlay"
-vncdo -s "$VNC" key f6 >/dev/null 2>&1
-sleep 6
-vncdo -s "$VNC" capture "$shot" >/dev/null 2>&1
-if ! overlay_on "$shot"; then
+before=$(env_line)
+for attempt in 1 2 3; do
+    vncdo -s "$VNC" capture "$shot" >/dev/null 2>&1
+    overlay_on "$shot" && break
     vncdo -s "$VNC" key f6 >/dev/null 2>&1
     sleep 6
-    vncdo -s "$VNC" capture "$shot" >/dev/null 2>&1
-fi
+done
+overlay_on "$shot" || echo "    WARNING: no overlay in the capture; fps is not readable"
+after=$(env_line)
 echo "==> $shot"
+echo "    guest submits: $rate     <- the number to compare between builds"
 echo "    fps is the top-left line of the overlay; read it off the capture"
-printf '    env: '; env_line
+echo "    backend: $(backend_line)   (Vulkan expected; OpenGL means it fell back to zink)"
+echo "    env: $after"
+# What has to hold steady is the clock. thermal_pwrlevel rises under a pin by design (the governor
+# wants to step down and min_freq forbids it), so it is not a drift signal here.
+b=$(echo "$before" | grep -oE 'clk=[0-9]+MHz'); a=$(echo "$after" | grep -oE 'clk=[0-9]+MHz')
+[ "$b" = "$a" ] || echo "    *** UNSTABLE: clock drifted from [$b] to [$a] while measuring -- discard this run"
 
 # The host's own view, for attributing a change to the transport rather than the game.
 $A 'su -c "logcat -d -b all | grep SUBMITPROF | tail -1"' 2>/dev/null | tr -d '\r' \
