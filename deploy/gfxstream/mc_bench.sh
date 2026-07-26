@@ -38,6 +38,7 @@ while [ $# -gt 0 ]; do
 done
 
 kgsl_read() { $A "su -c 'cat $KGSL/$1'" 2>/dev/null | tr -d '\r'; }
+cat_temp() { $A "su -c 'cat /sys/class/thermal/thermal_zone0/temp'" 2>/dev/null | tr -d '\r'; }
 kgsl_write() { $A "su -c 'echo $2 > $KGSL/$1'" 2>/dev/null; }
 
 # Wait out the thermal cap before pinning: with thermal_pwrlevel non-zero the pin lands on a
@@ -49,16 +50,20 @@ cool_for_pin() {
     local want_khz=$(( gpu_mhz * 1000000 ))
     kgsl_write devfreq/min_freq 160000000
     kgsl_write devfreq/max_freq 1100000000
-    for i in $(seq 1 40); do
-        local thr max
+    # Wait for the temperature too, not just for the cap to lift. A pin taken at 70C holds for
+    # about a minute and then the hardware lowers max_freq underneath it -- which is exactly how a
+    # run labelled 734MHz ended up measured at 660.
+    for i in $(seq 1 60); do
+        local thr max temp
         thr=$(kgsl_read thermal_pwrlevel); max=$(kgsl_read devfreq/max_freq)
-        if [ "${thr:-9}" = 0 ] && [ "${max:-0}" -ge "$want_khz" ]; then
-            echo "    thermal clear after $((i*10))s (max_freq=$max)"
+        temp=$(cat_temp)
+        if [ "${thr:-9}" = 0 ] && [ "${max:-0}" -ge "$want_khz" ] && [ "${temp:-99999}" -lt 50000 ]; then
+            echo "    cool after $((i*10))s (max_freq=$max temp=$((temp/1000))C)"
             return 0
         fi
         sleep 10
     done
-    echo "    WARNING: still throttled (thermal_pwrlevel=${thr:-?} max_freq=${max:-?}); ${gpu_mhz}MHz is not reachable"
+    echo "    WARNING: still hot after 600s (thermal_pwrlevel=${thr:-?} max_freq=${max:-?} temp=${temp:-?}); ${gpu_mhz}MHz will not hold"
     return 1
 }
 
@@ -172,10 +177,17 @@ echo "    guest submits: $rate     <- the number to compare between builds"
 echo "    fps is the top-left line of the overlay; read it off the capture"
 echo "    backend: $(backend_line)   (Vulkan expected; OpenGL means it fell back to zink)"
 echo "    env: $after"
-# What has to hold steady is the clock. thermal_pwrlevel rises under a pin by design (the governor
-# wants to step down and min_freq forbids it), so it is not a drift signal here.
-b=$(echo "$before" | grep -oE 'clk=[0-9]+MHz'); a=$(echo "$after" | grep -oE 'clk=[0-9]+MHz')
-[ "$b" = "$a" ] || echo "    *** UNSTABLE: clock drifted from [$b] to [$a] while measuring -- discard this run"
+# Check both samples against the frequency that was ASKED FOR, not against each other: thermal
+# throttling can lower the clock before the first sample, and then both agree on the wrong value
+# and the run looks stable. (thermal_pwrlevel rising under a pin is expected -- the governor wants
+# to step down and min_freq forbids it -- so that is not a drift signal.)
+if [ "$gpu_mhz" != 0 ]; then
+    for phase in "before:$before" "after:$after"; do
+        got=$(echo "${phase#*:}" | grep -oE 'clk=[0-9]+MHz' | tr -dc 0-9)
+        [ "$got" = "$gpu_mhz" ] \
+            || echo "    *** INVALID (${phase%%:*}): clock was ${got}MHz, asked for ${gpu_mhz}MHz -- discard this run"
+    done
+fi
 
 # The host's own view, for attributing a change to the transport rather than the game.
 $A 'su -c "logcat -d -b all | grep SUBMITPROF | tail -1"' 2>/dev/null | tr -d '\r' \
