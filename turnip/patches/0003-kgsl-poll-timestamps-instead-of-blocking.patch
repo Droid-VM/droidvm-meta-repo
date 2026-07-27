@@ -1,3 +1,10 @@
+Measured (fixed scene, pinned clocks, two interleaved rounds, isolated against
+a base carrying 0001+0002 only -- a 288-byte binary delta):
+
+              fps      gpu_busy   opcodes/s   vkWaitSemaphores
+  base        93 / 93   35% / 33%   430k       240-259ms/s, avg 2.6-2.8ms
+  base+this  125 /126   62% / 48%   560k       4-6ms/s,     avg 5-6us
+
 diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
 index c01160ea..eab1fa4b 100644
 --- a/src/freedreno/vulkan/tu_knl_kgsl.cc
