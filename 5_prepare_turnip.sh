@@ -14,9 +14,17 @@
 # -static-libstdc++ (needs NO libc++_shared.so). Self-contained (pulls its own NDK r29 +
 # mesa fork), so it does NOT touch the crosvm soong tree.
 #
-# This step ONLY clones + builds. Cached: reuses turnip/libvulkan_freedreno.so if present;
-# TURNIP_REBUILD=1 forces a fresh build. Build deps: git meson ninja patchelf unzip curl pip
-# flex bison zip glslangValidator python3 ccache.
+# Cached: reuses turnip/libvulkan_freedreno.so if present.
+#
+#   TURNIP_REBUILD=1   rebuild from the tree that is already there, keeping it. Cheap (ninja is
+#                      incremental) and, more importantly, non-destructive: the tree is where
+#                      local work on the driver lives, so a rebuild must never throw it away.
+#   TURNIP_CLEAN=1     re-clone everything from scratch. This DELETES turnip/adreno-tools-drivers,
+#                      including any edits made directly in the cloned mesa source. Anything worth
+#                      keeping belongs in turnip/patches/ first.
+#
+# Build deps: git meson ninja patchelf unzip curl pip flex bison zip glslangValidator python3
+# ccache.
 set -e
 cd "$(dirname "$0")"
 
@@ -24,38 +32,62 @@ ATD_REPO="${ATD_REPO:-https://github.com/StevenMXZ/Adreno-Tools-Drivers.git}"
 ATD_DIR=turnip/adreno-tools-drivers
 SO=turnip/libvulkan_freedreno.so
 
-if [ -n "${TURNIP_REBUILD:-}" ] || [ ! -s "$SO" ]; then
-    echo ">>> building turnip from $ATD_REPO (NDK r29 + mesa-tu8 gen8, ~4 min)"
+MESA_DIR="$ATD_DIR/turnip_workdir/mesa"
+NDK="$PWD/$ATD_DIR/turnip_workdir/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+# Local fixes on top of the upstream fork. They go on after build_turnip.sh has cloned mesa and
+# made its own source edits, which is why they cannot be applied before it runs.
+#
+# Re-applied on every build, and tolerant of already being applied, so that rebuilding an existing
+# tree is idempotent. They exist as patches at all because editing the cloned source directly
+# reaches nothing: the cached-.so path never rebuilds, and the old TURNIP_REBUILD=1 deleted the
+# tree before cloning. Three fixes lived in that tree for a week without ever entering the shipped
+# driver, and it only surfaced because the binary still had a string one of them removes.
+apply_patches() {
+    ls turnip/patches/*.patch >/dev/null 2>&1 || return 0
+    local p
+    for p in "$PWD"/turnip/patches/*.patch; do
+        if git -C "$MESA_DIR" apply --reverse --check "$p" 2>/dev/null; then
+            echo ">>> $(basename "$p") already applied"
+        elif git -C "$MESA_DIR" apply --check "$p" 2>/dev/null; then
+            echo ">>> applying $(basename "$p")"
+            git -C "$MESA_DIR" apply "$p"
+        else
+            echo "error: $(basename "$p") neither applies nor is already applied" >&2
+            exit 1
+        fi
+    done
+}
+
+# meson/ninja are already configured in the tree; this is seconds, not minutes.
+rebuild_in_place() {
+    ( cd "$MESA_DIR" && PATH="$PWD/../bin:$NDK:$PATH" ninja -C build-android-aarch64 install ) \
+        || { echo "error: rebuild failed" >&2; exit 1; }
+    cp /tmp/turnip-gen8/lib/libvulkan_freedreno.so "$SO"
+}
+
+if [ -n "${TURNIP_CLEAN:-}" ]; then
+    echo ">>> TURNIP_CLEAN: removing $ATD_DIR and re-cloning (local source edits will be lost)"
     rm -rf "$ATD_DIR"
-    git clone --depth 1 "$ATD_REPO" "$ATD_DIR"
+fi
+
+if [ ! -d "$MESA_DIR/build-android-aarch64" ]; then
+    echo ">>> building turnip from $ATD_REPO (NDK r29 + mesa-tu8 gen8, ~4 min)"
+    [ -d "$ATD_DIR" ] || git clone --depth 1 "$ATD_REPO" "$ATD_DIR"
     ( cd "$ATD_DIR" && bash build_turnip.sh )
     zip=$(ls -t "$ATD_DIR"/turnip_workdir/a8xx-gen8-V*.zip 2>/dev/null | head -1)
     [ -n "$zip" ] || { echo "error: turnip build produced no a8xx zip" >&2; exit 1; }
     unzip -o -j "$zip" libvulkan_freedreno.so -d turnip/
-
-    # Local fixes on top of the upstream fork, applied after build_turnip.sh has cloned mesa and
-    # done its own source edits -- which is why they cannot be applied before it runs.
-    #
-    # These have to be re-applied and rebuilt every time, and the rebuild is incremental (the build
-    # directory already exists), so it costs seconds. Skipping it is how three of them ended up
-    # living in the working tree for a week without ever reaching the shipped driver: the cached-.so
-    # branch below never rebuilds, and TURNIP_REBUILD=1 wipes the tree. The KHR_display string is
-    # still present in the shipped binary and absent from a patched one, which is how that was
-    # eventually noticed.
-    if ls turnip/patches/*.patch >/dev/null 2>&1; then
-        mesa_dir="$ATD_DIR/turnip_workdir/mesa"
-        for p in "$PWD"/turnip/patches/*.patch; do
-            echo ">>> applying $(basename "$p")"
-            git -C "$mesa_dir" apply "$p" || { echo "error: $p did not apply" >&2; exit 1; }
-        done
-        ndk="$PWD/$ATD_DIR/turnip_workdir/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        ( cd "$mesa_dir" && PATH="$PWD/../bin:$ndk:$PATH" ninja -C build-android-aarch64 install ) \
-            || { echo "error: patched rebuild failed" >&2; exit 1; }
-        cp /tmp/turnip-gen8/lib/libvulkan_freedreno.so "$SO"
-    fi
-
+    apply_patches
+    rebuild_in_place
+    echo ">>> built turnip md5=$(md5sum "$SO" | cut -d' ' -f1)"
+elif [ -n "${TURNIP_REBUILD:-}" ] || [ ! -s "$SO" ]; then
+    echo ">>> rebuilding turnip in place from $MESA_DIR (tree kept)"
+    apply_patches
+    rebuild_in_place
     echo ">>> built turnip md5=$(md5sum "$SO" | cut -d' ' -f1)"
 else
-    echo ">>> reusing cached $SO (md5=$(md5sum "$SO" | cut -d' ' -f1); TURNIP_REBUILD=1 to rebuild)"
+    echo ">>> reusing cached $SO (md5=$(md5sum "$SO" | cut -d' ' -f1))"
+    echo ">>>   TURNIP_REBUILD=1 rebuilds in place; TURNIP_CLEAN=1 re-clones from scratch"
 fi
 echo "Done. turnip at $SO — staged into manual-build by 6_build_apk_prepare.sh."
