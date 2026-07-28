@@ -17,7 +17,9 @@
 # Build outputs
 /crosvm_out/
 /crosvm_out_*/
-mesa-guest-aarch64.tar.gz
+mesa-guest-*.tar.gz
+/mesa-gfxstream/
+/mesa-kgsl/
 # turnip host ICD: built/cached blob + build checkout (5_prepare_turnip.sh); README tracked
 /turnip/*.so
 /turnip/turnip_probe
