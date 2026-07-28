@@ -7,8 +7,8 @@
 # ddk-min images provide the per-KMI kernel headers.
 set -e
 cd "$(dirname "$0")"
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
+source ./lib_branch.sh
 
-[ -d gunyah_host_mod ] || git clone -b "$BRANCH" https://github.com/Droid-VM/gunyah_host_mod.git
+clone_at gunyah_host_mod https://github.com/Droid-VM/gunyah_host_mod.git
 cd gunyah_host_mod
 ./build.sh arm64
