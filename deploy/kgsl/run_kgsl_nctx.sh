@@ -3,7 +3,15 @@
 # turnip over vdrm/virtio, and virglrenderer's DRM native context translates the msm protocol
 # to KGSL ioctls on the host. No Vulkan command stream is remoted.
 #
-# Same direct-kernel boot / disk / net / vnc as the gfxstream launchers; what differs:
+# Boots through EDK2 rather than the Linux boot protocol: the firmware is the payload, EDK2
+# runs UEFI -> the guest's own GRUB from the qcow ESP -> the guest's own kernel and initramfs.
+# That is the point -- with a direct kernel boot the initramfs comes from the phone's copy, so
+# every guest-module change needs initrd surgery on the host. Booting the guest's own /boot
+# makes `update-initramfs` inside the guest sufficient. It also exercises EDK2 + GPU together.
+# --protected-vm-without-firmware is required: --protected-vm routes through pvmfw, which the
+# Qualcomm RM's low-memory donation breaks (MEM_START 0x80000000 does not line up).
+#
+# Same disk / net / vnc as the gfxstream launchers; what differs:
 #   --gpu backend=virglrenderer      rutabaga runs virglrenderer, not gfxstream
 #   context-types=virgl2:drm         BOTH. With plain "drm" the virgl renderer is never
 #                                    initialised (NO_VIRGL), and the first CREATE_2D comes back
@@ -14,9 +22,7 @@
 set -u
 DIR=/data/local/tmp/crosvm_kgsl
 QCOW=/data/media/0/DroidVM/ubuntu-resolute-cloud-arm64-20260615_0742.qcow2
-BOOT=/data/data/cn.classfun.droidvm/cache/boot/526795fd-0bbf-43d6-976e-287b43f75a80
-KERNEL="$BOOT/kernel"
-INITRD="$BOOT/initrd"
+EDK2=/data/data/cn.classfun.droidvm/usr/share/droidvm/edk2-gunyah.fd
 TAP=vm526795fd-0
 MAC=02:ba:73:6e:7d:90
 BR=br-wifi
@@ -64,7 +70,5 @@ exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debu
   --net "tap-name=$TAP,mac=$MAC" \
   --gpu "backend=virglrenderer,context-types=virgl2:drm,egl=true,gles=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296" \
   --vnc-server "host=0.0.0.0,port=5900,input=tablet" \
-  --initrd "$INITRD" \
-  --params "root=/dev/vda2 rw console=ttyS0 loglevel=4" \
   --serial "type=file,hardware=serial,num=1,earlycon,console,path=$DIR/serial.log,input=$DIR/con.in" \
-  "$KERNEL" > "$DIR/crosvm.log" 2>&1
+  "$EDK2" > "$DIR/crosvm.log" 2>&1
