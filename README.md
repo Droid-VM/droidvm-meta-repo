@@ -63,14 +63,17 @@ two worktrees, into two prefixes. `mesa-variants.sh` holds the whole
 configuration, and both the native and the cross build read the meson options
 from it:
 
-| variant | branch | prefix | tarball |
+| variant | branch | package | Vulkan ICD |
 |---|---|---|---|
-| gfxstream | `wip/3d-accel-gfxstream` (26.0.3) | `/usr/local` | `mesa-guest-gfxstream-aarch64.tar.gz` |
-| kgsl | `wip/3d-accel-kgsl` (26.3.0-devel) | `/opt/mesa-kgsl` | `mesa-guest-kgsl-aarch64.tar.gz` |
+| gfxstream | `wip/3d-accel-gfxstream` (26.0.3) | `mesa-guest-gfxstream_<ver>_arm64.deb` | `gfxstream_vk_icd.aarch64.json` |
+| kgsl | `wip/3d-accel-kgsl` (26.3.0-devel) | `mesa-guest-kgsl_<ver>_arm64.deb` | `freedreno_icd.aarch64.json` |
 
-The prefixes must differ: both provide libgallium, libEGL and a Vulkan ICD
-manifest, and the desktop composites through gallium rather than through the
-Vulkan ICD, so one shared prefix means whichever was unpacked last wins — a
+Both install to `/usr/local`, so a guest holds one at a time
+(`sudo apt install ./mesa-guest-<variant>_<ver>_arm64.deb`). That is why these
+are packages rather than the tarball they used to be: the two `Conflicts` with
+each other through a shared `mesa-guest` virtual name, so dpkg refuses the
+second install. Both ship libgallium, the desktop composites through gallium
+rather than through the Vulkan ICD, and an unnoticed overwrite shows up as a
 fully black VNC scanout with no error anywhere. `MESA_VARIANT` builds just one;
 on the trunk both are built.
 

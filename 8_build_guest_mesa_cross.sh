@@ -4,11 +4,11 @@
 # 8_build_guest_mesa.sh (which needs an arm64 box or `docker run --platform linux/arm64`
 # + qemu binfmt).
 #
-# Output, per variant (identical layout to the native build; see mesa-variants.sh):
-#   gfxstream -> mesa-guest-gfxstream-aarch64.tar.gz (prefix /usr/local)
-#   kgsl      -> mesa-guest-kgsl-aarch64.tar.gz      (prefix /opt/mesa-kgsl)
-# Unpacked in the guest with `tar -xzf ... -C / && ldconfig` or by the
-# droidvm-guest-additions installer (DROIDVM_MESA_URL).
+# Output, per variant: a .deb (see mesa-variants.sh for why it is a package and not a tarball).
+#   gfxstream -> mesa-guest-gfxstream_<ver>_arm64.deb
+#   kgsl      -> mesa-guest-kgsl_<ver>_arm64.deb
+# Both install to /usr/local and Conflict with each other, so a guest holds one at a time:
+#   sudo apt install ./mesa-guest-<variant>_<ver>_arm64.deb
 #
 # Needs: docker. Override the resolute base if the tag differs:
 #   BASE=ubuntu:devel bash 8_build_guest_mesa_cross.sh
@@ -37,6 +37,5 @@ for v in $(mesa_variants); do
         -v "$PWD/$src:/work/mesa" \
         -v "$PWD/mesa-cross:/work/cross" \
         -v "$PWD:/work/out" \
-        "$IMG" bash /work/cross/build-in-container.sh "$v"
-    echo "==> wrote $PWD/$(mesa_variant_tarball "$v")"
+        "$IMG" bash /work/cross/build-in-container.sh "$v" "$(mesa_pkg_version "$src")"
 done

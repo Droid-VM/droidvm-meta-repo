@@ -58,7 +58,8 @@ host-visible blob 的 accept 一律 `VmAccept::Sync`(host 端經 transport 驅�
 guest 端:
 1. ICD 指向 gfxstream:`VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json`
 2. guest ICD 來自 `mesa` 的 `wip/3d-accel-gfxstream` 分支(26.0.3+patches),
-   `bash 8_build_guest_mesa_cross.sh` 產出 `mesa-guest-gfxstream-aarch64.tar.gz`,prefix `/usr/local`
+   `bash 8_build_guest_mesa_cross.sh` 產出 `mesa-guest-gfxstream_<ver>_arm64.deb`,
+   `sudo apt install ./mesa-guest-gfxstream_<ver>_arm64.deb`(prefix `/usr/local`)
 3. **guest ICD 與 host decoder 是同一份 codebase,版本必須一致**。混到別的版本時
    症狀是 VNC 全黑(mutter 是經 gallium 合成,不是經 Vulkan ICD),而且 git bisect 查不到。
 
@@ -78,24 +79,24 @@ guest 端:
 guest 端:
 1. 同一份 DKMS(不需要同事的 kernel fork;他那條分支的 8 個 commit 裡只有 2 個是新的,
    arena offset 那個已被我們的 `pool_offset` wire 取代,display source release 尚未採用)
-2. ICD 指向 freedreno:`VK_DRIVER_FILES=/opt/mesa-kgsl/share/vulkan/icd.d/freedreno_icd.aarch64.json`
+2. ICD 指向 freedreno:`VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/freedreno_icd.aarch64.json`
    +(zink)`MESA_LOADER_DRIVER_OVERRIDE=zink`
 3. kgsl mesa 來自 `mesa` 的 `wip/3d-accel-kgsl` 分支(26.3.0-devel,含 tu/virtio 工作),
-   `MESA_VARIANT=kgsl bash 8_build_guest_mesa_cross.sh` → `mesa-guest-kgsl-aarch64.tar.gz`,
-   prefix **`/opt/mesa-kgsl`**(不是 `/usr/local`)
+   `MESA_VARIANT=kgsl bash 8_build_guest_mesa_cross.sh` → `mesa-guest-kgsl_<ver>_arm64.deb`,
+   `sudo apt install ./mesa-guest-kgsl_<ver>_arm64.deb`(prefix `/usr/local`)
 
 驗收階梯:VNC 有畫面 → `vulkaninfo` 顯示 driverName=turnip(經 vdrm)→ vkcube → vkmark → Minecraft。
 
 ## 3. 兩路線切換
 
-啟動參數已分開(`crosvm_gfx` vs `crosvm_kgsl` 兩目錄兩 launcher)。guest 端裝**兩份 mesa**,
-分別在 `/usr/local` 和 `/opt/mesa-kgsl`,切換只要改 `/etc/environment` 的
-`VK_DRIVER_FILES`(kgsl 還要加 `LD_LIBRARY_PATH=/opt/mesa-kgsl/lib/aarch64-linux-gnu`),
-改完 `systemctl restart gdm` 生效。
+啟動參數已分開(`crosvm_gfx` vs `crosvm_kgsl` 兩目錄兩 launcher)。guest 端**一台 VM 裝一份 mesa**:
+兩個 deb 都裝在 `/usr/local`,並透過共用的 `mesa-guest` 虛擬名稱互相 `Conflicts`,
+所以同一台 VM 裝第二個時 dpkg 會直接拒絕。切換 = `apt remove` 舊的、裝新的,再改
+`/etc/environment` 的 `VK_DRIVER_FILES`,`systemctl restart gdm` 生效。
 
-**兩份 mesa 一定要不同 prefix**:兩邊都提供 libgallium / libEGL / ICD manifest,
-而桌面合成走的是 gallium 不是 Vulkan ICD,同一個 prefix 會讓桌面吃到後解壓的那一份 libgallium,
-症狀是全黑的 VNC scanout 且沒有任何錯誤訊息。
+**為什麼要靠 dpkg 擋而不是直接解 tarball**:兩邊都提供 libgallium / libEGL / ICD manifest,
+而桌面合成走的是 gallium 不是 Vulkan ICD。直接解壓會讓桌面吃到後解壓的那一份 libgallium,
+症狀是全黑的 VNC scanout 且沒有任何錯誤訊息——這個坑已經踩過一次,而且 git bisect 查不到。
 
 ## 4. 已知缺口 / 待辦
 

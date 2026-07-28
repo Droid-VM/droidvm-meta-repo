@@ -18,6 +18,7 @@
 /crosvm_out/
 /crosvm_out_*/
 mesa-guest-*.tar.gz
+mesa-guest-*.deb
 /mesa-gfxstream/
 /mesa-kgsl/
 # turnip host ICD: built/cached blob + build checkout (5_prepare_turnip.sh); README tracked

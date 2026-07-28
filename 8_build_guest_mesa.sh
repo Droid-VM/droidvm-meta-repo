@@ -1,10 +1,9 @@
 #!/bin/bash
-# Build the guest mesa for aarch64 guests and pack it per variant:
-#   gfxstream -> mesa-guest-gfxstream-aarch64.tar.gz (prefix /usr/local)
-#   kgsl      -> mesa-guest-kgsl-aarch64.tar.gz      (prefix /opt/mesa-kgsl)
-# Unpack with `tar -xzf ... -C / && ldconfig` inside the guest, or let the
-# droidvm-guest-additions installer do it. See mesa-variants.sh for why the two
-# prefixes must differ.
+# Build the guest mesa for aarch64 guests and pack it per variant as a .deb:
+#   gfxstream -> mesa-guest-gfxstream_<ver>_arm64.deb
+#   kgsl      -> mesa-guest-kgsl_<ver>_arm64.deb
+# Both install to /usr/local and Conflict with each other, so a guest holds one
+# at a time. See mesa-variants.sh for why this is a package and not a tarball.
 #
 # The build is a NATIVE aarch64 build (mirrors the known-good configuration
 # from build-guest/meson-info). Run it on aarch64: inside the guest VM, an
@@ -25,19 +24,12 @@ fi
 
 clone_at mesa https://github.com/Droid-VM/mesa.git
 
+# The container script is the single implementation of "configure, build, package"; the native
+# path differs only in having no cross file, so reuse it rather than keeping a second copy that
+# drifts. /work/out is this repo, /work/mesa the variant worktree.
 for v in $(mesa_variants); do
     src=$(mesa_worktree "$v")
-    prefix=$(mesa_variant_prefix "$v")
-    tarball=$(mesa_variant_tarball "$v")
-    echo "==> building guest mesa variant '$v' from $src (prefix $prefix)"
-    (
-        cd "$src"
-        meson setup build-guest --prefix "$prefix" \
-            "${MESA_COMMON_MESON[@]}" $(mesa_variant_meson "$v")
-        ninja -C build-guest
-        rm -rf install-guest
-        DESTDIR="$PWD/install-guest" ninja -C build-guest install
-        tar -czf "../$tarball" -C install-guest .
-    )
-    echo "wrote $PWD/$tarball"
+    echo "==> building guest mesa variant '$v' from $src (native aarch64)"
+    MESA_NATIVE=1 WORK_OUT="$PWD" WORK_MESA="$PWD/$src" \
+        bash mesa-cross/build-in-container.sh "$v" "$(mesa_pkg_version "$src")"
 done
