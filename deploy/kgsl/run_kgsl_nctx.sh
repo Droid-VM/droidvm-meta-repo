@@ -62,7 +62,7 @@ exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debu
   --smbios "processor-version=Qualcomm Snapdragon 8 Elite" \
   --block "$QCOW,lock=false" \
   --net "tap-name=$TAP,mac=$MAC" \
-  --gpu "backend=virglrenderer,context-types=virgl2:drm,egl=true,gles=true,external-blob=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296" \
+  --gpu "backend=virglrenderer,context-types=virgl2:drm,egl=true,gles=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296" \
   --vnc-server "host=0.0.0.0,port=5900,input=tablet" \
   --initrd "$INITRD" \
   --params "root=/dev/vda2 rw console=ttyS0 loglevel=4" \
