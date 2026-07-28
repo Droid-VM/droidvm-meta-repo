@@ -38,9 +38,12 @@ fi
 $A 'su -c "ip -br link | grep br-wifi"' 2>/dev/null | tr -d '\r'
 
 step "binaries (push + md5 verify -- a hard reset zeroes recently written files)"
-for f in crosvm libgfxstream_backend.so; do
+# libvirglrenderer.so is DT_NEEDED by the crosvm binary, so a stale one on the phone is not a
+# kgsl-only problem: crosvm fails at exec and ALL FIVE configurations die. Verify it alongside
+# the other two even when the run under test is gfxstream.
+for f in crosvm libgfxstream_backend.so libvirglrenderer.so; do
     want=$(md5sum "$REPO/crosvm_out/$f" | awk '{print $1}')
-    for dir in /data/local/tmp/crosvm_gfx /data/local/tmp/crosvm_out; do
+    for dir in /data/local/tmp/crosvm_gfx /data/local/tmp/crosvm_kgsl /data/local/tmp/crosvm_out; do
         got=$($A "su -c 'md5sum $dir/$f 2>/dev/null'" 2>/dev/null | tr -d '\r' | awk '{print $1}')
         if [ "$got" != "$want" ]; then
             adb -s $DEV push "$REPO/crosvm_out/$f" "$dir/" >/dev/null 2>&1

@@ -30,6 +30,9 @@ fi
 ip link set "$TAP" master "$BR"
 ip link set "$TAP" up
 
+# The pool is mlock'd, and crosvm now refuses to SHARE a pool it could not pin.
+ulimit -l unlimited
+
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
 
