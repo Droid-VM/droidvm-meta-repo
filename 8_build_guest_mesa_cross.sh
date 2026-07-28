@@ -24,7 +24,11 @@ clone_at mesa https://github.com/Droid-VM/mesa.git
 
 # Build the cross env image once (cached afterwards).
 echo "==> building cross env image ($IMG, base ${BASE:-ubuntu:26.04})"
-docker build -t "$IMG" --build-arg BASE="${BASE:-ubuntu:26.04}" \
+# --network=host: BuildKit runs RUN steps in its own network namespace, where DNS resolution
+# of archive.ubuntu.com/ports.ubuntu.com intermittently fails on this host even though a plain
+# `docker run` resolves them fine. The symptom is a wall of apt "Temporary failure resolving"
+# followed by "Unable to fetch some archives", which reads like a mirror outage.
+docker build --network=host -t "$IMG" --build-arg BASE="${BASE:-ubuntu:26.04}" \
     -f mesa-cross/Dockerfile.mesa-cross mesa-cross
 
 for v in $(mesa_variants); do
