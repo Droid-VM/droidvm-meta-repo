@@ -228,7 +228,14 @@ overlay_on "$shot" || echo "    WARNING: no overlay in the capture; fps is not r
 after=$(env_line)
 echo "==> $shot"
 echo "    guest submits: $rate     <- the number to compare between builds"
-echo "    fps is the top-left line of the overlay; read it off the capture"
+# Read the number rather than leaving it to the eye. mc_read_fps.py also fails the run when the
+# shell is in the Activities overview -- the game keeps rendering as a thumbnail there, so the
+# capture looks fine and the fps is whatever was last drawn at full size.
+fps_out=$(python3 "$(dirname "$0")/mc_read_fps.py" "$shot" 2>&1)
+case "$fps_out" in
+    fps=*) echo "    ${fps_out#fps=} fps" ;;
+    *)     echo "    fps unreadable: $fps_out" ;;
+esac
 echo "    backend: $(backend_line)   (Vulkan expected; OpenGL means it fell back to zink)"
 echo "    env: $after"
 # Check both samples against the frequency that was ASKED FOR, not against each other: thermal
