@@ -36,6 +36,12 @@ BG_LO, BG_HI, BG_NEUTRAL = 20, 60, 8
 OVERVIEW_FRACTION = 0.20    # measured: 48% in the overview, 0.5% with the window focused
 LIGHT = 560                 # sum(rgb) above this is overlay text, below 380 is its backing plate
 GLYPH_H = 9
+# Largest gap still inside the number. Glyphs sit on a fixed 8px pitch, so most digits leave a 2px
+# gap -- but '1' is only 3px of ink in its cell and pushes the gap to 4 (5 between two of them),
+# while the space before "fps" is 8 or more. A threshold of 3 read "130 fps" as the single digit
+# "1"; the templates are exact-pixel and therefore scale-locked already, so a pitch-derived
+# constant is no less portable than the rest of this file.
+DIGIT_GAP = 6
 
 
 def desktop_state(im):
@@ -88,7 +94,7 @@ def digit_runs(px, y):
     for (a, b) in runs(px, y):
         if b - a < 2:                 # the 1px sliver at x=0 is the plate edge, not a glyph
             continue
-        if prev is not None and a - prev > 3:
+        if prev is not None and a - prev > DIGIT_GAP:
             break
         out.append((a, b))
         prev = b
