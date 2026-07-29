@@ -3,12 +3,17 @@
 # sub-allocates BLOB_MEM_GUEST from it with drm_buddy, handing the host dma-bufs through
 # udmabuf. crosvm ignores vram-limit here -- the guest pool is the cap.
 # Expect: guest dmesg has_create_guest_handle=1 plus the drm_buddy pool line.
+#
+# Boots through EDK2 rather than the Linux boot protocol, because this configuration is the one
+# that exercises the guest virtio-gpu driver hardest. A direct kernel boot loads virtio-gpu from
+# the PHONE's initrd, so a module rebuilt and dkms-installed inside the guest is simply not the
+# one running -- silently, with the old driver reporting the same pool lines. Verified the hard
+# way: a run that looked correct was executing the previous module, srcversion and all. Booting
+# the guest's own /boot makes `dkms install` + `update-initramfs -k $(uname -r)` sufficient.
 set -u
 DIR=/data/local/tmp/crosvm_gfx
 QCOW=/data/media/0/DroidVM/ubuntu-resolute-cloud-arm64-20260615_0742.qcow2
-BOOT=/data/data/cn.classfun.droidvm/cache/boot/526795fd-0bbf-43d6-976e-287b43f75a80
-KERNEL="$BOOT/kernel"
-INITRD="$BOOT/initrd"
+EDK2=/data/data/cn.classfun.droidvm/usr/share/droidvm/edk2-gunyah.fd
 TAP=vm526795fd-0
 MAC=02:ba:73:6e:7d:90
 BR=br-wifi
@@ -55,7 +60,5 @@ exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debu
   --net "tap-name=$TAP,mac=$MAC" \
   --gpu "backend=gfxstream,context-types=gfxstream-vulkan,egl=true,gles=true,external-blob=true,vulkan=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296,udmabuf=true,gunyah-pvm=true" \
   --vnc-server "host=0.0.0.0,port=5900,input=tablet" \
-  --initrd "$INITRD" \
-  --params "root=/dev/vda2 rw console=ttyS0 loglevel=4" \
   --serial "type=file,hardware=serial,num=1,earlycon,console,path=$DIR/serial.log,input=$DIR/con.in" \
-  "$KERNEL" > "$DIR/crosvm.log" 2>&1
+  "$EDK2" > "$DIR/crosvm.log" 2>&1
