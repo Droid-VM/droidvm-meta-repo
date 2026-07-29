@@ -16,18 +16,18 @@
 #   context-types=virgl2:drm         BOTH. With plain "drm" the virgl renderer is never
 #                                    initialised (NO_VIRGL), and the first CREATE_2D comes back
 #                                    ComponentError(22) -- a black screen with no other symptom.
-#   --pre-alloc kgsl-mb=8,gfx-guest-mb=1024
+#   --pre-alloc drm-host-mb=8,gpu-guest-mb=1024
 #                                    Two pools, and both are pre-alloc -- the point of this
 #                                    route is that nothing is SHARE'd at runtime.
-#                                      gfx-guest-mb  guest-owned drm_buddy pool. Every BO comes
+#                                      gpu-guest-mb  guest-owned drm_buddy pool. Every BO comes
 #                                        from here now. The gfx- prefix is a misnomer: the
 #                                        region is a SHARE'd range plus the gpu_guest_reserved
 #                                        DT node, with nothing gfxstream-specific about it.
-#                                      kgsl-mb       host-owned pool, now only large enough for
+#                                      drm-host-mb   host-owned pool, now only large enough for
 #                                        the msm shmem rings (16 KiB per context -- 12 contexts
 #                                        with a desktop and Minecraft, so 192 KiB against an
 #                                        8 MiB pool whose first 2 MiB is the RM base guard).
-#                                    Dropping kgsl-mb does NOT save memory worth having: the
+#                                    Dropping drm-host-mb does NOT save memory worth having: the
 #                                    rings fall back to a runtime GUNYAH-SHARE-BLOB each, which
 #                                    is exactly the per-allocation RM round trip this route
 #                                    exists to avoid. Measured: 4 shares without it, 0 with.
@@ -58,7 +58,12 @@ fi
 # Attach every time, not just when the tap is created. The app rebuilds br-wifi on each start,
 # which orphans an existing tap: the device stays present and up, so an "is there a tap" check
 # passes while nothing is enslaved to the bridge and the guest has no path to the network.
-ip link set "$TAP" master "$BR"
+if ! ip link set "$TAP" master "$BR" 2>/dev/null; then
+    # br-wifi belongs to the DroidVM app; with the app not running it does not exist and this
+    # silently leaves the tap orphaned. The VM then boots normally with no network at all --
+    # console works, GPU works, nothing anywhere says why ssh times out. Say it here instead.
+    echo "WARNING: could not attach $TAP to $BR (does $BR exist? start the DroidVM app) -- the VM will boot with no network"
+fi
 ip link set "$TAP" up
 
 # The pool is mlock'd, and crosvm now refuses to SHARE a pool it could not pin -- an unpinned
@@ -94,7 +99,7 @@ exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debu
   --protected-vm-without-firmware \
   --no-balloon --disable-sandbox --hugepages \
   --prepare-lend-mthp-mode chunked \
-  --pre-alloc "kgsl-mb=8,gfx-guest-mb=1024" \
+  --pre-alloc "drm-host-mb=8,gpu-guest-mb=1024" \
   --swiotlb 128 \
   --socket "$DIR/ubuntu.sock" \
   --smbios "processor-version=Qualcomm Snapdragon 8 Elite" \
