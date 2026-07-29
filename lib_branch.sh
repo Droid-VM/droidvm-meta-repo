@@ -3,7 +3,7 @@
 #
 # Every component repo used to be checked out at "whatever branch THIS meta repo is
 # on". That breaks the moment the meta repo carries a variant branch a component does
-# not have: `git clone -b wip/3d-accel-kgsl` just fails with "couldn't find remote ref".
+# not have: `git clone -b wip/3d-accel-drm2kgsl` just fails with "couldn't find remote ref".
 #
 # The development line lives on ONE trunk in every repo (wip/3d-accel). Variants exist
 # only where the content genuinely differs -- this meta repo (launchers, plans, which

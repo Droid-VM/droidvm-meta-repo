@@ -6,13 +6,13 @@
 #
 # Output, per variant: a .deb (see mesa-variants.sh for why it is a package and not a tarball).
 #   gfxstream -> mesa-guest-gfxstream_<ver>_arm64.deb
-#   kgsl      -> mesa-guest-kgsl_<ver>_arm64.deb
+#   drm2kgsl  -> mesa-guest-drm2kgsl_<ver>_arm64.deb
 # Both install to /usr/local and Conflict with each other, so a guest holds one at a time:
 #   sudo apt install ./mesa-guest-<variant>_<ver>_arm64.deb
 #
 # Needs: docker. Override the resolute base if the tag differs:
 #   BASE=ubuntu:devel bash 8_build_guest_mesa_cross.sh
-#   MESA_VARIANT=kgsl bash 8_build_guest_mesa_cross.sh
+#   MESA_VARIANT=drm2kgsl bash 8_build_guest_mesa_cross.sh
 set -e
 cd "$(dirname "$0")"
 source ./lib_branch.sh

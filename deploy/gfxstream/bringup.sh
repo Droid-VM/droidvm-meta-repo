@@ -41,7 +41,7 @@ step "binaries (push + md5 verify -- a hard reset zeroes recently written files)
 # libvirglrenderer.so is DT_NEEDED by the crosvm binary, so a stale one on the phone is not a
 # kgsl-only problem: crosvm fails at exec and ALL FIVE configurations die. Verify it alongside
 # the other two even when the run under test is gfxstream.
-# crosvm_gfx and crosvm_kgsl are root-owned directories, so `adb push` -- which runs as the
+# crosvm_gfx and crosvm_drm2kgsl are root-owned directories, so `adb push` -- which runs as the
 # shell user -- can only overwrite a file that already exists AND is shell-owned. Anything else
 # fails while adb still reports "1 file pushed". So stage into /data/local/tmp (shell-writable)
 # and `su 0 cp` into place, then verify: the md5 check is what caught this, and without it a
@@ -49,7 +49,7 @@ step "binaries (push + md5 verify -- a hard reset zeroes recently written files)
 for f in crosvm libgfxstream_backend.so libvirglrenderer.so; do
     want=$(md5sum "$REPO/crosvm_out/$f" | awk '{print $1}')
     staged=no
-    for dir in /data/local/tmp/crosvm_gfx /data/local/tmp/crosvm_kgsl /data/local/tmp/crosvm_out; do
+    for dir in /data/local/tmp/crosvm_gfx /data/local/tmp/crosvm_drm2kgsl /data/local/tmp/crosvm_out; do
         got=$($A "su -c 'md5sum $dir/$f 2>/dev/null'" 2>/dev/null | tr -d '\r' | awk '{print $1}')
         if [ "$got" != "$want" ]; then
             if [ "$staged" = no ]; then
@@ -68,7 +68,7 @@ done
 for s in run_stream_trace.sh run_ubuntu_gfx.sh run_ubuntu_gfx_prealloc.sh; do
     adb -s $DEV push "$SCRATCH/$s" /data/local/tmp/ >/dev/null 2>&1
 done
-adb -s $DEV push "$REPO/deploy/kgsl/run_kgsl_nctx.sh" /data/local/tmp/ >/dev/null 2>&1
+adb -s $DEV push "$REPO/deploy/drm2kgsl/run_drm2kgsl_nctx.sh" /data/local/tmp/ >/dev/null 2>&1
 $A 'su -c "chmod 755 /data/local/tmp/*.sh; sync"' 2>/dev/null
 
 echo "=== 環境就緒。用 run_stream_trace.sh 開 VM ==="

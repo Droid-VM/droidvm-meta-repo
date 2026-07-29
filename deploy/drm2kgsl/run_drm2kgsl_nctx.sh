@@ -39,7 +39,7 @@
 #                                    testing what it looks like it is testing.
 #   no vram-limit / gunyah-pvm       both are gfxstream-only consumers.
 set -u
-DIR=/data/local/tmp/crosvm_kgsl
+DIR=/data/local/tmp/crosvm_drm2kgsl
 QCOW=/data/media/0/DroidVM/ubuntu-resolute-cloud-arm64-20260615_0742.qcow2
 EDK2=/data/data/cn.classfun.droidvm/usr/share/droidvm/edk2-gunyah.fd
 TAP=vm526795fd-0

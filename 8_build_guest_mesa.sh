@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the guest mesa for aarch64 guests and pack it per variant as a .deb:
 #   gfxstream -> mesa-guest-gfxstream_<ver>_arm64.deb
-#   kgsl      -> mesa-guest-kgsl_<ver>_arm64.deb
+#   drm2kgsl  -> mesa-guest-drm2kgsl_<ver>_arm64.deb
 # Both install to /usr/local and Conflict with each other, so a guest holds one
 # at a time. See mesa-variants.sh for why this is a package and not a tarball.
 #

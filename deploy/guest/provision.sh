@@ -1,7 +1,7 @@
 #!/bin/bash
 # Provision one Linux guest for ONE graphics route, over ssh.
 #
-#   deploy/guest/provision.sh <ssh-target> <gfxstream|kgsl>
+#   deploy/guest/provision.sh <ssh-target> <gfxstream|drm2kgsl>
 #   deploy/guest/provision.sh root@172.22.68.12 gfxstream
 #
 # Installs the droidvm-guest-additions DKMS package (gunyah_guest + the patched
@@ -17,11 +17,11 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 REPO=$PWD
 
-TARGET=${1:?usage: provision.sh <ssh-target> <gfxstream|kgsl>}
-VARIANT=${2:?usage: provision.sh <ssh-target> <gfxstream|kgsl>}
+TARGET=${1:?usage: provision.sh <ssh-target> <gfxstream|drm2kgsl>}
+VARIANT=${2:?usage: provision.sh <ssh-target> <gfxstream|drm2kgsl>}
 source ./mesa-variants.sh
 
-case $VARIANT in gfxstream|kgsl) ;; *) echo "unknown variant: $VARIANT" >&2; exit 1 ;; esac
+case $VARIANT in gfxstream|drm2kgsl) ;; *) echo "unknown variant: $VARIANT" >&2; exit 1 ;; esac
 
 SSH="ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=no $TARGET"
 step() { echo "--- $* ---"; }
@@ -63,7 +63,7 @@ $SSH "sudo sed -i '/^VK_DRIVER_FILES=/d;/^VK_ICD_FILENAMES=/d;/^MESA_LOADER_DRIV
 # zink reaches the GPU through that ICD, and the desktop reaches zink through gallium. Without
 # the override the desktop silently picks llvmpipe and everything is slow but not broken --
 # the hardest kind of regression to notice.
-[ "$VARIANT" = kgsl ] && $SSH "echo 'MESA_LOADER_DRIVER_OVERRIDE=zink' | sudo tee -a /etc/environment >/dev/null"
+[ "$VARIANT" = drm2kgsl ] && $SSH "echo 'MESA_LOADER_DRIVER_OVERRIDE=zink' | sudo tee -a /etc/environment >/dev/null"
 $SSH 'grep -E "^VK_|^MESA_" /etc/environment'
 
 step "verify"
@@ -76,7 +76,7 @@ cat <<EOF
 Reboot the guest, then check from inside it:
     dmesg | grep -E 'gunyah_guest|GpuPool base|kgsl_reserved'
     vulkaninfo | grep -E 'driverName|deviceName'
-Expect driverName=$([ "$VARIANT" = kgsl ] && echo turnip || echo gfxstream).
+Expect driverName=$([ "$VARIANT" = drm2kgsl ] && echo turnip || echo gfxstream).
 
 If the patched virtio-gpu is loaded from the initrd rather than the rootfs, the module
 must also be replaced inside the phone's initrd -- see deploy/SETUP.md, "initrd surgery".
