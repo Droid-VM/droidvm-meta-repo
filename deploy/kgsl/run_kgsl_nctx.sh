@@ -46,6 +46,19 @@ ip link set "$TAP" up
 # page can be migrated out from under a stage-2 mapping the RM will never update.
 ulimit -l unlimited
 
+# The kgsl backend windows every BO onto the pool with UDMABUF_CREATE, so this route does not
+# work on a stock GKI udmabuf: it caps a dmabuf at 64 MiB (EINVAL past that) and builds the page
+# array with kmalloc_array, which needs an order-6 contiguous allocation for a 128 MiB buffer.
+# Minecraft asks for exactly that and dies -- the guest sees RESOURCE_CREATE_BLOB fail, turnip
+# hands the app a bogus mapping, and the JVM SIGSEGVs inside VulkanTransientMemory.upload.
+# The app's Kernel Module page normally loads this; a manual launch has to do it too.
+if ! lsmod | grep -q udmabuf_gki; then
+    KO=/data/data/cn.classfun.droidvm/usr/lib/modules/android15-6.6/udmabuf-gki-6.6.ko
+    [ -f "$KO" ] && insmod "$KO" 2>/dev/null
+    lsmod | grep -q udmabuf_gki && echo "loaded udmabuf hijack ($(cat /sys/module/udmabuf_gki_6.6/parameters/mode 2>/dev/null))" \
+                                || echo "WARNING: udmabuf hijack not loaded -- blobs over 64 MiB will fail"
+fi
+
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
 
