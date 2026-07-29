@@ -2,7 +2,7 @@
 
 > 目標:一台乾淨的 Ubuntu cloud image guest(qcow2)+ 手機端 crosvm,
 > 走到兩條 GPU 路線任一可用:**gfxstream**(guest gfxstream ICD → host turnip,
-> 四種記憶體配置)或 **kgsl native context**(guest 真 turnip → vdrm/virtio →
+> 四種記憶體配置)或 **drm2kgsl native context**(guest 真 turnip → vdrm/virtio →
 > host virglrenderer 的 DRM native context → KGSL)。
 > 兩路線共用同一顆 crosvm / kernel / rootfs / DKMS,由啟動參數與 guest 端 ICD 切換。
 
@@ -10,7 +10,7 @@
 
 | 元件 | 來源 | 部署位置 |
 |---|---|---|
-| crosvm(fork,含 runtime_share/VmAccept/GpuPool/KgslPool) | `bash 2_build_crosvm.sh` → `crosvm_out/` | 手機 `/data/local/tmp/crosvm_gfx/`、`/data/local/tmp/crosvm_kgsl/`(**兩目錄各自帶 crosvm + libgfxstream_backend.so + libvirglrenderer.so,互不共用**) |
+| crosvm(fork,含 runtime_share/VmAccept/GpuPool/Drm2KgslPool) | `bash 2_build_crosvm.sh` → `crosvm_out/` | 手機 `/data/local/tmp/crosvm_gfx/`、`/data/local/tmp/crosvm_drm2kgsl/`(**兩目錄各自帶 crosvm + libgfxstream_backend.so + libvirglrenderer.so,互不共用**) |
 | gunyah host 模組(host-share / kvcalloc / gh_unmovable / udmabuf) | `bash 4_build_gunyah_host.sh` → `gunyah_host_mod/dist/<kmi>/` | APK 打包進 `usr/lib/modules/<kmi>/`,由 app 的 Kernel Module 分頁載入 |
 | 大頁保留模組 `gh_hugepage_reserve` | 獨立 repo(`../gh-hugepage-reserve`),**不在 4_ 腳本內** | 手機開機早期載入 |
 | guest kernel + 特製 initrd | DroidVM app cache(`/data/data/cn.classfun.droidvm/cache/boot/<uuid>/`) | 由 launcher 直接 `--initrd`/kernel 指定 |
@@ -24,7 +24,7 @@
 `su 0 cp`,完成後 `md5sum` 驗證。`deploy/gfxstream/bringup.sh` 已自動做這件事,
 且**三個檔都驗**:`crosvm`、`libgfxstream_backend.so`、`libvirglrenderer.so`。
 最後一個容易被忘記,但它是 crosvm 的 `DT_NEEDED`——舊的 .so 會讓 crosvm 在 exec
-就失敗,**五種配置一起死**,不是只有 kgsl。
+就失敗,**五種配置一起死**,不是只有 drm2kgsl。
 
 **initrd surgery**(改 virtio-gpu.ko / 新增 kmod 後必做,否則開機載入的是 initrd 裡的舊模組):
 手機的 initrd 是特製 zstd cpio(~42MB,含 `usr/lib/modules/<k>/updates/dkms/*.ko.zst`),
@@ -65,15 +65,15 @@ guest 端:
 
 驗收:vulkaninfo → vkcube → vkmark(要在真 VNC GNOME session 裡跑)→ Minecraft。
 
-## 2. kgsl native context 路線
+## 2. drm2kgsl native context 路線
 
-手機端:`deploy/kgsl/run_kgsl_nctx.sh`(`DIR=/data/local/tmp/crosvm_kgsl`)。要點:
+手機端:`deploy/drm2kgsl/run_drm2kgsl_nctx.sh`(`DIR=/data/local/tmp/crosvm_drm2kgsl`)。要點:
 - `--gpu backend=virglrenderer,context-types=virgl2:drm,...`(**virgl2 必須在**,
   否則 virgl renderer 根本沒初始化 → CREATE_2D ComponentError(22) → VNC 黑屏)
-- `--pre-alloc kgsl-mb=1024`:boot-blessed 的 `KgslPool` purpose region,
-  virglrenderer 的 kgsl backend 從裡面切每一個 BO。拿掉就退回 runtime-share。
-- `CROSVM_KGSL_DIAG=0`:kgsl backend 的診斷計數器**預設開啟且每筆走 `ANDROID_LOG_ERROR`**,
-  任何 kgsl 效能數字採信前先確認它是關的。
+- `--pre-alloc drm-host-mb=8`:boot-blessed 的 `Drm2KgslPool` purpose region,
+  virglrenderer 的 drm2kgsl backend 從裡面切每一個 BO。拿掉就退回 runtime-share。
+- `CROSVM_DRM2KGSL_DIAG=0`:drm2kgsl backend 的診斷計數器**預設開啟且每筆走 `ANDROID_LOG_ERROR`**,
+  任何 drm2kgsl 效能數字採信前先確認它是關的。
 - 不用 `vram-limit` / `gunyah-pvm`(兩個都是 gfxstream 專屬的消費者)
 
 guest 端:
@@ -81,15 +81,15 @@ guest 端:
    arena offset 那個已被我們的 `pool_offset` wire 取代,display source release 尚未採用)
 2. ICD 指向 freedreno:`VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/freedreno_icd.aarch64.json`
    +(zink)`MESA_LOADER_DRIVER_OVERRIDE=zink`
-3. kgsl mesa 來自 `mesa` 的 `wip/3d-accel-kgsl` 分支(26.3.0-devel,含 tu/virtio 工作),
-   `MESA_VARIANT=kgsl bash 8_build_guest_mesa_cross.sh` → `mesa-guest-kgsl_<ver>_arm64.deb`,
-   `sudo apt install ./mesa-guest-kgsl_<ver>_arm64.deb`(prefix `/usr/local`)
+3. drm2kgsl mesa 來自 `mesa` 的 `wip/3d-accel-drm2kgsl` 分支(26.3.0-devel,含 tu/virtio 工作),
+   `MESA_VARIANT=drm2kgsl bash 8_build_guest_mesa_cross.sh` → `mesa-guest-drm2kgsl_<ver>_arm64.deb`,
+   `sudo apt install ./mesa-guest-drm2kgsl_<ver>_arm64.deb`(prefix `/usr/local`)
 
 驗收階梯:VNC 有畫面 → `vulkaninfo` 顯示 driverName=turnip(經 vdrm)→ vkcube → vkmark → Minecraft。
 
 ## 3. 兩路線切換
 
-啟動參數已分開(`crosvm_gfx` vs `crosvm_kgsl` 兩目錄兩 launcher)。guest 端**一台 VM 裝一份 mesa**:
+啟動參數已分開(`crosvm_gfx` vs `crosvm_drm2kgsl` 兩目錄兩 launcher)。guest 端**一台 VM 裝一份 mesa**:
 兩個 deb 都裝在 `/usr/local`,並透過共用的 `mesa-guest` 虛擬名稱互相 `Conflicts`,
 所以同一台 VM 裝第二個時 dpkg 會直接拒絕。切換 = `apt remove` 舊的、裝新的,再改
 `/etc/environment` 的 `VK_DRIVER_FILES`,`systemctl restart gdm` 生效。
@@ -101,9 +101,9 @@ guest 端:
 ## 4. 已知缺口 / 待辦
 
 - vkmark 只能在真 VNC GNOME session 跑(ssh 環境下它自己 early-crash,與 GPU 無關)
-- kgsl 的 `VIRTIO_GPU_F_DISPLAY_SOURCE_RELEASE`(fenced RESOURCE_FLUSH,ring 63)尚未採用:
+- drm2kgsl 的 `VIRTIO_GPU_F_DISPLAY_SOURCE_RELEASE`(fenced RESOURCE_FLUSH,ring 63)尚未採用:
   crosvm 側 `9f5dc46` 會開兩條 thread 跑無 timeout 的 `poll(fd, -1)`,卡住只能 kill -9,
   而 kill -9 會洩漏 memparcel。要用之前得先補 timeout。
-- kgsl 沒有 guest-alloc 路徑(vdrm 只發 `VIRTIO_GPU_BLOB_MEM_HOST3D`,virgl 的
+- drm2kgsl 沒有 guest-alloc 路徑(vdrm 只發 `VIRTIO_GPU_BLOB_MEM_HOST3D`,virgl 的
   `BLOB_MEM_GUEST` 進不了 DRM context);要做得改 msm_proto 協議,見 `plans/ARENA_V2_PLAN.md`
 - `deploy/gfxstream/` 的五個 launcher 有大量重複段落(tap/bridge/記憶體準備),尚未抽共用

@@ -39,7 +39,7 @@ $A 'su -c "ip -br link | grep br-wifi"' 2>/dev/null | tr -d '\r'
 
 step "binaries (push + md5 verify -- a hard reset zeroes recently written files)"
 # libvirglrenderer.so is DT_NEEDED by the crosvm binary, so a stale one on the phone is not a
-# kgsl-only problem: crosvm fails at exec and ALL FIVE configurations die. Verify it alongside
+# drm2kgsl-only problem: crosvm fails at exec and ALL FIVE configurations die. Verify it alongside
 # the other two even when the run under test is gfxstream.
 # crosvm_gfx and crosvm_drm2kgsl are root-owned directories, so `adb push` -- which runs as the
 # shell user -- can only overwrite a file that already exists AND is shell-owned. Anything else

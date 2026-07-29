@@ -20,7 +20,7 @@
 #
 # --gpu-mhz / --cpu-mhz pin them. The defaults are what this phone can hold through a run without
 # cooking: 660 MHz GPU (734 was taken at temperature and then quietly lowered underneath the pin)
-# and 1400 MHz CPU, which also matches the clocks the kgsl-native-context reference numbers were
+# and 1400 MHz CPU, which also matches the clocks the drm2kgsl native-context reference numbers were
 # taken at. A run whose clock does not match what was asked for is reported INVALID rather than
 # given a number.
 #

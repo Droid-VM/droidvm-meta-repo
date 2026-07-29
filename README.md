@@ -14,7 +14,7 @@ branches exist only where the content genuinely differs:
 |---|---|---|
 | `wip/3d-accel` | all 10 repos | everything host-side, both graphics backends, all three pools |
 | `wip/3d-accel-gfxstream` | this repo + `mesa` | gfxstream launchers/plans; mesa 26.0.3 + the gfxstream guest ICD |
-| `wip/3d-accel-kgsl` | this repo + `mesa` | kgsl launcher/plans; mesa 26.3.0-devel + turnip over vdrm |
+| `wip/3d-accel-drm2kgsl` | this repo + `mesa` | drm2kgsl launcher/plans; mesa 26.3.0-devel + turnip over vdrm |
 
 `lib_branch.sh` resolves each component along a chain —
 `wip/3d-accel-<variant>` → `wip/3d-accel` → (soong forks) the manifest
@@ -52,7 +52,7 @@ Turnip is the host GPU Vulkan driver (hwvulkan HAL): without it gfxstream falls
 back to the closed Adreno blob (AHB-only, `supportsDmaBuf=0`) and host-visible
 coherent memory fails. Step 5 builds it from our Droid-VM/turnip fork of
 mesa-tu8 `gen8` via StevenMXZ/Adreno-Tools-Drivers — a self-contained build (own
-NDK + mesa fork), so it does not touch the crosvm soong tree. The kgsl route
+NDK + mesa fork), so it does not touch the crosvm soong tree. The drm2kgsl route
 does not need it: there the guest runs turnip itself and the host only
 translates the DRM layer.
 
@@ -66,7 +66,7 @@ from it:
 | variant | branch | package | Vulkan ICD |
 |---|---|---|---|
 | gfxstream | `wip/3d-accel-gfxstream` (26.0.3) | `mesa-guest-gfxstream_<ver>_arm64.deb` | `gfxstream_vk_icd.aarch64.json` |
-| kgsl | `wip/3d-accel-kgsl` (26.3.0-devel) | `mesa-guest-kgsl_<ver>_arm64.deb` | `freedreno_icd.aarch64.json` |
+| drm2kgsl | `wip/3d-accel-drm2kgsl` (26.3.0-devel) | `mesa-guest-drm2kgsl_<ver>_arm64.deb` | `freedreno_icd.aarch64.json` |
 
 Both install to `/usr/local`, so a guest holds one at a time
 (`sudo apt install ./mesa-guest-<variant>_<ver>_arm64.deb`). That is why these
@@ -80,7 +80,7 @@ on the trunk both are built.
 ## Layout
 
 - `plans/` — design docs and evidence packs
-- `deploy/` — phone-side launchers and benchmark harness (`gfxstream/`, `kgsl/`);
+- `deploy/` — phone-side launchers and benchmark harness (`gfxstream/`, `drm2kgsl/`);
   start at `deploy/SETUP.md`
 - `guest-patches/` — guest kernel delta as patches (in-tree reference; the
   supported install route is Droid-VM/droidvm-guest-additions) + ICD snapshots
