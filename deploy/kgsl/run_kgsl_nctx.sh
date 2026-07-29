@@ -16,12 +16,21 @@
 #   context-types=virgl2:drm         BOTH. With plain "drm" the virgl renderer is never
 #                                    initialised (NO_VIRGL), and the first CREATE_2D comes back
 #                                    ComponentError(22) -- a black screen with no other symptom.
-#   --pre-alloc gfx-guest-mb=1024    the guest-owned drm_buddy pool every BO is allocated from.
-#                                    Despite the gfx- prefix the region is renderer-agnostic --
-#                                    a SHARE'd region plus the gpu_guest_reserved DT node -- and
-#                                    guest mesa claims it once it probes
-#                                    VIRTGPU_PARAM_CREATE_GUEST_HANDLE. There is no longer a
-#                                    kgsl-mb host pool: the host allocates no BO backing at all.
+#   --pre-alloc kgsl-mb=8,gfx-guest-mb=1024
+#                                    Two pools, and both are pre-alloc -- the point of this
+#                                    route is that nothing is SHARE'd at runtime.
+#                                      gfx-guest-mb  guest-owned drm_buddy pool. Every BO comes
+#                                        from here now. The gfx- prefix is a misnomer: the
+#                                        region is a SHARE'd range plus the gpu_guest_reserved
+#                                        DT node, with nothing gfxstream-specific about it.
+#                                      kgsl-mb       host-owned pool, now only large enough for
+#                                        the msm shmem rings (16 KiB per context -- 12 contexts
+#                                        with a desktop and Minecraft, so 192 KiB against an
+#                                        8 MiB pool whose first 2 MiB is the RM base guard).
+#                                    Dropping kgsl-mb does NOT save memory worth having: the
+#                                    rings fall back to a runtime GUNYAH-SHARE-BLOB each, which
+#                                    is exactly the per-allocation RM round trip this route
+#                                    exists to avoid. Measured: 4 shares without it, 0 with.
 #   udmabuf=true                     builds the dma-buf for a guest-allocated blob AND is what
 #                                    gates VIRTIO_GPU_F_CREATE_GUEST_HANDLE. Without it the
 #                                    feature is never offered, the guest reports
@@ -85,7 +94,7 @@ exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debu
   --protected-vm-without-firmware \
   --no-balloon --disable-sandbox --hugepages \
   --prepare-lend-mthp-mode chunked \
-  --pre-alloc "gfx-guest-mb=1024" \
+  --pre-alloc "kgsl-mb=8,gfx-guest-mb=1024" \
   --swiotlb 128 \
   --socket "$DIR/ubuntu.sock" \
   --smbios "processor-version=Qualcomm Snapdragon 8 Elite" \
