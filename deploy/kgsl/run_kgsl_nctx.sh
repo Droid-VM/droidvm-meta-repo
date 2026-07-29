@@ -16,8 +16,18 @@
 #   context-types=virgl2:drm         BOTH. With plain "drm" the virgl renderer is never
 #                                    initialised (NO_VIRGL), and the first CREATE_2D comes back
 #                                    ComponentError(22) -- a black screen with no other symptom.
-#   --pre-alloc kgsl-mb=1024         boot-blessed KgslPool the kgsl backend sub-allocates every
-#                                    BO from. Drop it to run kgsl on the runtime-share path.
+#   --pre-alloc gfx-guest-mb=1024    the guest-owned drm_buddy pool every BO is allocated from.
+#                                    Despite the gfx- prefix the region is renderer-agnostic --
+#                                    a SHARE'd region plus the gpu_guest_reserved DT node -- and
+#                                    guest mesa claims it once it probes
+#                                    VIRTGPU_PARAM_CREATE_GUEST_HANDLE. There is no longer a
+#                                    kgsl-mb host pool: the host allocates no BO backing at all.
+#   udmabuf=true                     builds the dma-buf for a guest-allocated blob AND is what
+#                                    gates VIRTIO_GPU_F_CREATE_GUEST_HANDLE. Without it the
+#                                    feature is never offered, the guest reports
+#                                    has_create_guest_handle=0, and guest mesa silently keeps
+#                                    the host-allocating path -- a working VM that is not
+#                                    testing what it looks like it is testing.
 #   no vram-limit / gunyah-pvm       both are gfxstream-only consumers.
 set -u
 DIR=/data/local/tmp/crosvm_kgsl
@@ -75,13 +85,13 @@ exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debu
   --protected-vm-without-firmware \
   --no-balloon --disable-sandbox --hugepages \
   --prepare-lend-mthp-mode chunked \
-  --pre-alloc "kgsl-mb=1024" \
+  --pre-alloc "gfx-guest-mb=1024" \
   --swiotlb 128 \
   --socket "$DIR/ubuntu.sock" \
   --smbios "processor-version=Qualcomm Snapdragon 8 Elite" \
   --block "$QCOW,lock=false" \
   --net "tap-name=$TAP,mac=$MAC" \
-  --gpu "backend=virglrenderer,context-types=virgl2:drm,egl=true,gles=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296" \
+  --gpu "backend=virglrenderer,context-types=virgl2:drm,egl=true,gles=true,udmabuf=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296" \
   --vnc-server "host=0.0.0.0,port=5900,input=tablet" \
   --serial "type=file,hardware=serial,num=1,earlycon,console,path=$DIR/serial.log,input=$DIR/con.in" \
   "$EDK2" > "$DIR/crosvm.log" 2>&1
