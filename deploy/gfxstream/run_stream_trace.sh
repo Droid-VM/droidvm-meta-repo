@@ -57,7 +57,7 @@ export RUST_LOG=info,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_cont
 "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug --extended-status run \
   --name "ubuntu 26 trace" \
   --mem 4096 --cpus 4 \
-  --hypervisor gunyah --pre-alloc "gfx-host-mb=256,gfx-guest-mb=1024" \
+  --hypervisor gunyah --pre-alloc "gfx-host-mb=256,gpu-guest-mb=1024" \
   --protected-vm-without-firmware \
   --no-balloon --disable-sandbox --hugepages \
   --prepare-lend-mthp-mode chunked \

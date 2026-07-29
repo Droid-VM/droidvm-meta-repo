@@ -52,7 +52,7 @@ exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debu
   --protected-vm-without-firmware \
   --no-balloon --disable-sandbox --hugepages \
   --prepare-lend-mthp-mode chunked \
-  --pre-alloc "gfx-host-mb=256,gfx-guest-mb=1024" \
+  --pre-alloc "gfx-host-mb=256,gpu-guest-mb=1024" \
   --swiotlb 128 \
   --socket "$DIR/ubuntu.sock" \
   --smbios "processor-version=Qualcomm Snapdragon 8 Elite" \
