@@ -37,6 +37,18 @@ ip link set "$TAP" up
 # The pool is mlock'd, and crosvm now refuses to SHARE a pool it could not pin.
 ulimit -l unlimited
 
+# Runtime SHARE needs /dev/gunyah_share. Without it every host-visible blob that is not
+# pool-resident fails to map, and the guest reports "Failed to create virtgpu AddressSpaceStream"
+# / "mmap64 failed with (Invalid argument)" -- which reads like a gfxstream bug rather than a
+# missing host module. The app's Kernel Module page loads this; a manual launch has to too.
+if [ ! -e /dev/gunyah_share ]; then
+    for KO in /data/data/cn.classfun.droidvm/usr/lib/modules/*/gunyah-host-share-gki-*.ko; do
+        [ -f "$KO" ] && insmod "$KO" 2>/dev/null && break
+    done
+    [ -e /dev/gunyah_share ] && echo "loaded gunyah host-share" \
+                             || echo "WARNING: no /dev/gunyah_share -- runtime-SHARE blobs will fail to map"
+fi
+
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
 
