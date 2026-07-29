@@ -1,11 +1,8 @@
 #!/system/bin/sh
-# Manual crosvm launch for the ubuntu VM in GFXSTREAM (runtime-host) mode.
-# Same direct-kernel boot / disk / net / vnc as the kgsl script, but the guest
-# runs the gfxstream Vulkan ICD and crosvm uses the gfxstream backend + guest-
-# accept SHARE: the guest-side accept is always driven host-side over the virtio-gunyah-accept
-# transport (the in-VM module in gunyah_guest.ko), so this script is now identical to the plain
-# one -- kept as the historical name used in SETUP.md
-# the gunyah guest-accept path.
+# Config 2 of 4: FUSION. Host-visible blobs up to pool-blob-max-kb come from the pool;
+# anything larger goes straight to the runtime-SHARE path. vram-limit caps the
+# runtime-shared side.
+# Expect in the host log: BOTH GFXPOOL alloc lines and GUNYAH-SHARE-BLOB lines.
 set -u
 DIR=/data/local/tmp/crosvm_gfx
 QCOW=/data/media/0/DroidVM/ubuntu-resolute-cloud-arm64-20260615_0742.qcow2
@@ -44,18 +41,19 @@ export GFXSTREAM_DEVICE_LOCAL_MEMORY_TYPE=1
 
 export RUST_LOG=info,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug
 exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug --extended-status run \
-  --name "ubuntu 26" \
+  --name "ubuntu 26 fusion" \
   --mem 4096 --cpus 4 \
   --hypervisor gunyah \
   --protected-vm-without-firmware \
   --no-balloon --disable-sandbox --hugepages \
   --prepare-lend-mthp-mode chunked \
+  --pre-alloc "gfx-host-mb=1024" \
   --swiotlb 128 \
   --socket "$DIR/ubuntu.sock" \
   --smbios "processor-version=Qualcomm Snapdragon 8 Elite" \
   --block "$QCOW,lock=false" \
   --net "tap-name=$TAP,mac=$MAC" \
-  --gpu "backend=gfxstream,context-types=gfxstream-vulkan,egl=true,gles=true,external-blob=true,vulkan=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296,vram-limit=2048,gunyah-pvm=true" \
+  --gpu "backend=gfxstream,context-types=gfxstream-vulkan,egl=true,gles=true,external-blob=true,vulkan=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296,vram-limit=2048,pool-blob-max-kb=4096,gunyah-pvm=true" \
   --vnc-server "host=0.0.0.0,port=5900,input=tablet" \
   --initrd "$INITRD" \
   --params "root=/dev/vda2 rw console=ttyS0 loglevel=4" \

@@ -1,8 +1,8 @@
 #!/system/bin/sh
-# Config 3 of 4: PURE RUNTIME-SHARE. No pool at all -- every host-visible blob is SHARE'd
-# to the guest at the moment it is mapped. vram-limit caps how much may be shared.
-# Expect in the host log: only GUNYAH-SHARE-BLOB lines, no GFXPOOL. The RM's ~39-parcel
-# ceiling is this configuration's KNOWN limit, not a regression.
+# Config 1 of 4: PURE PRE-ALLOC. Every host-visible blob is sub-allocated from the
+# boot-blessed GpuPool; no vram-limit is passed, and a vram-limit is what enables the
+# runtime-share path, so nothing is ever SHARE'd at runtime.
+# Expect in the host log: GFXPOOL alloc lines and ZERO GUNYAH-SHARE-BLOB lines.
 set -u
 DIR=/data/local/tmp/crosvm_gfx
 QCOW=/data/media/0/DroidVM/ubuntu-resolute-cloud-arm64-20260615_0742.qcow2
@@ -41,18 +41,19 @@ export GFXSTREAM_DEVICE_LOCAL_MEMORY_TYPE=1
 
 export RUST_LOG=info,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug
 exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug --extended-status run \
-  --name "ubuntu 26 runtimeshare" \
+  --name "ubuntu 26 purepool" \
   --mem 4096 --cpus 4 \
   --hypervisor gunyah \
   --protected-vm-without-firmware \
   --no-balloon --disable-sandbox --hugepages \
   --prepare-lend-mthp-mode chunked \
+  --pre-alloc "gfx-host-mb=1024" \
   --swiotlb 128 \
   --socket "$DIR/ubuntu.sock" \
   --smbios "processor-version=Qualcomm Snapdragon 8 Elite" \
   --block "$QCOW,lock=false" \
   --net "tap-name=$TAP,mac=$MAC" \
-  --gpu "backend=gfxstream,context-types=gfxstream-vulkan,egl=true,gles=true,external-blob=true,vulkan=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296,vram-limit=2048,gunyah-pvm=true" \
+  --gpu "backend=gfxstream,context-types=gfxstream-vulkan,egl=true,gles=true,external-blob=true,vulkan=true,displays=[[mode=windowed[1280,720],refresh-rate=30,dpi=[160,160]]],pci-bar-size=4294967296,gunyah-pvm=true" \
   --vnc-server "host=0.0.0.0,port=5900,input=tablet" \
   --initrd "$INITRD" \
   --params "root=/dev/vda2 rw console=ttyS0 loglevel=4" \
