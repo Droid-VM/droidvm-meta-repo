@@ -70,7 +70,7 @@ ip link set "$TAP" up
 # page can be migrated out from under a stage-2 mapping the RM will never update.
 ulimit -l unlimited
 
-# The kgsl backend windows every BO onto the pool with UDMABUF_CREATE, so this route does not
+# The drm2kgsl backend windows every BO onto the pool with UDMABUF_CREATE, so this route does not
 # work on a stock GKI udmabuf: it caps a dmabuf at 64 MiB (EINVAL past that) and builds the page
 # array with kmalloc_array, which needs an order-6 contiguous allocation for a 128 MiB buffer.
 # Minecraft asks for exactly that and dies -- the guest sees RESOURCE_CREATE_BLOB fail, turnip
@@ -87,13 +87,13 @@ echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
 
 export LD_LIBRARY_PATH="$DIR:/data/data/cn.classfun.droidvm/usr/lib"
-# kgsl_diag_log writes every record at ANDROID_LOG_ERROR and defaults to on; leave it off unless
+# drm2kgsl_diag_log writes every record at ANDROID_LOG_ERROR and defaults to on; leave it off unless
 # something is being debugged, or it shows up in any number measured here.
-export CROSVM_KGSL_DIAG=0
+export CROSVM_DRM2KGSL_DIAG=0
 
 export RUST_LOG=info,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug
 exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug --extended-status run \
-  --name "ubuntu 26 kgsl" \
+  --name "ubuntu 26 drm2kgsl" \
   --mem 4096 --cpus 4 \
   --hypervisor gunyah \
   --protected-vm-without-firmware \
