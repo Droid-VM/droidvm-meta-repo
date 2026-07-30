@@ -88,6 +88,69 @@ bridge_up() {
 $A 'input keyevent KEYCODE_WAKEUP; svc power stayon true' >/dev/null 2>&1
 trap "$A 'svc power stayon false' >/dev/null 2>&1" EXIT
 
+# Everything below exists because a host-OOM that killed two runs left no evidence: the crosvm log
+# was overwritten by the next configuration, dmesg was cleared by a host reboot three minutes
+# later, and memory was only ever sampled after the fact. None of that is recoverable
+# retrospectively, so it has to be collected as it happens.
+DIAG=${DIAG:-/tmp/mc_bench/diag}
+mkdir -p "$DIAG"
+
+# What state the host was in BEFORE the run. The udmabuf hijack module is the one that matters:
+# without it the built-in serves with a 64 MiB cap and a kmalloc_array that fails on order-6, and
+# a run made in that state looks like every other run. Not checking this once already led to
+# reporting "the module was loaded" from an observation taken before a DIFFERENT run.
+host_state() {
+    {
+        echo "=== $1 @ $(date -u +%FT%TZ) ==="
+        echo "-- udmabuf modules (refcount matters: 0 means nothing is using it) --"
+        $A "su -c 'lsmod | grep -i udmabuf; for m in /sys/module/udmabuf*/parameters; do
+              echo \"[\$m]\"; for p in \$m/*; do echo \"  \$(basename \$p)=\$(cat \$p 2>/dev/null)\"; done; done'" 2>/dev/null
+        echo "-- gunyah reserve pool (units are 2MB pages) --"
+        $A "su -c 'for p in pool_avail pool_want pool_size_max served_summary; do
+              echo \"  \$p=\$(cat /sys/module/gh_hugepage_reserve/parameters/\$p 2>/dev/null)\"; done'" 2>/dev/null
+        echo "-- /dev nodes --"
+        $A "su -c 'ls -la /dev/gunyah_share /dev/udmabuf 2>&1'" 2>/dev/null
+        echo "-- meminfo --"
+        $A "su -c 'grep -E \"^MemTotal|^MemFree|^MemAvailable|^Cached:\" /proc/meminfo'" 2>/dev/null
+    } | tr -d '\r'
+}
+
+# One line every 5s. Whether memory drains slowly or falls off a cliff separates a leak from a
+# single oversized allocation, and only a time series shows which.
+sample_start() {
+    $A "su -c 'rm -f /data/local/tmp/memsample.txt;
+        setsid sh /data/local/tmp/memsample.sh > /data/local/tmp/memsample.txt 2>/dev/null </dev/null &'" >/dev/null 2>&1
+}
+sample_stop() {   # $1 = label
+    $A "su -c 'pkill -f memsample.sh'" >/dev/null 2>&1
+    $A "su -c 'cat /data/local/tmp/memsample.txt'" 2>/dev/null | tr -d '\r' \
+        > "$DIAG/$1.mem.tsv"
+    awk 'NR==1{f=$2} {l=$2; p=$3} END{if(NR) printf "  memory: MemFree %.0f -> %.0fMB over %d samples, pool_avail ended %s\n", f/1024, l/1024, NR, p}' \
+        "$DIAG/$1.mem.tsv"
+}
+
+# Kernel-side allocation failures appear ONLY in dmesg, and a host reboot erases them. Cleared
+# before, captured after, kept per label.
+# `dmesg -c` is not dependable here, so take a line count before and the tail after. That also
+# leaves the ring buffer intact for anyone else looking at it.
+DMESG_MARK=0
+dmesg_clear() { DMESG_MARK=$($A "su -c 'dmesg | wc -l'" 2>/dev/null | tr -dc 0-9); : "${DMESG_MARK:=0}"; }
+dmesg_save()  {
+    $A "su -c 'dmesg'" 2>/dev/null | tr -d '\r' | tail -n "+$((DMESG_MARK + 1))" > "$DIAG/$1.dmesg.txt"
+    local n
+    n=$(grep -ciE "page allocation failure|Out of memory|oom-kill|order-[0-9]+.*fail|udmabuf" "$DIAG/$1.dmesg.txt" 2>/dev/null || echo 0)
+    [ "$n" != 0 ] && echo "  dmesg: $n lines matching allocation-failure/udmabuf -- see $DIAG/$1.dmesg.txt"
+}
+
+# The launcher always writes $DIR/crosvm.log, so the next configuration overwrites it. Copy it off
+# under the label while it is still the right one.
+crosvm_log_save() {   # $1 = label, $2 = dir
+    $A "su -c 'cat /data/local/tmp/$2/crosvm.log'" 2>/dev/null | tr -d '\r' > "$DIAG/$1.crosvm.log"
+    local n
+    n=$(grep -ciE "error|panic|fatal|Out of memory" "$DIAG/$1.crosvm.log" 2>/dev/null || echo 0)
+    echo "  crosvm.log: $(wc -l < "$DIAG/$1.crosvm.log") lines, $n matching error/OOM -> $DIAG/$1.crosvm.log"
+}
+
 want=("$@")
 for entry in "${CONFIGS[@]}"; do
     IFS=: read -r label dir launcher <<< "$entry"
@@ -105,7 +168,17 @@ for entry in "${CONFIGS[@]}"; do
     $SSH 'f=$(ls /home/*/.minecraft/options.txt 2>/dev/null | head -1);
           [ -n "$f" ] && { sed -i "/^preferredGraphicsBackend:/d" "$f";
                            echo "preferredGraphicsBackend:\"vulkan\"" >> "$f"; }' >/dev/null 2>&1
+    host_state "before $label" > "$DIAG/$label.host-before.txt"
+    grep -E "udmabuf_gki|pool_avail=|MemFree" "$DIAG/$label.host-before.txt" | head -3 | sed 's/^/  /'
+    dmesg_clear
+    sample_start
+
     ./bench_one.sh "$label"
+
+    sample_stop "$label"
+    dmesg_save "$label"
+    crosvm_log_save "$label" "$dir"
+    host_state "after $label" > "$DIAG/$label.host-after.txt"
     vm_down
 done
 
