@@ -151,6 +151,100 @@ crosvm_log_save() {   # $1 = label, $2 = dir
     echo "  crosvm.log: $(wc -l < "$DIAG/$1.crosvm.log") lines, $n matching error/OOM -> $DIAG/$1.crosvm.log"
 }
 
+# Refuse to start a run the host is not in a fit state for. Every check here corresponds to a
+# measurement this project has already thrown away.
+#
+# Stale local processes: killing bench_all.sh leaves bench_one.sh and mc_bench.sh reparented to
+# init, still pinning clocks and clicking through VNC. Three of them were found running hours
+# after the run that spawned them, and the phone rebooted while they fought over it -- which read
+# as "the drm2kgsl route can kill the host" until the process list was checked.
+#
+# A second crosvm: two VMs competing for the reserve pool produce ENOMEM that looks exactly like
+# the pool being too small.
+#
+# live/orphan_inuse: memparcels still held. orphan_inuse in particular is memory the RM will not
+# reclaim until the phone reboots, which is what a SIGKILL'd crosvm leaves behind.
+preflight() {
+    local bad=0 n
+
+    # Match on argv[1], not on the whole command line. Any shell whose -c text merely MENTIONS
+    # mc_bench.sh -- including the one running this check -- matches a substring search, which is
+    # both how earlier pkills killed the wrong thing and how this check first reported a stale
+    # process that was itself. A real invocation has argv[1] = the script; a wrapper has "-c".
+    local stale
+    stale=$(for d in /proc/[0-9]*; do
+                [ -r "$d/cmdline" ] || continue
+                a1=$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | sed -n 2p)
+                case "$a1" in
+                    *mc_bench.sh|*bench_one.sh|*bench_all.sh|*sweep_all_routes.sh)
+                        [ "${d#/proc/}" != "$$" ] && echo "${d#/proc/} $a1" ;;
+                esac
+            done)
+    if [ -n "$stale" ]; then
+        n=$(printf '%s\n' "$stale" | grep -c .)
+        echo "  !! $n stale bench process(es) on this machine -- kill them first:"
+        printf '%s\n' "$stale" | sed 's/^/     /'
+        bad=1
+    fi
+
+    n=$($A "su -c 'ps -A -o ARGS | grep -cE \"[c]rosvm\"'" 2>/dev/null | tr -dc 0-9)
+    if [ "${n:-0}" -gt 0 ]; then
+        echo "  !! $n crosvm already running on the phone -- shut it down (poweroff, never kill -9)"
+        bad=1
+    fi
+
+    local live orphan
+    live=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/served_summary'" 2>/dev/null \
+           | tr -d '\r' | sed -n 's/^live=//p')
+    orphan=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/served_summary'" 2>/dev/null \
+             | tr -d '\r' | sed -n 's/^orphan_inuse=//p')
+    if [ "${live:-0}" != 0 ] || [ "${orphan:-0}" != 0 ]; then
+        echo "  !! reserve pool still serving: live=${live:-?} orphan_inuse=${orphan:-?}"
+        echo "     something still holds memparcels; close the other VM (orphan_inuse needs a reboot)"
+        bad=1
+    fi
+
+    # Short pool: ask the module to refill rather than failing the run. acquire is write-only and
+    # any write triggers a refill attempt; it is bounded by acquire_mem_floor_mb, so it will not
+    # take the host below its own floor.
+    local avail wantp
+    avail=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/pool_avail'" 2>/dev/null | tr -dc 0-9)
+    wantp=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/pool_want'" 2>/dev/null | tr -dc 0-9)
+    if [ "${avail:-0}" -lt "${wantp:-0}" ]; then
+        echo "  pool short: avail=$avail want=$wantp pages (2MB each) -- triggering acquire"
+        for _ in 1 2 3; do
+            $A "su -c 'echo 1 > /sys/module/gh_hugepage_reserve/parameters/acquire'" >/dev/null 2>&1
+            sleep 10
+            avail=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/pool_avail'" 2>/dev/null | tr -dc 0-9)
+            [ "${avail:-0}" -ge "${wantp:-0}" ] && break
+        done
+        if [ "${avail:-0}" -lt "${wantp:-0}" ]; then
+            echo "  !! pool still short after acquire: avail=$avail want=$wantp"
+            echo "     free host memory (background apps) -- the module will not go below acquire_mem_floor_mb"
+            bad=1
+        else
+            echo "  pool refilled: avail=$avail pages ($((avail * 2 / 1024)) GB)"
+        fi
+    fi
+
+    UPTIME_BEFORE=$($A "su -c 'cut -d. -f1 /proc/uptime'" 2>/dev/null | tr -dc 0-9)
+    echo "  preflight: pool=$((${avail:-0} * 2 / 1024))GB live=${live:-?} uptime=${UPTIME_BEFORE:-?}s"
+    return $bad
+}
+
+# A host reboot mid-run invalidates the measurement and is worth saying out loud, because from the
+# harness's point of view it is indistinguishable from the VM dying.
+uptime_check() {
+    local now
+    now=$($A "su -c 'cut -d. -f1 /proc/uptime'" 2>/dev/null | tr -dc 0-9)
+    if [ "${now:-0}" -lt "${UPTIME_BEFORE:-0}" ]; then
+        echo "  !! HOST REBOOTED during this run (uptime ${UPTIME_BEFORE}s -> ${now}s) -- discard it"
+        echo "     boot reason: $($A "su -c 'getprop sys.boot.reason'" 2>/dev/null | tr -d '\r')"
+        return 1
+    fi
+    return 0
+}
+
 want=("$@")
 for entry in "${CONFIGS[@]}"; do
     IFS=: read -r label dir launcher <<< "$entry"
@@ -158,6 +252,7 @@ for entry in "${CONFIGS[@]}"; do
         printf '%s\n' "${want[@]}" | grep -qx "$label" || continue
     fi
     echo "########## $label ##########"
+    preflight || { echo "  SKIPPING $label"; continue; }
     bridge_up || continue
     vm_down || continue
     vm_up "$dir" "$launcher" || continue
@@ -179,6 +274,7 @@ for entry in "${CONFIGS[@]}"; do
     dmesg_save "$label"
     crosvm_log_save "$label" "$dir"
     host_state "after $label" > "$DIAG/$label.host-after.txt"
+    uptime_check || echo "$label|HOST-REBOOTED|-|-|-|-|-" >> /tmp/mc_bench/results.psv
     vm_down
 done
 
