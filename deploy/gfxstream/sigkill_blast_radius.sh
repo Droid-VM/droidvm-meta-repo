@@ -59,6 +59,9 @@ run_case() {   # $1 = case name
 
     # logcat to THIS machine: if the phone goes down, a file on the phone loses its tail.
     ( adb -s "$PHONE" logcat -b all -v threadtime > "$OUT/$c.logcat.txt" 2>&1 ) & local LOG=$!
+    # Watches from THIS machine, so the phone going away is noticed here rather than showing up as
+    # a script that seems to have stalled.
+    host_watchdog_start "$c" "$OUT"
     sleep 3
 
     case $c in
@@ -76,19 +79,19 @@ run_case() {   # $1 = case name
     local up=no
     for i in $(seq 1 64); do
         sleep 5
-        [ -n "$(crosvm_pid)" ] || { echo "  !! crosvm died during boot (after $((i*5))s)"; kill $LOG 2>/dev/null; return 1; }
+        [ -n "$(crosvm_pid)" ] || { echo "  !! crosvm died during boot (after $((i*5))s)"; kill $LOG 2>/dev/null; host_watchdog_stop; return 1; }
         $SSH 'echo up' 2>/dev/null | grep -q up && { up=yes; echo "  guest up after $((i*5))s"; break; }
     done
-    [ "$up" = yes ] || { echo "  !! guest never came up"; kill $LOG 2>/dev/null; return 1; }
+    [ "$up" = yes ] || { echo "  !! guest never came up"; kill $LOG 2>/dev/null; host_watchdog_stop; return 1; }
     pid=$(crosvm_pid)
-    [ -n "$pid" ] || { echo "  !! no crosvm; skipping"; kill $LOG 2>/dev/null; return 1; }
+    [ -n "$pid" ] || { echo "  !! no crosvm; skipping"; kill $LOG 2>/dev/null; host_watchdog_stop; return 1; }
 
     if [ "$c" = gpumc ]; then
         $SSH 'f=$(ls /home/*/.minecraft/options.txt 2>/dev/null|head -1); [ -n "$f" ] && {
                 sed -i "/^preferredGraphicsBackend:/d" "$f"; echo "preferredGraphicsBackend:\"vulkan\"" >> "$f"; }
               L=/home/droidvm/launch_mc_kgsl_nctx.sh; [ -f $L ] || L=/home/droidvm/launch_mc_vk.sh
               sudo -u droidvm bash $L' >/dev/null 2>&1
-        wait_alive 50 "Minecraft to start" || { kill $LOG 2>/dev/null; return 1; }
+        wait_alive 50 "Minecraft to start" || { kill $LOG 2>/dev/null; host_watchdog_stop; return 1; }
         V="vncdo -s 172.22.74.2::5900"
         $V move 639 322 click 1 >/dev/null 2>&1; sleep 4
         $V move 639 325 click 1 >/dev/null 2>&1; sleep 5
@@ -98,7 +101,7 @@ run_case() {   # $1 = case name
             # Dying here, before we ever sent a signal, IS a result: the route killed itself.
             echo "  RESULT $c: crosvm died on its own during world load -- no SIGKILL needed"
             echo "$c|died-unprompted|$(uptime_now)|-|-" >> "$OUT/results.psv"
-            kill $LOG 2>/dev/null; return 0; }
+            kill $LOG 2>/dev/null; host_watchdog_stop; return 0; }
     fi
 
     local fds
@@ -143,6 +146,7 @@ run_case() {   # $1 = case name
         fi
     done
     kill $LOG 2>/dev/null
+    host_watchdog_stop
     sleep 1
 
     if [ "$alive" = no ]; then
@@ -151,6 +155,9 @@ run_case() {   # $1 = case name
     else
         echo "  RESULT $c: host survived (uptime ${up_before}s -> ${up_after}s)"
         echo "    leaked memparcels: $($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/served_summary'" 2>/dev/null | tr -d '\r' | tr '\n' ' ')"
+    fi
+    if host_rebooted; then
+        echo "    host watchdog:"; sed 's/^/      /' "$OUT/$c.hostwd.txt"
     fi
     grep -iE "FORTIFY|Fatal signal|RescueParty|watchdog|gunyah|reboot" "$OUT/$c.logcat.txt" 2>/dev/null | tail -6 | sed 's/^/    /'
     echo "$c|$alive|${up_before:-?}|${up_after:-?}|${fds:-?}" >> "$OUT/results.psv"

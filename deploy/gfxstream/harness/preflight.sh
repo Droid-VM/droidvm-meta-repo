@@ -135,3 +135,65 @@ bridge_up() {
     echo "  !! br-wifi never appeared"; return 1
 }
 
+
+# ---------------------------------------------------------------------------
+# Host-side watchdog: notice that the PHONE went away, from this machine.
+#
+# Everything else here asks the phone questions. When the phone reboots, those
+# questions stop being answerable, and a script that only polls the phone sits
+# there looking like slow progress -- which is what several runs today looked
+# like before the reboot was noticed by hand, minutes later.
+#
+# So this runs on the machine driving the test and watches for the two signals a
+# reboot actually produces:
+#   * adb shell stops answering (the device drops off the bus as it goes down)
+#   * uptime goes BACKWARDS (the definitive one -- adb can also drop for a cable
+#     or a daemon restart, but uptime only falls if the kernel restarted)
+#
+# It records the moment with a local timestamp, so the reboot can be lined up
+# against the streamed logcat afterwards.
+HOSTWD_PID=""
+HOSTWD_FILE=""
+
+host_watchdog_start() {   # $1 = label, $2 = output dir
+    HOSTWD_FILE="$2/$1.hostwd.txt"
+    : > "$HOSTWD_FILE"
+    (
+        base=$($A "su -c 'cut -d. -f1 /proc/uptime'" 2>/dev/null | tr -dc 0-9)
+        echo "$(date -u +%FT%TZ) start uptime=${base:-?}" >> "$HOSTWD_FILE"
+        prev=${base:-0}
+        misses=0
+        while :; do
+            sleep 5
+            now=$($A "su -c 'cut -d. -f1 /proc/uptime'" 2>/dev/null | tr -dc 0-9)
+            if [ -z "$now" ]; then
+                misses=$((misses + 1))
+                # One miss is noise -- adb round trips fail. Three in a row (15s) is the device
+                # going away, and worth recording even if it comes back.
+                [ "$misses" = 3 ] && echo "$(date -u +%FT%TZ) adb unreachable (15s)" >> "$HOSTWD_FILE"
+                continue
+            fi
+            misses=0
+            if [ "$now" -lt "$prev" ]; then
+                echo "$(date -u +%FT%TZ) ANDROID REBOOTED: uptime ${prev}s -> ${now}s" >> "$HOSTWD_FILE"
+                echo "  boot reason: $($A 'getprop sys.boot.reason' 2>/dev/null | tr -d '\r')" >> "$HOSTWD_FILE"
+                echo "  history: $($A 'getprop persist.sys.boot.reason.history' 2>/dev/null | tr -d '\r' | head -c 200)" >> "$HOSTWD_FILE"
+                break
+            fi
+            prev=$now
+        done
+    ) &
+    HOSTWD_PID=$!
+}
+
+host_watchdog_stop() {
+    [ -n "$HOSTWD_PID" ] && kill "$HOSTWD_PID" 2>/dev/null
+    HOSTWD_PID=""
+}
+
+# 0 if the watchdog saw a reboot. Any caller that reports a result should check this first:
+# a reboot mid-run makes the result meaningless, and it is otherwise indistinguishable from
+# whatever was being measured.
+host_rebooted() {
+    [ -n "$HOSTWD_FILE" ] && grep -q "ANDROID REBOOTED" "$HOSTWD_FILE" 2>/dev/null
+}

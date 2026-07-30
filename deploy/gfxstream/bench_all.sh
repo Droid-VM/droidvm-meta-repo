@@ -237,11 +237,14 @@ for entry in "${CONFIGS[@]}"; do
     host_state "before $label" > "$DIAG/$label.host-before.txt"
     grep -E "udmabuf_gki|pool_avail=|MemFree" "$DIAG/$label.host-before.txt" | head -3 | sed 's/^/  /'
     dmesg_clear
+    host_watchdog_start "$label" "$DIAG"
     capture_start "$label" "$dir"
 
     ./bench_one.sh "$label"
 
     capture_stop "$label"
+    host_watchdog_stop
+    host_rebooted && { echo "  !! the phone rebooted during this run:"; sed 's/^/     /' "$DIAG/$label.hostwd.txt"; }
     dmesg_save "$label"
     crosvm_log_save "$label" "$dir"
     host_state "after $label" > "$DIAG/$label.host-after.txt"
