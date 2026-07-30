@@ -117,16 +117,51 @@ host_state() {
 
 # One line every 5s. Whether memory drains slowly or falls off a cliff separates a leak from a
 # single oversized allocation, and only a time series shows which.
-sample_start() {
-    $A "su -c 'rm -f /data/local/tmp/memsample.txt;
-        setsid sh /data/local/tmp/memsample.sh > /data/local/tmp/memsample.txt 2>/dev/null </dev/null &'" >/dev/null 2>&1
+# Stream the evidence OFF the phone as it happens.
+#
+# Anything written to a file on the phone loses its tail when the host reboots -- the page cache
+# never gets flushed. Four host reboots today produced: a crosvm.log frozen at a previous run, a
+# sampler file that did not exist because /data/local/tmp had been cleared by an earlier reboot,
+# and a dmesg wiped by the reboot itself. Nothing survived, three times over.
+#
+# So both capture streams run as long-lived adb commands writing to THIS machine. The reboot kills
+# the adb connection, which ends the stream -- but everything up to that instant is already local.
+CAP_PIDS=""
+
+capture_start() {   # $1 = label
+    # logcat is the only place an Android-side death shows up: a crosvm SIGABRT, a RescueParty
+    # decision, a vendor watchdog. -b all because the crash lands in the crash buffer, not main.
+    ( adb -s "$PHONE" logcat -b all -v threadtime > "$DIAG/$1.logcat.txt" 2>&1 ) &
+    CAP_PIDS="$!"
+
+    # One adb shell that loops on the phone, printing to our stdout. The interval is real (a
+    # per-sample adb invocation costs ~100ms and would miss most of the window) and the output is
+    # already here when the phone goes down.
+    # Columns: epoch MemFree_kB pool_avail_pages udmabuf_refcount crosvm_count
+    ( $A "su -c 'while true; do
+            echo \"\$(date +%s) \$(grep -m1 MemFree /proc/meminfo | tr -dc 0-9) \$(cat /sys/module/gh_hugepage_reserve/parameters/pool_avail 2>/dev/null) \$(cat /sys/module/udmabuf_gki_*/refcnt 2>/dev/null | head -1 || echo -)- \$(ps -A -o ARGS | grep -c \"[c]rosvm --log-level\")\";
+            sleep 5;
+          done'" > "$DIAG/$1.mem.tsv" 2>/dev/null ) &
+    CAP_PIDS="$CAP_PIDS $!"
+    sleep 6
+    # Verify both are producing. A silent collector is worse than none: it looks like evidence.
+    [ -s "$DIAG/$1.logcat.txt" ] || echo "  !! logcat capture is empty"
+    [ -s "$DIAG/$1.mem.tsv" ]    || echo "  !! memory sampling is empty"
 }
-sample_stop() {   # $1 = label
-    $A "su -c 'pkill -f memsample.sh'" >/dev/null 2>&1
-    $A "su -c 'cat /data/local/tmp/memsample.txt'" 2>/dev/null | tr -d '\r' \
-        > "$DIAG/$1.mem.tsv"
-    awk 'NR==1{f=$2} {l=$2; p=$3} END{if(NR) printf "  memory: MemFree %.0f -> %.0fMB over %d samples, pool_avail ended %s\n", f/1024, l/1024, NR, p}' \
-        "$DIAG/$1.mem.tsv"
+
+capture_stop() {   # $1 = label
+    for pid in $CAP_PIDS; do kill "$pid" 2>/dev/null; done
+    CAP_PIDS=""
+    sleep 1
+    local n
+    n=$(grep -c . "$DIAG/$1.mem.tsv" 2>/dev/null || echo 0)
+    awk 'NR==1{f=$2;a=$3} {l=$2;p=$3} END{if(NR) printf "  memory: MemFree %.0f->%.0fMB, pool_avail %s->%s pages, %d samples\n", f/1024, l/1024, a, p, NR}' \
+        "$DIAG/$1.mem.tsv" 2>/dev/null
+    n=$(grep -ciE "SIGABRT|signal 6|Fatal signal|RescueParty|lowmemorykiller|Out of memory|crosvm.*(abort|died)|watchdog" \
+        "$DIAG/$1.logcat.txt" 2>/dev/null || echo 0)
+    echo "  logcat: $(grep -c . "$DIAG/$1.logcat.txt" 2>/dev/null || echo 0) lines, $n matching crash/OOM signatures"
+    [ "$n" != 0 ] && grep -iE "SIGABRT|signal 6|Fatal signal|RescueParty|lowmemorykiller|Out of memory|watchdog" \
+        "$DIAG/$1.logcat.txt" | tail -6 | sed 's/^/     /'
 }
 
 # Kernel-side allocation failures appear ONLY in dmesg, and a host reboot erases them. Cleared
@@ -175,8 +210,13 @@ preflight() {
     stale=$(for d in /proc/[0-9]*; do
                 [ -r "$d/cmdline" ] || continue
                 a1=$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | sed -n 2p)
+                # Only the children. This script cannot check for itself: invoked via its
+                # shebang, argv[1] IS its own path, so including bench_all.sh here made preflight
+                # reject the run it was called from. bench_one.sh and mc_bench.sh are the ones
+                # that get reparented to init and keep driving the phone, which is the real
+                # problem; a duplicate entry point would be caught by the crosvm check below.
                 case "$a1" in
-                    *mc_bench.sh|*bench_one.sh|*bench_all.sh|*sweep_all_routes.sh)
+                    *mc_bench.sh|*bench_one.sh)
                         [ "${d#/proc/}" != "$$" ] && echo "${d#/proc/} $a1" ;;
                 esac
             done)
@@ -227,6 +267,22 @@ preflight() {
         fi
     fi
 
+    # A host reboot unloads the udmabuf hijack module, and the built-in that takes over caps a
+    # dma-buf at 64 MiB and builds its page array with kmalloc_array -- which is a recorded cause of
+    # Minecraft dying on this route. Load it here so the state is the same every run rather than
+    # depending on whether the phone has rebooted since someone last loaded it.
+    if ! $A "su -c 'ls /sys/module | grep -q udmabuf_gki'" 2>/dev/null; then
+        echo "  udmabuf hijack not loaded (a host reboot removes it) -- loading"
+        $A "su -c 'for k in /data/data/cn.classfun.droidvm/usr/lib/modules/*/udmabuf-gki-*.ko; do
+              [ -f \"\$k\" ] && insmod \"\$k\" 2>/dev/null && break; done'" >/dev/null 2>&1
+        if $A "su -c 'ls /sys/module | grep -q udmabuf_gki'" 2>/dev/null; then
+            echo "  loaded, mode=$($A "su -c 'cat /sys/module/udmabuf_gki_*/parameters/mode'" 2>/dev/null | tr -d '\r')"
+        else
+            echo "  !! could not load the udmabuf hijack module -- the built-in will serve with a 64 MiB cap"
+            bad=1
+        fi
+    fi
+
     UPTIME_BEFORE=$($A "su -c 'cut -d. -f1 /proc/uptime'" 2>/dev/null | tr -dc 0-9)
     echo "  preflight: pool=$((${avail:-0} * 2 / 1024))GB live=${live:-?} uptime=${UPTIME_BEFORE:-?}s"
     return $bad
@@ -266,11 +322,11 @@ for entry in "${CONFIGS[@]}"; do
     host_state "before $label" > "$DIAG/$label.host-before.txt"
     grep -E "udmabuf_gki|pool_avail=|MemFree" "$DIAG/$label.host-before.txt" | head -3 | sed 's/^/  /'
     dmesg_clear
-    sample_start
+    capture_start "$label"
 
     ./bench_one.sh "$label"
 
-    sample_stop "$label"
+    capture_stop "$label"
     dmesg_save "$label"
     crosvm_log_save "$label" "$dir"
     host_state "after $label" > "$DIAG/$label.host-after.txt"
