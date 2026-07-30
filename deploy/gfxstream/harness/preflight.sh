@@ -57,15 +57,41 @@ preflight() {
         bad=1
     fi
 
+    # Reconcile before reading, or the orphan tally is whatever the LAST reconcile computed, which
+    # may be minutes stale and outlive the condition it describes. That is not hypothetical: a
+    # single page lost hours earlier had already been purged from the served table (tracked=0), but
+    # the stale orphan_inuse=1 sat there and made preflight refuse every subsequent run. The write
+    # is also the module's reacquire scavenger, so this makes the check "is anything ACTUALLY still
+    # stranded" rather than "did anything ever get stranded".
     local live orphan
+    $A "su -c 'echo 1 > /sys/module/gh_hugepage_reserve/parameters/reconcile'" >/dev/null 2>&1
+    sleep 1
     live=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/served_summary'" 2>/dev/null \
            | tr -d '\r' | sed -n 's/^live=//p')
     orphan=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/served_summary'" 2>/dev/null \
              | tr -d '\r' | sed -n 's/^orphan_inuse=//p')
-    if [ "${live:-0}" != 0 ] || [ "${orphan:-0}" != 0 ]; then
-        echo "  !! reserve pool still serving: live=${live:-?} orphan_inuse=${orphan:-?}"
-        echo "     something still holds memparcels; close the other VM (orphan_inuse needs a reboot)"
+    # live and orphan_inuse are NOT the same kind of problem, and treating them alike made this
+    # check refuse runs it had no business refusing.
+    #
+    #   live           pages a CURRENTLY TRACKED VM owner still holds. A second VM is up, or one
+    #                  did not shut down. Starting now means two VMs fighting over the pool, and
+    #                  the resulting ENOMEM reads as the pool being too small. Refuse.
+    #
+    #   orphan_inuse   pages whose owner is gone and whose 2MB block somebody else has since
+    #                  taken. These are PERMANENT losses of pool capacity -- measured at 1-2 per
+    #                  shutdown -- not memory anyone is still holding, and no VM shutdown will
+    #                  ever bring them back. Refusing on them meant the check blocked the first
+    #                  run after any normal shutdown; it silently skipped a whole configuration
+    #                  out of a sweep that way. The pool refills the capacity via acquire below,
+    #                  which is the actual remedy. So: report it, do not refuse.
+    if [ "${live:-0}" != 0 ]; then
+        echo "  !! reserve pool still serving: live=${live}"
+        echo "     another VM still holds memparcels; shut it down (poweroff, never kill -9)"
         bad=1
+    fi
+    if [ "${orphan:-0}" != 0 ]; then
+        echo "  note: ${orphan} pool page(s) permanently lost to other allocations ($(( ${orphan:-0} * 2 ))MB)"
+        echo "        capacity, not a live holder -- acquire refills it; see plans/POOL_RECLAIM_PLAN.md"
     fi
 
     # Short pool: ask the module to refill rather than failing the run. acquire is write-only and

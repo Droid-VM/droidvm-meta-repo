@@ -18,12 +18,57 @@ A="adb -s $PHONE shell"
 SSH="ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=no $GUEST"
 
 CONFIGS=(
-  "purepool:crosvm_gfx:run_ubuntu_gfx_purepool.sh"
-  "fusion:crosvm_gfx:run_ubuntu_gfx_fusion.sh"
-  "runtimeshare:crosvm_gfx:run_ubuntu_gfx.sh"
-  "guestalloc:crosvm_gfx:run_ubuntu_gfx_guestalloc.sh"
-  "drm2kgsl:crosvm_drm2kgsl:run_drm2kgsl_nctx.sh"
+  "purepool:crosvm_gfx:run_ubuntu_gfx_purepool.sh:gfxstream"
+  "fusion:crosvm_gfx:run_ubuntu_gfx_fusion.sh:gfxstream"
+  "runtimeshare:crosvm_gfx:run_ubuntu_gfx.sh:gfxstream"
+  "guestalloc:crosvm_gfx:run_ubuntu_gfx_guestalloc.sh:gfxstream"
+  "drm2kgsl:crosvm_drm2kgsl:run_drm2kgsl_nctx.sh:drm2kgsl"
 )
+
+# The two guest mesa variants CANNOT be installed at the same time: 60 of mesa-guest-gfxstream's
+# 63 files share a path with mesa-guest-drm2kgsl (every kmsro *_dri.so, the gbm backend, the
+# headers), so whichever is installed last silently owns them. Only the leaf libraries and ICDs
+# have distinct names -- libvulkan_gfxstream.so vs libvulkan_freedreno.so,
+# gfxstream_vk_icd.aarch64.json vs freedreno_icd.aarch64.json, libgallium-26.0.3.so vs
+# libgallium-26.3.0-devel.so.
+#
+# This bit the sweep: with drm2kgsl installed, `dpkg -L mesa-guest-gfxstream` listed NOTHING (it
+# had lost every path) and /usr/local/share/vulkan/icd.d/ held only the freedreno ICD. The env
+# file both packages ship, /usr/lib/environment.d/50-mesa-guest.conf, then pointed every session's
+# VK_DRIVER_FILES at freedreno -- so under a gfxstream VM turnip looked for /dev/kgsl, found
+# nothing, GNOME Shell failed to start, and gdm gave up. All four gfxstream configurations read as
+# "no desktop session", which looks like the route being broken rather than the deb that was
+# installed last.
+#
+# Swapping the deb per route is the fix that works today; making them coexist needs per-variant
+# install prefixes, which is a build change. The env file is shipped BY each package, so
+# installing the right one also repoints VK_DRIVER_FILES -- the swap self-heals.
+MESA_DEB_DIR=${MESA_DEB_DIR:-/opt/droidvm-mesa}
+
+mesa_ensure() {   # $1 = variant (gfxstream | drm2kgsl)
+    local want=$1 have
+    have=$($SSH "sed -n 's/^# Installed by mesa-guest-\([a-z0-9]*\).*/\1/p' \
+                 /usr/lib/environment.d/50-mesa-guest.conf 2>/dev/null" 2>/dev/null | tr -d '\r')
+    if [ "$have" = "$want" ]; then
+        echo "  guest mesa: $want (already installed)"
+        return 0
+    fi
+    echo "  guest mesa: have=${have:-none} want=$want -- swapping"
+    if ! $SSH "ls $MESA_DEB_DIR/mesa-guest-$want*.deb" >/dev/null 2>&1; then
+        echo "  !! no mesa-guest-$want deb in $MESA_DEB_DIR on the guest -- push it first"
+        return 1
+    fi
+    # --force-all because both packages Provide/Conflict mesa-guest and share 60 paths; dpkg is
+    # right to object and we are overriding it deliberately, one route at a time.
+    $SSH "dpkg -i --force-all $MESA_DEB_DIR/mesa-guest-$want*.deb >/dev/null 2>&1; ldconfig 2>/dev/null" >/dev/null 2>&1
+    have=$($SSH "sed -n 's/^# Installed by mesa-guest-\([a-z0-9]*\).*/\1/p' \
+                 /usr/lib/environment.d/50-mesa-guest.conf 2>/dev/null" 2>/dev/null | tr -d '\r')
+    [ "$have" = "$want" ] || { echo "  !! swap failed, env file still says '${have:-none}'"; return 1; }
+    # The session inherited the OLD environment.d, so it has to be rebuilt.
+    $SSH 'systemctl restart gdm' >/dev/null 2>&1
+    echo "  swapped to $want, gdm restarted"
+    return 0
+}
 
 # Preflight, the bridge check and the uptime comparison live in one place; see the note there
 # for why they are not duplicated per driver.
@@ -218,7 +263,7 @@ crosvm_log_save() {   # $1 = label, $2 = dir
 }
 want=("$@")
 for entry in "${CONFIGS[@]}"; do
-    IFS=: read -r label dir launcher <<< "$entry"
+    IFS=: read -r label dir launcher mesa <<< "$entry"
     if [ ${#want[@]} -gt 0 ]; then
         printf '%s\n' "${want[@]}" | grep -qx "$label" || continue
     fi
@@ -227,6 +272,9 @@ for entry in "${CONFIGS[@]}"; do
     bridge_up || continue
     vm_down || continue
     vm_up "$dir" "$launcher" || continue
+    # Before waiting on the desktop, not after: a wrong-variant guest fails desktop_wait after
+    # 300s of waiting and a gdm restart, and reports it as if the route were broken.
+    mesa_ensure "$mesa" || { vm_down; continue; }
     desktop_wait || { vm_down; continue; }
     # Minecraft rewrites preferredGraphicsBackend to "default" (= zink/OpenGL) after a Vulkan
     # crash, and then every later run silently measures zink. The log line is the only place it

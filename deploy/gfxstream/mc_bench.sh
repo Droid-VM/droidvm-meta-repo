@@ -163,6 +163,20 @@ backend_line() {
 if [ "$launch" = 1 ]; then
     echo "==> launching Minecraft"
     ssh -o ConnectTimeout=10 "$GUEST" 'pkill -f "[p]ortablemc" 2>/dev/null; pkill -x java 2>/dev/null; sleep 2
+        # Restore the world from a pristine copy so every configuration renders the IDENTICAL
+        # scene. Minecraft persists the player position and camera angle into the save, so any
+        # stray pointer event -- and there were four of them, left over from the pre-quickplay menu
+        # walk -- permanently changes what later runs measure. Without this the sweep compares
+        # camera angles: 120, 125, then 222 fps as the view drifted down onto bare sand.
+        # Create the pristine copy with:  cp -a "New World" "New World.pristine"
+        W=/home/droidvm/.minecraft/saves
+        if [ -d "$W/New World.pristine" ]; then
+            rm -rf "$W/New World"
+            cp -a "$W/New World.pristine" "$W/New World"
+            chown -R droidvm:droidvm "$W/New World"
+        else
+            echo "WARNING: no pristine world; the camera will drift between runs and the fps column will not compare"
+        fi
         # A crash resets this to "default", which silently demotes the next run to zink.
         sed -i "s/^preferredGraphicsBackend:.*/preferredGraphicsBackend:\"vulkan\"/" /home/droidvm/.minecraft/options.txt
         mv -f /home/droidvm/mc_diag.log /home/droidvm/mc_diag.log.old 2>/dev/null
@@ -174,22 +188,113 @@ if [ "$launch" = 1 ]; then
         # drm2kgsl leaves Minecraft without an ICD it can use, and it reports "Failed to find
         # the GLFW platform surface extensions" -- which looks like a WSI bug in turnip, while
         # vulkaninfo and vkmark both work because they are run with the environment set by hand.
+        #
+        # Choose it by the mesa variant that is actually INSTALLED, not by whether a file exists.
+        # Testing for the freedreno ICD was wrong: the two variants share 60 install paths but not
+        # all of them, so installing mesa-guest-gfxstream overwrites the shared ones and leaves
+        # drm2kgsl extras -- including freedreno_icd.aarch64.json -- orphaned on disk. The test
+        # then picked the drm2kgsl launcher under gfxstream, Minecraft got VK_DRIVER_FILES pointing
+        # at turnip, turnip looked for /dev/kgsl in a VM that has none, and it died with
+        # "Failed to get number of physical devices" -- which reads as the route being broken.
+        # The env file is shipped BY the package, so its header names the live variant.
+        V=$(sed -n "s/^# Installed by mesa-guest-\([a-z0-9]*\).*/\1/p" \
+            /usr/lib/environment.d/50-mesa-guest.conf 2>/dev/null)
         L=/home/droidvm/launch_mc_vk.sh
-        [ -e /usr/local/share/vulkan/icd.d/freedreno_icd.aarch64.json ] \
-            && [ -f /home/droidvm/launch_mc_kgsl_nctx.sh ] \
+        [ "$V" = drm2kgsl ] && [ -f /home/droidvm/launch_mc_kgsl_nctx.sh ] \
             && L=/home/droidvm/launch_mc_kgsl_nctx.sh
+        echo "mesa variant: ${V:-unknown}"
         echo "launcher: $L"
         sudo -u droidvm bash "$L"' >/dev/null 2>&1
     # The main menu takes a while; the first click only focuses the window.
     sleep 50
-    vncdo -s "$VNC" move 639 322 click 1 >/dev/null 2>&1; sleep 4
-    echo "==> Singleplayer"
-    vncdo -s "$VNC" move 639 325 click 1 >/dev/null 2>&1; sleep 5
-    echo "==> select world"
-    vncdo -s "$VNC" move 640 183 click 1 >/dev/null 2>&1; sleep 2
-    echo "==> Play Selected World"
-    vncdo -s "$VNC" move 533 663 click 1 >/dev/null 2>&1
+
+    # Assert the backend BEFORE driving the menus, and take one retry.
+    #
+    # Minecraft resets preferredGraphicsBackend to "default" whenever it detects that the last
+    # startup ended unexpectedly, and it does so AFTER reading options.txt -- so writing "vulkan"
+    # in above is not enough by itself. Every benchmark run ends by killing Minecraft, and the JVM
+    # then segfaults inside the libopenal atexit path (hs_err names libopenal.so under vm_exit),
+    # which is exactly the "ended unexpectedly" that arms the reset. So the second and every later
+    # configuration in a sweep silently measured OpenGL-on-zink while reporting itself as Vulkan.
+    #
+    # One clean relaunch is enough -- verified: options.txt stays "vulkan" and the log reads
+    # "Using graphics backend Vulkan".
+    if [ "$(backend_line)" != Vulkan ]; then
+        echo "==> backend came up as $(backend_line), not Vulkan -- relaunching once"
+        ssh -o ConnectTimeout=10 "$GUEST" 'pkill -f "[n]et\.minecraft\.client\.main\.Main" 2>/dev/null
+            pkill -f "[j]ava_wrap.sh" 2>/dev/null; sleep 5
+            sed -i "s/^preferredGraphicsBackend:.*/preferredGraphicsBackend:\"vulkan\"/" \
+                /home/droidvm/.minecraft/options.txt
+            mv -f /home/droidvm/mc_diag.log /home/droidvm/mc_diag.log.old2 2>/dev/null
+            V=$(sed -n "s/^# Installed by mesa-guest-\([a-z0-9]*\).*/\1/p" \
+                /usr/lib/environment.d/50-mesa-guest.conf 2>/dev/null)
+            L=/home/droidvm/launch_mc_vk.sh
+            [ "$V" = drm2kgsl ] && [ -f /home/droidvm/launch_mc_kgsl_nctx.sh ] \
+                && L=/home/droidvm/launch_mc_kgsl_nctx.sh
+            sudo -u droidvm bash "$L"' >/dev/null 2>&1
+        sleep 50
+        echo "==> backend after retry: $(backend_line)"
+    fi
+
+    echo "==> loaded via --quickPlaySingleplayer (straight into the world, no menu to click)"
     sleep 45
+
+    # ---- make sure the game, not the GNOME shell, owns the keyboard --------------------------
+    #
+    # GNOME sometimes sits in the Activities overview. Minecraft is a thumbnail there, it keeps
+    # rendering -- so a capture looks perfectly plausible -- and every keystroke belongs to the
+    # shell, so F6 never reaches the game. Observed directly while resetting the camera by hand.
+    #
+    # Escape leaves the overview and is keyboard-only. A click is the fallback and it is safe
+    # HERE, and only here, because the overview has released the pointer: once the world has
+    # focus the mouse is captured and any pointer event is a camera rotation (see below).
+    focus_game() {
+        local i st
+        for i in 1 2 3; do
+            vncdo -s "$VNC" capture "$OUT/.focus.png" >/dev/null 2>&1
+            st=$(python3 "$(dirname "$0")/mc_read_fps.py" "$OUT/.focus.png" 2>&1)
+            case "$st" in
+                *state=overview*) ;;
+                *) [ "$i" = 1 ] || echo "    focused after $i attempt(s)"; return 0 ;;
+            esac
+            echo "    GNOME is in the Activities overview -- leaving it (attempt $i)"
+            vncdo -s "$VNC" key esc >/dev/null 2>&1; sleep 3
+            vncdo -s "$VNC" capture "$OUT/.focus.png" >/dev/null 2>&1
+            st=$(python3 "$(dirname "$0")/mc_read_fps.py" "$OUT/.focus.png" 2>&1)
+            case "$st" in
+                *state=overview*) vncdo -s "$VNC" move 640 400 click 1 >/dev/null 2>&1; sleep 3 ;;
+            esac
+        done
+        echo "    !! still in the overview -- this run is not measurable"
+        return 1
+    }
+    echo "==> checking the game has focus"
+    focus_game
+
+    # ---- put the scene in a known state ------------------------------------------------------
+    #
+    # Keyboard only, and re-applied every run. This is what makes the Minecraft column comparable
+    # at all: /tp fixes position AND rotation at MEASUREMENT time, so it does not matter what
+    # touched the camera earlier. Restoring a pristine world (still done above) only fixes the
+    # STARTING state -- and Minecraft saves the camera angle, so one stray pointer event silently
+    # changed the scene for the rest of that run and for every later run. That is exactly what
+    # happened on 2026-07-30: the view walked down onto bare sand and "the configurations" read
+    # 120, 125, then 222 fps while measuring nothing but camera angle.
+    #
+    # Time and weather are pinned for the same reason -- a sky that has moved on, or rain, changes
+    # how much there is to draw. The world has allowCommands=1, so these all work.
+    mc_cmd() {
+        vncdo -s "$VNC" key t >/dev/null 2>&1; sleep 1
+        vncdo -s "$VNC" type "$1" >/dev/null 2>&1; sleep 1
+        vncdo -s "$VNC" key enter >/dev/null 2>&1; sleep 2
+    }
+    echo "==> normalising the scene (view, position, time, weather)"
+    mc_cmd "/gamerule doDaylightCycle false"
+    mc_cmd "/gamerule doWeatherCycle false"
+    mc_cmd "/time set noon"
+    mc_cmd "/weather clear"
+    mc_cmd "/tp @s 75.66 80 97.34 0 0"
+    sleep 5
 fi
 
 # The primary number: guest vkQueueSubmit calls per second, from the host's own SUBMITPROF line
@@ -220,32 +325,47 @@ rate=$(awk -v n1="${sn1:-0}" -v t1="${st1:-0}" -v n2="${sn2:-0}" -v t2="${st2:-0
 # dark and very bright pixels no matter what the world looks like behind it. (Sampling the fps
 # line instead, as an earlier version did, read a bright sky as "already on".) Keep whichever
 # capture has the overlay rather than assuming the first press turned it on.
-overlay_on() { python3 -c "
-import sys
-from PIL import Image
-d = list(Image.open(sys.argv[1]).convert('L').crop((0, 296, 430, 334)).getdata())
-sys.exit(0 if sum(p < 60 for p in d) > 150 and sum(p > 180 for p in d) > 150 else 1)" "$1" 2>/dev/null; }
-
+# Do not test the pixels for "is the overlay on" -- use the fps reader itself as the oracle.
+#
+# The previous check cropped a fixed rectangle (0,296)-(430,334) looking for the debug-chart
+# legend, and that rectangle was tuned for Minecraft windowed at 960x471. It is therefore a hidden
+# dependency on window geometry: when the geometry moved, the crop landed on open sky, every
+# capture read as "overlay off", and the loop pressed F6 an EVEN number of times -- turning a
+# working overlay back off and saving that frame. Three configurations in one sweep reported
+# "unread" while rendering perfectly, and the obvious remedy (force fullscreen, so the geometry is
+# deterministic) made it worse for exactly the same reason.
+#
+# What the run actually needs is a readable number, and mc_read_fps.py already knows how to find
+# the fps line and how to reject the Activities-overview case. So: press, read, stop when it reads.
 shot="$OUT/mc_$(date +%H%M%S)${label:+_$label}.png"
 echo "==> F6 overlay"
 before=$(env_line)
-for attempt in 1 2 3; do
+fps_out=""
+for attempt in 1 2 3 4 5 6; do
     vncdo -s "$VNC" capture "$shot" >/dev/null 2>&1
-    overlay_on "$shot" && break
+    fps_out=$(python3 "$(dirname "$0")/mc_read_fps.py" "$shot" 2>&1)
+    case "$fps_out" in fps=*) break ;; esac
+    # GNOME sometimes comes up sitting in the Activities overview, and then Minecraft is a
+    # thumbnail and every keystroke belongs to the shell -- F6 never reaches the game, and more F6
+    # presses only toggle shell things. Observed directly. Escape leaves the overview and is a
+    # keyboard event, so unlike a click it cannot disturb the camera.
+    case "$fps_out" in
+        *state=overview*) vncdo -s "$VNC" key esc >/dev/null 2>&1; sleep 3 ;;
+    esac
+    # NEVER move the pointer once the world is loaded. Minecraft has the mouse captured in-game, so
+    # a vncdo move is a CAMERA ROTATION, not a focus click, and Minecraft persists the resulting
+    # angle into the save -- so one stray move corrupts every LATER run too. If F6 does not land,
+    # spend another attempt on it rather than a pointer event: the camera is part of the
+    # measurement, and the pristine-world restore above only helps if nothing moves it afterwards.
     vncdo -s "$VNC" key f6 >/dev/null 2>&1
     sleep 6
 done
-overlay_on "$shot" || echo "    WARNING: no overlay in the capture; fps is not readable"
 after=$(env_line)
 echo "==> $shot"
 echo "    guest submits: $rate     <- the number to compare between builds"
-# Read the number rather than leaving it to the eye. mc_read_fps.py also fails the run when the
-# shell is in the Activities overview -- the game keeps rendering as a thumbnail there, so the
-# capture looks fine and the fps is whatever was last drawn at full size.
-fps_out=$(python3 "$(dirname "$0")/mc_read_fps.py" "$shot" 2>&1)
 case "$fps_out" in
     fps=*) echo "    ${fps_out#fps=} fps" ;;
-    *)     echo "    fps unreadable: $fps_out" ;;
+    *)     echo "    fps unreadable after 4 attempts: $fps_out" ;;
 esac
 echo "    backend: $(backend_line)   (Vulkan expected; OpenGL means it fell back to zink)"
 echo "    env: $after"
@@ -264,3 +384,25 @@ fi
 # The host's own view, for attributing a change to the transport rather than the game.
 $A 'su -c "logcat -d -b all | grep SUBMITPROF | tail -1"' 2>/dev/null | tr -d '\r' \
     | sed -E 's/.*(pre=[0-9.]+).*(dispatch=[0-9.]+).*(busy=[0-9.]+).*(idle-waiting-for-guest=[0-9.]+).*/    host: \1 \2 \3 \4/'
+
+# ---- step 10: stop Minecraft cleanly, so vkmark does not share the GPU with it ----------------
+#
+# vkmark runs next (in bench_one.sh) with only a short gap, so whatever Minecraft is still doing
+# lands in the vkmark score. Escape opens the pause menu -- which also RELEASES the pointer, so
+# the menu click below cannot rotate the camera -- and "Save and Quit to Title" both writes the
+# world and stops the world rendering. Coordinates are for the 1280x720 VNC framebuffer.
+#
+# The pkill that follows in bench_one.sh stays as the backstop: the JVM segfaults inside
+# libopenal's atexit path on the way out (hs_err names libopenal.so under vm_exit), so a kill is
+# how it ends either way -- but by then the save has already happened.
+if [ "$launch" = 1 ]; then
+    echo "==> quitting Minecraft (Escape -> Save and Quit to Title)"
+    vncdo -s "$VNC" key esc >/dev/null 2>&1; sleep 3
+    vncdo -s "$VNC" move 640 400 click 1 >/dev/null 2>&1
+    for i in $(seq 1 15); do
+        sleep 3
+        ssh -o ConnectTimeout=8 -o StrictHostKeyChecking=no "$GUEST" \
+            'pgrep -f "[n]et\.minecraft\.client\.main\.Main" >/dev/null' 2>/dev/null \
+            || { echo "    Minecraft gone after $((i*3))s"; break; }
+    done
+fi
