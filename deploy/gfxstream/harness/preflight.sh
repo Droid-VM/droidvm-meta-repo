@@ -1,0 +1,137 @@
+#!/bin/bash
+# Shared preflight for anything that starts a VM on this phone.
+#
+# One definition, sourced by every driver. The alternative was tried: bench_all.sh and
+# sweep_all_routes.sh each had their own copy of the desktop wait, they drifted, and the stricter
+# one silently rejected four configurations. And fdsetsize_repro.sh was written with NO preflight
+# at all, which would have let it start a VM against a short reserve pool and then blame the
+# resulting ENOMEM on whatever it was actually testing.
+#
+# Expects the caller to have set: PHONE, A ("adb -s $PHONE shell"), SSH.
+# Sets UPTIME_BEFORE, for uptime_check to compare against afterwards.
+
+# Refuse to start a run the host is not in a fit state for. Every check here corresponds to a
+# measurement this project has already thrown away.
+#
+# Stale local processes: killing bench_all.sh leaves bench_one.sh and mc_bench.sh reparented to
+# init, still pinning clocks and clicking through VNC. Three of them were found running hours
+# after the run that spawned them, and the phone rebooted while they fought over it -- which read
+# as "the drm2kgsl route can kill the host" until the process list was checked.
+#
+# A second crosvm: two VMs competing for the reserve pool produce ENOMEM that looks exactly like
+# the pool being too small.
+#
+# live/orphan_inuse: memparcels still held. orphan_inuse in particular is memory the RM will not
+# reclaim until the phone reboots, which is what a SIGKILL'd crosvm leaves behind.
+preflight() {
+    local bad=0 n
+
+    # Match on argv[1], not on the whole command line. Any shell whose -c text merely MENTIONS
+    # mc_bench.sh -- including the one running this check -- matches a substring search, which is
+    # both how earlier pkills killed the wrong thing and how this check first reported a stale
+    # process that was itself. A real invocation has argv[1] = the script; a wrapper has "-c".
+    local stale
+    stale=$(for d in /proc/[0-9]*; do
+                [ -r "$d/cmdline" ] || continue
+                a1=$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | sed -n 2p)
+                # Only the children. This script cannot check for itself: invoked via its
+                # shebang, argv[1] IS its own path, so including bench_all.sh here made preflight
+                # reject the run it was called from. bench_one.sh and mc_bench.sh are the ones
+                # that get reparented to init and keep driving the phone, which is the real
+                # problem; a duplicate entry point would be caught by the crosvm check below.
+                case "$a1" in
+                    *mc_bench.sh|*bench_one.sh)
+                        [ "${d#/proc/}" != "$$" ] && echo "${d#/proc/} $a1" ;;
+                esac
+            done)
+    if [ -n "$stale" ]; then
+        n=$(printf '%s\n' "$stale" | grep -c .)
+        echo "  !! $n stale bench process(es) on this machine -- kill them first:"
+        printf '%s\n' "$stale" | sed 's/^/     /'
+        bad=1
+    fi
+
+    n=$($A "su -c 'ps -A -o ARGS | grep -cE \"[c]rosvm\"'" 2>/dev/null | tr -dc 0-9)
+    if [ "${n:-0}" -gt 0 ]; then
+        echo "  !! $n crosvm already running on the phone -- shut it down (poweroff, never kill -9)"
+        bad=1
+    fi
+
+    local live orphan
+    live=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/served_summary'" 2>/dev/null \
+           | tr -d '\r' | sed -n 's/^live=//p')
+    orphan=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/served_summary'" 2>/dev/null \
+             | tr -d '\r' | sed -n 's/^orphan_inuse=//p')
+    if [ "${live:-0}" != 0 ] || [ "${orphan:-0}" != 0 ]; then
+        echo "  !! reserve pool still serving: live=${live:-?} orphan_inuse=${orphan:-?}"
+        echo "     something still holds memparcels; close the other VM (orphan_inuse needs a reboot)"
+        bad=1
+    fi
+
+    # Short pool: ask the module to refill rather than failing the run. acquire is write-only and
+    # any write triggers a refill attempt; it is bounded by acquire_mem_floor_mb, so it will not
+    # take the host below its own floor.
+    local avail wantp
+    avail=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/pool_avail'" 2>/dev/null | tr -dc 0-9)
+    wantp=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/pool_want'" 2>/dev/null | tr -dc 0-9)
+    if [ "${avail:-0}" -lt "${wantp:-0}" ]; then
+        echo "  pool short: avail=$avail want=$wantp pages (2MB each) -- triggering acquire"
+        for _ in 1 2 3; do
+            $A "su -c 'echo 1 > /sys/module/gh_hugepage_reserve/parameters/acquire'" >/dev/null 2>&1
+            sleep 10
+            avail=$($A "su -c 'cat /sys/module/gh_hugepage_reserve/parameters/pool_avail'" 2>/dev/null | tr -dc 0-9)
+            [ "${avail:-0}" -ge "${wantp:-0}" ] && break
+        done
+        if [ "${avail:-0}" -lt "${wantp:-0}" ]; then
+            echo "  !! pool still short after acquire: avail=$avail want=$wantp"
+            echo "     free host memory (background apps) -- the module will not go below acquire_mem_floor_mb"
+            bad=1
+        else
+            echo "  pool refilled: avail=$avail pages ($((avail * 2 / 1024)) GB)"
+        fi
+    fi
+
+    # A host reboot unloads the udmabuf hijack module, and the built-in that takes over caps a
+    # dma-buf at 64 MiB and builds its page array with kmalloc_array -- which is a recorded cause of
+    # Minecraft dying on this route. Load it here so the state is the same every run rather than
+    # depending on whether the phone has rebooted since someone last loaded it.
+    if ! $A "su -c 'ls /sys/module | grep -q udmabuf_gki'" 2>/dev/null; then
+        echo "  udmabuf hijack not loaded (a host reboot removes it) -- loading"
+        $A "su -c 'for k in /data/data/cn.classfun.droidvm/usr/lib/modules/*/udmabuf-gki-*.ko; do
+              [ -f \"\$k\" ] && insmod \"\$k\" 2>/dev/null && break; done'" >/dev/null 2>&1
+        if $A "su -c 'ls /sys/module | grep -q udmabuf_gki'" 2>/dev/null; then
+            echo "  loaded, mode=$($A "su -c 'cat /sys/module/udmabuf_gki_*/parameters/mode'" 2>/dev/null | tr -d '\r')"
+        else
+            echo "  !! could not load the udmabuf hijack module -- the built-in will serve with a 64 MiB cap"
+            bad=1
+        fi
+    fi
+
+    UPTIME_BEFORE=$($A "su -c 'cut -d. -f1 /proc/uptime'" 2>/dev/null | tr -dc 0-9)
+    echo "  preflight: pool=$((${avail:-0} * 2 / 1024))GB live=${live:-?} uptime=${UPTIME_BEFORE:-?}s"
+    return $bad
+}
+
+# A host reboot mid-run invalidates the measurement and is worth saying out loud, because from the
+# harness's point of view it is indistinguishable from the VM dying.
+uptime_check() {
+    local now
+    now=$($A "su -c 'cut -d. -f1 /proc/uptime'" 2>/dev/null | tr -dc 0-9)
+    if [ "${now:-0}" -lt "${UPTIME_BEFORE:-0}" ]; then
+        echo "  !! HOST REBOOTED during this run (uptime ${UPTIME_BEFORE}s -> ${now}s) -- discard it"
+        echo "     boot reason: $($A "su -c 'getprop sys.boot.reason'" 2>/dev/null | tr -d '\r')"
+        return 1
+    fi
+    return 0
+}
+
+# The app owns br-wifi and the app keeps going away; when it does, the next VM boots with no
+# network at all and every ssh in this script times out. Checked per configuration, not once.
+bridge_up() {
+    $A "su -c 'ip link show br-wifi'" >/dev/null 2>&1 && return 0
+    echo "  br-wifi missing -- starting the app"
+    $A 'am start -n cn.classfun.droidvm/.ui.SplashActivity' >/dev/null 2>&1
+    for _ in $(seq 1 15); do sleep 4; $A "su -c 'ip link show br-wifi'" >/dev/null 2>&1 && return 0; done
+    echo "  !! br-wifi never appeared"; return 1
+}
+
