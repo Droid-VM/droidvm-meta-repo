@@ -168,7 +168,18 @@ if [ "$launch" = 1 ]; then
         mv -f /home/droidvm/mc_diag.log /home/droidvm/mc_diag.log.old 2>/dev/null
         # No droidvm session means no :0, and Minecraft dies on "Failed to open display".
         [ -S /run/user/1001/wayland-0 ] || { systemctl restart gdm; sleep 25; }
-        sudo -u droidvm bash /home/droidvm/launch_mc_vk.sh' >/dev/null 2>&1
+        # Pick the launcher that matches the route the VM is running. launch_mc_vk.sh is
+        # gfxstream'"'"'s; the DRM route has its own, which exports VK_DRIVER_FILES pointing at the
+        # freedreno ICD (and DBUS_SESSION_BUS_ADDRESS). Launching the gfxstream one under
+        # drm2kgsl leaves Minecraft without an ICD it can use, and it reports "Failed to find
+        # the GLFW platform surface extensions" -- which looks like a WSI bug in turnip, while
+        # vulkaninfo and vkmark both work because they are run with the environment set by hand.
+        L=/home/droidvm/launch_mc_vk.sh
+        [ -e /usr/local/share/vulkan/icd.d/freedreno_icd.aarch64.json ] \
+            && [ -f /home/droidvm/launch_mc_kgsl_nctx.sh ] \
+            && L=/home/droidvm/launch_mc_kgsl_nctx.sh
+        echo "launcher: $L"
+        sudo -u droidvm bash "$L"' >/dev/null 2>&1
     # The main menu takes a while; the first click only focuses the window.
     sleep 50
     vncdo -s "$VNC" move 639 322 click 1 >/dev/null 2>&1; sleep 4
