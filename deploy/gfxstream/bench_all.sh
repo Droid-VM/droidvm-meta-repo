@@ -180,7 +180,7 @@ capture_stop() {   # $1 = label
     CAP_PIDS=""
     sleep 1
     local n
-    n=$(grep -c . "$DIAG/$1.mem.tsv" 2>/dev/null || echo 0)
+    n=$(grep -c . "$DIAG/$1.mem.tsv" 2>/dev/null || true)
     awk 'NR==1{f=$2;a=$3} {l=$2;p=$3} END{if(NR) printf "  memory: MemFree %.0f->%.0fMB, pool_avail %s->%s pages, %d samples\n", f/1024, l/1024, a, p, NR}' \
         "$DIAG/$1.mem.tsv" 2>/dev/null
     if [ -s "$DIAG/$1.death.txt" ]; then
@@ -190,7 +190,7 @@ capture_stop() {   # $1 = label
     fi
     n=$(grep -ciE "SIGABRT|signal 6|Fatal signal|RescueParty|lowmemorykiller|Out of memory|crosvm.*(abort|died)|watchdog" \
         "$DIAG/$1.logcat.txt" 2>/dev/null || echo 0)
-    echo "  logcat: $(grep -c . "$DIAG/$1.logcat.txt" 2>/dev/null || echo 0) lines, $n matching crash/OOM signatures"
+    echo "  logcat: $(grep -c . "$DIAG/$1.logcat.txt" 2>/dev/null || true) lines, $n matching crash/OOM signatures"
     [ "$n" != 0 ] && grep -iE "SIGABRT|signal 6|Fatal signal|RescueParty|lowmemorykiller|Out of memory|watchdog" \
         "$DIAG/$1.logcat.txt" | tail -6 | sed 's/^/     /'
 }
@@ -204,7 +204,7 @@ dmesg_clear() { DMESG_MARK=$($A "su -c 'dmesg | wc -l'" 2>/dev/null | tr -dc 0-9
 dmesg_save()  {
     $A "su -c 'dmesg'" 2>/dev/null | tr -d '\r' | tail -n "+$((DMESG_MARK + 1))" > "$DIAG/$1.dmesg.txt"
     local n
-    n=$(grep -ciE "page allocation failure|Out of memory|oom-kill|order-[0-9]+.*fail|udmabuf" "$DIAG/$1.dmesg.txt" 2>/dev/null || echo 0)
+    n=$(grep -ciE "page allocation failure|Out of memory|oom-kill|order-[0-9]+.*fail|udmabuf" "$DIAG/$1.dmesg.txt" 2>/dev/null || true)
     [ "$n" != 0 ] && echo "  dmesg: $n lines matching allocation-failure/udmabuf -- see $DIAG/$1.dmesg.txt"
 }
 
@@ -213,7 +213,7 @@ dmesg_save()  {
 crosvm_log_save() {   # $1 = label, $2 = dir
     $A "su -c 'cat /data/local/tmp/$2/crosvm.log'" 2>/dev/null | tr -d '\r' > "$DIAG/$1.crosvm.log"
     local n
-    n=$(grep -ciE "error|panic|fatal|Out of memory" "$DIAG/$1.crosvm.log" 2>/dev/null || echo 0)
+    n=$(grep -ciE "error|panic|fatal|Out of memory" "$DIAG/$1.crosvm.log" 2>/dev/null || true)
     echo "  crosvm.log: $(wc -l < "$DIAG/$1.crosvm.log") lines, $n matching error/OOM -> $DIAG/$1.crosvm.log"
 }
 want=("$@")

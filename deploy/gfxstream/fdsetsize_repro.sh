@@ -93,7 +93,7 @@ sleep 8
 echo "=== 4. verdict ==="
 uptime_check || { echo "  the host rebooted during this run -- verdict is not trustworthy"; exit 4; }
 AFTER=$(crosvm_pid)
-ABORTS=$(grep -c "FORTIFY: FD_SET" "$OUT/logcat.txt" 2>/dev/null || echo 0)
+ABORTS=$(grep -c "FORTIFY: FD_SET" "$OUT/logcat.txt" 2>/dev/null || true)
 echo "  crosvm before=$BEFORE after=${AFTER:-gone}"
 echo "  FORTIFY: FD_SET in logcat: $ABORTS"
 echo "  vncdo capture: rc=$RC $([ -s "$OUT/after.png" ] && echo "(got a frame)" || echo "(no frame)")"
