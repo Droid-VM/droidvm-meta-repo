@@ -50,13 +50,34 @@ vm_up() {   # $1 dir, $2 launcher
 
 # ssh answering is not the same as the desktop being up. vkmark needs the wayland socket and
 # exits without printing a score if it is missing, which reads as vkmark failing.
+#
+# The session does not always come up on its own, and mc_bench.sh has always known this -- it
+# restarts gdm when the socket is missing. Waiting without that kick is STRICTER THAN REALITY: it
+# rejected all four gfxstream configurations in a sweep that would otherwise have run, and
+# blamed the guest's mesa for it.
 desktop_wait() {
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 12); do
         $SSH 'test -S /run/user/1001/wayland-0' 2>/dev/null && return 0
         sleep 10
     done
-    echo "  !! no desktop session -- is the guest's mesa the one this route needs?"
+    echo "  no session after 120s -- restarting gdm"
+    $SSH 'systemctl restart gdm' >/dev/null 2>&1
+    for _ in $(seq 1 18); do
+        sleep 10
+        $SSH 'test -S /run/user/1001/wayland-0' 2>/dev/null && { echo "  desktop up after gdm restart"; return 0; }
+    done
+    echo "  !! no desktop session even after restarting gdm -- is the guest's mesa the one this route needs?"
     return 1
+}
+
+# The app owns br-wifi and the app keeps going away; when it does, the next VM boots with no
+# network at all and every ssh in this script times out. Checked per configuration, not once.
+bridge_up() {
+    $A "su -c 'ip link show br-wifi'" >/dev/null 2>&1 && return 0
+    echo "  br-wifi missing -- starting the app"
+    $A 'am start -n cn.classfun.droidvm/.ui.SplashActivity' >/dev/null 2>&1
+    for _ in $(seq 1 15); do sleep 4; $A "su -c 'ip link show br-wifi'" >/dev/null 2>&1 && return 0; done
+    echo "  !! br-wifi never appeared"; return 1
 }
 
 # The phone's display must stay awake for the whole sweep. mc_bench.sh explains why the clock
@@ -74,6 +95,7 @@ for entry in "${CONFIGS[@]}"; do
         printf '%s\n' "${want[@]}" | grep -qx "$label" || continue
     fi
     echo "########## $label ##########"
+    bridge_up || continue
     vm_down || continue
     vm_up "$dir" "$launcher" || continue
     desktop_wait || { vm_down; continue; }

@@ -38,9 +38,15 @@ vm_up() {   # $1 dir, $2 launcher; waits for the DESKTOP, not just for ssh
     $SSH 'echo up' 2>/dev/null | grep -q up || { echo "  !! guest never came up"; return 1; }
     # vkmark needs the wayland socket, and Minecraft needs it too. Waiting only for ssh gets a
     # run where vkmark exits without printing a score.
-    for i in $(seq 1 30); do
+    # Same gdm kick as bench_all.sh: the session does not reliably come up on its own.
+    for _ in $(seq 1 12); do
         $SSH 'test -S /run/user/1001/wayland-0' 2>/dev/null && { echo "  desktop ready"; return 0; }
         sleep 10
+    done
+    $SSH 'systemctl restart gdm' >/dev/null 2>&1
+    for _ in $(seq 1 18); do
+        sleep 10
+        $SSH 'test -S /run/user/1001/wayland-0' 2>/dev/null && { echo "  desktop ready (after gdm restart)"; return 0; }
     done
     echo "  !! no desktop session (wrong mesa for this route?)"
     return 1
