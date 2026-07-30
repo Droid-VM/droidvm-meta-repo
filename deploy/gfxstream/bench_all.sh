@@ -163,7 +163,7 @@ capture_start() {   # $1 = label, $2 = deploy dir (for crosvm.log)
                     } > "$DIAG/$1.death.txt" 2>&1
                     break ;;
             esac
-            sleep 2
+            sleep 5
         done
     ) &
     CAP_PIDS="$CAP_PIDS $!"
