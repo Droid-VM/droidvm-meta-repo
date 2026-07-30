@@ -20,6 +20,7 @@
 #   nogpu   VM with --no-gpu, idle            <- the prior, re-established on today's build
 #   gpuidle VM with the GPU, nothing drawing  <- GPU device present, few resources
 #   gpumc   VM with the GPU, Minecraft in a world <- GPU device with ~1000 live dma-bufs
+#   gpumc-abort  same, but SIGABRT instead of SIGKILL <- the death path the real crashes took
 #
 # nogpu surviving and gpumc not is the GPU. All three dying is Gunyah teardown generally. gpuidle
 # surviving and gpumc not points at the amount of GPU state, not at the device existing.
@@ -86,7 +87,7 @@ run_case() {   # $1 = case name
     pid=$(crosvm_pid)
     [ -n "$pid" ] || { echo "  !! no crosvm; skipping"; kill $LOG 2>/dev/null; host_watchdog_stop; return 1; }
 
-    if [ "$c" = gpumc ]; then
+    case $c in gpumc*)
         $SSH 'f=$(ls /home/*/.minecraft/options.txt 2>/dev/null|head -1); [ -n "$f" ] && {
                 sed -i "/^preferredGraphicsBackend:/d" "$f"; echo "preferredGraphicsBackend:\"vulkan\"" >> "$f"; }
               L=/home/droidvm/launch_mc_kgsl_nctx.sh; [ -f $L ] || L=/home/droidvm/launch_mc_vk.sh
@@ -99,10 +100,11 @@ run_case() {   # $1 = case name
         $V move 639 640 click 1 >/dev/null 2>&1
         wait_alive 90 "the world to load" || {
             # Dying here, before we ever sent a signal, IS a result: the route killed itself.
-            echo "  RESULT $c: crosvm died on its own during world load -- no SIGKILL needed"
+            echo "  RESULT $c: crosvm died on its own during world load -- no signal needed"
             echo "$c|died-unprompted|$(uptime_now)|-|-" >> "$OUT/results.psv"
             kill $LOG 2>/dev/null; host_watchdog_stop; return 0; }
-    fi
+        ;;
+    esac
 
     local fds
     fds=$($A "su -c 'ls /proc/$pid/fd 2>/dev/null | wc -l'" 2>/dev/null | tr -dc 0-9)
@@ -122,8 +124,16 @@ run_case() {   # $1 = case name
         $A "su -c 'cat /data/local/tmp/crosvm_drm2kgsl/crosvm.log'" 2>/dev/null | tr -d '\r' | tail -60
     } > "$OUT/$c.before.txt" 2>&1
 
-    echo "  crosvm pid=$pid fds=${fds:-?} uptime=${up_before}s -- sending SIGKILL"
-    $A "su -c 'kill -9 $pid'" >/dev/null 2>&1
+    # SIGKILL vs SIGABRT is the last variable left. SIGKILL is instant and external: the kernel
+    # tears the process down with no userspace involvement. SIGABRT goes through bionic's crash
+    # handler -- debuggerd is signalled, crash_dump64 attaches and walks the dying process, and only
+    # then does it exit. The observed reboots were all SIGABRT, and all three SIGKILL cases here
+    # survived, so the death PATH is the remaining candidate: what the process is still holding, and
+    # for how long, while something else walks it.
+    local sig=9 signame=SIGKILL
+    case $c in *abort*) sig=6 signame=SIGABRT ;; esac
+    echo "  crosvm pid=$pid fds=${fds:-?} uptime=${up_before}s -- sending $signame"
+    $A "su -c 'kill -$sig $pid'" >/dev/null 2>&1
 
     # Immediately, before a reboot can take it: what the RM did with the memparcels the dead
     # process was holding. orphan_inuse is the number that says they are stranded.
@@ -163,7 +173,7 @@ run_case() {   # $1 = case name
     echo "$c|$alive|${up_before:-?}|${up_after:-?}|${fds:-?}" >> "$OUT/results.psv"
 }
 
-CASES=${*:-"nogpu gpuidle gpumc"}
+CASES=${*:-"nogpu gpuidle gpumc gpumc-abort"}
 for c in $CASES; do run_case "$c"; done
 echo
 echo "case|host_survived|uptime_before|uptime_after|crosvm_fds"
