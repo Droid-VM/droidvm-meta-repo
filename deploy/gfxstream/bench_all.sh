@@ -48,6 +48,17 @@ vm_up() {   # $1 dir, $2 launcher
     return 1
 }
 
+# ssh answering is not the same as the desktop being up. vkmark needs the wayland socket and
+# exits without printing a score if it is missing, which reads as vkmark failing.
+desktop_wait() {
+    for _ in $(seq 1 30); do
+        $SSH 'test -S /run/user/1001/wayland-0' 2>/dev/null && return 0
+        sleep 10
+    done
+    echo "  !! no desktop session -- is the guest's mesa the one this route needs?"
+    return 1
+}
+
 # The phone's display must stay awake for the whole sweep. mc_bench.sh explains why the clock
 # matters; the screen is the same variable by another route -- with the display dozing the
 # governor has no reason to raise the GPU, and a run taken that way lands at the bottom of the
@@ -65,6 +76,7 @@ for entry in "${CONFIGS[@]}"; do
     echo "########## $label ##########"
     vm_down || continue
     vm_up "$dir" "$launcher" || continue
+    desktop_wait || { vm_down; continue; }
     # Minecraft rewrites preferredGraphicsBackend to "default" (= zink/OpenGL) after a Vulkan
     # crash, and then every later run silently measures zink. The log line is the only place it
     # shows; the fps still reads fine. Force it back before each configuration.

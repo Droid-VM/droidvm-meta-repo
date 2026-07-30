@@ -47,12 +47,19 @@ fi
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true
 
+# Debug logging is for diagnosis, not for measurement. `rutabaga_gfx=debug` costs one log line
+# per GEM_SUBMIT on the DRM route -- crosvm.log reached 1.15 GB in a benchmark run, and the same
+# configuration scored 2721 with it on against 5143 with it off. It is off by default for that
+# reason; set CROSVM_LOG to turn it back on when something needs diagnosing:
+#   CROSVM_LOG=info,rutabaga_gfx=debug,devices::virtio::gpu=debug,hypervisor::gunyah=debug
+LOG=${CROSVM_LOG:-warn}
+
 export LD_LIBRARY_PATH="$DIR:/data/data/cn.classfun.droidvm/usr/lib"
 export ANDROID_EMU_VK_LOADER_PATH=/data/data/cn.classfun.droidvm/usr/lib/libvulkan_freedreno.so
 export GFXSTREAM_DEVICE_LOCAL_MEMORY_TYPE=1
 
-export RUST_LOG=info,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug
-exec "$DIR/crosvm" --log-level info,rutabaga_gfx=debug,devices::virtio::gpu=debug,hypervisor::gunyah=debug,vm_control=debug --extended-status run \
+export RUST_LOG=$LOG
+exec "$DIR/crosvm" --log-level "$LOG" --extended-status run \
   --name "ubuntu 26 purepool" \
   --mem 4096 --cpus 4 \
   --hypervisor gunyah \
