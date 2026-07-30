@@ -60,10 +60,14 @@ icd=$(mesa_variant_icd "$VARIANT")
 $SSH "sudo sed -i '/^VK_DRIVER_FILES=/d;/^VK_ICD_FILENAMES=/d;/^MESA_LOADER_DRIVER_OVERRIDE=/d' /etc/environment
       echo 'VK_DRIVER_FILES=$icd'    | sudo tee -a /etc/environment >/dev/null
       echo 'VK_ICD_FILENAMES=$icd'   | sudo tee -a /etc/environment >/dev/null"
-# zink reaches the GPU through that ICD, and the desktop reaches zink through gallium. Without
-# the override the desktop silently picks llvmpipe and everything is slow but not broken --
-# the hardest kind of regression to notice.
-[ "$VARIANT" = drm2kgsl ] && $SSH "echo 'MESA_LOADER_DRIVER_OVERRIDE=zink' | sudo tee -a /etc/environment >/dev/null"
+# BOTH variants need this, not just the DRM one. Both are built -Dgallium-drivers=zink, so
+# neither ships virtio_gpu_dri.so -- and /usr/local's dri directory takes precedence over the
+# distro's without falling back to it. Left unset, GNOME Shell asks the loader for the driver
+# matching its DRM device, gets "virtio_gpu: driver missing", falls back to kms_swrast, and then
+# fails outright with "Failed to setup: No GPUs found" -- so gdm retries the greeter until it
+# gives up ("maximum number of display failures reached"). Vulkan is fine throughout, which makes
+# it look like a gdm or a mesa-version problem rather than a missing GL driver.
+$SSH "echo 'MESA_LOADER_DRIVER_OVERRIDE=zink' | sudo tee -a /etc/environment >/dev/null"
 $SSH 'grep -E "^VK_|^MESA_" /etc/environment'
 
 step "verify"
