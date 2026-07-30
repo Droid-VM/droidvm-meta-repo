@@ -70,7 +70,7 @@ for entry in "${CONFIGS[@]}"; do
     # shows; the fps still reads fine. Force it back before each configuration.
     $SSH 'f=$(ls /home/*/.minecraft/options.txt 2>/dev/null | head -1);
           [ -n "$f" ] && { sed -i "/^preferredGraphicsBackend:/d" "$f";
-                           echo "preferredGraphicsBackend:vulkan" >> "$f"; }' >/dev/null 2>&1
+                           echo "preferredGraphicsBackend:\"vulkan\"" >> "$f"; }' >/dev/null 2>&1
     ./bench_one.sh "$label"
     vm_down
 done
