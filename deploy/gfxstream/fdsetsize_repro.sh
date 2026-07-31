@@ -42,7 +42,7 @@ echo "=== 0. preflight ==="
 # This script had none, which would have let it start a VM against a short reserve pool and then
 # read the resulting ENOMEM as evidence about the thing under test. Same checks as the benchmark
 # driver, from the same file: no stale processes, no second crosvm, no memparcels still served,
-# pool topped up (triggering acquire if short), udmabuf hijack loaded, uptime recorded.
+# pool topped up (triggering acquire if short), udmabuf module loaded, uptime recorded.
 preflight || { echo "  refusing to start"; exit 3; }
 
 echo "=== 1. boot, no VNC client ==="

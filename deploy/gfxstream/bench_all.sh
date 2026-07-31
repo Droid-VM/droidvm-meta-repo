@@ -146,7 +146,7 @@ trap "$A 'svc power stayon false' >/dev/null 2>&1" EXIT
 DIAG=${DIAG:-/tmp/mc_bench/diag}
 mkdir -p "$DIAG"
 
-# What state the host was in BEFORE the run. The udmabuf hijack module is the one that matters:
+# What state the host was in BEFORE the run. The udmabuf module is the one that matters:
 # without it the built-in serves with a 64 MiB cap and a kmalloc_array that fails on order-6, and
 # a run made in that state looks like every other run. Not checking this once already led to
 # reporting "the module was loaded" from an observation taken before a DIFFERENT run.

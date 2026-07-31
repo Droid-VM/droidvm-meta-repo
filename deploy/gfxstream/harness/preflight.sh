@@ -117,18 +117,18 @@ preflight() {
         fi
     fi
 
-    # A host reboot unloads the udmabuf hijack module, and the built-in that takes over caps a
+    # A host reboot unloads the udmabuf module, and the built-in that takes over caps a
     # dma-buf at 64 MiB and builds its page array with kmalloc_array -- which is a recorded cause of
     # Minecraft dying on this route. Load it here so the state is the same every run rather than
     # depending on whether the phone has rebooted since someone last loaded it.
     if ! $A "su -c 'ls /sys/module | grep -q udmabuf_gki'" 2>/dev/null; then
-        echo "  udmabuf hijack not loaded (a host reboot removes it) -- loading"
+        echo "  udmabuf module not loaded (a host reboot removes it) -- loading"
         $A "su -c 'for k in /data/data/cn.classfun.droidvm/usr/lib/modules/*/udmabuf-gki-*.ko; do
               [ -f \"\$k\" ] && insmod \"\$k\" 2>/dev/null && break; done'" >/dev/null 2>&1
         if $A "su -c 'ls /sys/module | grep -q udmabuf_gki'" 2>/dev/null; then
             echo "  loaded, mode=$($A "su -c 'cat /sys/module/udmabuf_gki_*/parameters/mode'" 2>/dev/null | tr -d '\r')"
         else
-            echo "  !! could not load the udmabuf hijack module -- the built-in will serve with a 64 MiB cap"
+            echo "  !! could not load the udmabuf module -- the built-in will serve with a 64 MiB cap"
             bad=1
         fi
     fi

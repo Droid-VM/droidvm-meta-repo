@@ -79,8 +79,8 @@ ulimit -l unlimited
 if ! lsmod | grep -q udmabuf_gki; then
     KO=/data/data/cn.classfun.droidvm/usr/lib/modules/android15-6.6/udmabuf-gki-6.6.ko
     [ -f "$KO" ] && insmod "$KO" 2>/dev/null
-    lsmod | grep -q udmabuf_gki && echo "loaded udmabuf hijack ($(cat /sys/module/udmabuf_gki_6.6/parameters/mode 2>/dev/null))" \
-                                || echo "WARNING: udmabuf hijack not loaded -- blobs over 64 MiB will fail"
+    lsmod | grep -q udmabuf_gki && echo "loaded udmabuf module ($(cat /sys/module/udmabuf_gki_6.6/parameters/mode 2>/dev/null))" \
+                                || echo "WARNING: udmabuf module not loaded -- blobs over 64 MiB will fail"
 fi
 
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
