@@ -37,7 +37,7 @@ put() {
 }
 
 deb=$(ls -t "$REPO"/$(mesa_variant_pkg "$VARIANT")_*_arm64.deb 2>/dev/null | head -1)
-[ -n "$deb" ] || { echo "no $(mesa_variant_pkg "$VARIANT") deb in $REPO -- run 8_build_guest_mesa_cross.sh first" >&2; exit 1; }
+[ -n "$deb" ] || { echo "no $(mesa_variant_pkg "$VARIANT") deb in $REPO -- run 8_build_guest_mesa_$([ "$VARIANT" = gfxstream ] && echo gfx || echo drm2kgsl).sh first" >&2; exit 1; }
 
 step "target"
 $SSH 'uname -srm; . /etc/os-release 2>/dev/null && echo "$PRETTY_NAME"'

@@ -38,8 +38,9 @@ whose failures are all silent.
 | 5 | `5_prepare_turnip.sh` | build the host turnip Vulkan driver (Droid-VM/turnip `gen8`, KGSL) → `turnip/libvulkan_freedreno.so` |
 | 6 | `6_build_apk_prepare.sh` | clone app + prebuilt-root, overlay crosvm/EDK2/gunyah/turnip artifacts into `manual-build/` |
 | 7 | `7_build_apk.sh` | build the DroidVM APK with the local prebuilts baked in |
-| 8 | `8_build_guest_mesa.sh` | build the guest mesa variants, aarch64-native (must run on aarch64) |
-| 8 | `8_build_guest_mesa_cross.sh` | the same, cross-compiled from x86_64 in a container — much faster |
+| 8 | `8_build_guest_mesa_gfx.sh` | build the guest mesa for the gfxstream route (cross-compiled in a container) |
+| 8 | `8_build_guest_mesa_drm2kgsl.sh` | the same for the drm2kgsl route |
+| 9 | `9_build_guest_addition.sh` | package the guest kernel modules as a DKMS .deb |
 
 `gh_hugepage_reserve` is a separate out-of-tree module (`../gh-hugepage-reserve`)
 and is NOT built by step 4.
@@ -74,7 +75,7 @@ are packages rather than the tarball they used to be: the two `Conflicts` with
 each other through a shared `mesa-guest` virtual name, so dpkg refuses the
 second install. Both ship libgallium, the desktop composites through gallium
 rather than through the Vulkan ICD, and an unnoticed overwrite shows up as a
-fully black VNC scanout with no error anywhere. `MESA_VARIANT` builds just one;
+fully black VNC scanout with no error anywhere. Each route has its own build script;
 on the trunk both are built.
 
 ## Layout

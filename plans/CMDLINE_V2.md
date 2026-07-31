@@ -387,7 +387,7 @@ backing**(此 API 本質是 host-page→GPA memslot;guest 頁走另一條 `attac
 更正(2026-07-20,查證 fork mesa):below-4GB **與 GPA / crosvm / add_memory_region / 記憶體模型
 完全無關**。它是 **guest gfxstream ICD 裡 `mmap` 落在低 CPU VA**(讓 32-bit WoW64/FEX caller 能用
 32-bit 指標持有;wine win32u 拒絕 >4GB 映射)。
-- 位置:guest mesa = 頂層 `mesa/`(Droid-VM/mesa v26.0.3,`8_build_guest_mesa.sh` 建)
+- 位置:guest mesa = 頂層 `mesa/`(Droid-VM/mesa v26.0.3,`8_build_guest_mesa_gfx.sh` 建)
   `src/gfxstream/guest/platform/drm/DrmVirtGpuBlob.cpp`。
 - 機制:`mmap(low_slot, MAP_SHARED|MAP_FIXED_NOREPLACE, dev, map.offset)` 逼進 low-VA arena
   `[1GiB, 3.75GiB)`(recycle freed slots;滿了 fallback high mmap)。

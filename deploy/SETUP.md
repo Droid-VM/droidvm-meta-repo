@@ -58,7 +58,7 @@ host-visible blob 的 accept 一律 `VmAccept::Sync`(host 端經 transport 驅�
 guest 端:
 1. ICD 指向 gfxstream:`VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json`
 2. guest ICD 來自 `mesa` 的 `wip/3d-accel-gfxstream` 分支(26.0.3+patches),
-   `bash 8_build_guest_mesa_cross.sh` 產出 `mesa-guest-gfxstream_<ver>_arm64.deb`,
+   `bash 8_build_guest_mesa_gfx.sh` 產出 `mesa-guest-gfxstream_<ver>_arm64.deb`,
    `sudo apt install ./mesa-guest-gfxstream_<ver>_arm64.deb`(prefix `/usr/local`)
 3. **guest ICD 與 host decoder 是同一份 codebase,版本必須一致**。混到別的版本時
    症狀是 VNC 全黑(mutter 是經 gallium 合成,不是經 Vulkan ICD),而且 git bisect 查不到。
@@ -82,7 +82,7 @@ guest 端:
 2. ICD 指向 freedreno:`VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/freedreno_icd.aarch64.json`
    +(zink)`MESA_LOADER_DRIVER_OVERRIDE=zink`
 3. drm2kgsl mesa 來自 `mesa` 的 `wip/3d-accel-drm2kgsl` 分支(26.3.0-devel,含 tu/virtio 工作),
-   `MESA_VARIANT=drm2kgsl bash 8_build_guest_mesa_cross.sh` → `mesa-guest-drm2kgsl_<ver>_arm64.deb`,
+   `bash 8_build_guest_mesa_drm2kgsl.sh` → `mesa-guest-drm2kgsl_<ver>_arm64.deb`,
    `sudo apt install ./mesa-guest-drm2kgsl_<ver>_arm64.deb`(prefix `/usr/local`)
 
 驗收階梯:VNC 有畫面 → `vulkaninfo` 顯示 driverName=turnip(經 vdrm)→ vkcube → vkmark → Minecraft。
