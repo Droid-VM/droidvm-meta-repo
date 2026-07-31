@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
     }
     printf("guest-alloc pool: total=%d KiB (%.1f MiB)  used=%d KiB (%.1f MiB)  largest-free=%d KiB (%.1f MiB)\n",
            total, total / 1024.0, used, used / 1024.0, largest, largest / 1024.0);
-    if (total == 0) printf("  (no gpu_guest_reserved node -> guest-alloc pool not configured)\n");
+    if (total == 0) printf("  (no gpu_guest node -> guest-alloc pool not configured)\n");
     else printf("  fragmentation: %.1f%% of free space is outside the largest run\n",
                 (total - used) ? 100.0 * ((total - used) - largest) / (total - used) : 0.0);
     close(fd);

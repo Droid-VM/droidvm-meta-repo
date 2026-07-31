@@ -58,9 +58,22 @@ mesa_ensure() {   # $1 = variant (gfxstream | drm2kgsl)
         echo "  !! no mesa-guest-$want deb in $MESA_DEB_DIR on the guest -- push it first"
         return 1
     fi
-    # --force-all because both packages Provide/Conflict mesa-guest and share 60 paths; dpkg is
-    # right to object and we are overriding it deliberately, one route at a time.
-    $SSH "dpkg -i --force-all $MESA_DEB_DIR/mesa-guest-$want*.deb >/dev/null 2>&1; ldconfig 2>/dev/null" >/dev/null 2>&1
+    # Remove the other variants first, then install cleanly.
+    #
+    # This used to be a single `dpkg -i --force-all`, which left BOTH packages marked installed
+    # while they Conflict with each other -- so apt refused to do anything at all afterwards, and
+    # installing cpio to rebuild an initrd became its own excavation. Newer debs name their
+    # siblings in Conflicts/Replaces so dpkg removes the loser by itself; purging first keeps
+    # older debs working too, and either way the database ends up describing what is on disk.
+    #
+    # Purge rather than remove: the variants share 60 install paths, and a half-removed package
+    # leaves its extras behind -- exactly the orphaned freedreno ICD that made the harness pick
+    # the drm2kgsl launcher while running gfxstream.
+    $SSH "for p in mesa-guest-gfxstream mesa-guest-drm2kgsl mesa-guest-kgsl; do
+              [ \"\$p\" = mesa-guest-$want ] && continue
+              dpkg -l \"\$p\" 2>/dev/null | grep -q '^.i' && dpkg --purge --force-all \"\$p\"
+          done
+          dpkg -i $MESA_DEB_DIR/mesa-guest-$want*.deb; ldconfig" >/dev/null 2>&1
     have=$($SSH "sed -n 's/^# Installed by mesa-guest-\([a-z0-9]*\).*/\1/p' \
                  /usr/lib/environment.d/50-mesa-guest.conf 2>/dev/null" 2>/dev/null | tr -d '\r')
     [ "$have" = "$want" ] || { echo "  !! swap failed, env file still says '${have:-none}'"; return 1; }

@@ -21,7 +21,7 @@
 #                                    route is that nothing is SHARE'd at runtime.
 #                                      gpu-guest-mb  guest-owned drm_buddy pool. Every BO comes
 #                                        from here now. The gfx- prefix is a misnomer: the
-#                                        region is a SHARE'd range plus the gpu_guest_reserved
+#                                        region is a SHARE'd range plus the gpu_guest
 #                                        DT node, with nothing gfxstream-specific about it.
 #                                      drm-host-mb   host-owned pool, now only large enough for
 #                                        the msm shmem rings (16 KiB per context -- 12 contexts

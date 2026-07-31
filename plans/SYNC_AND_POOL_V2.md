@@ -58,7 +58,7 @@ vm_control (vm_memory_handler_thread)
 
 ### 現狀盤點(比想像近)
 пул已有:pre-START bless(`prepare_kgsl_pool_arena`,gunyah/mod.rs:853)、no-map DT
-node(fdt.rs:851 `gpu_blob_reserved@`,RM by-reg 匹配 bless;restricted-dma-pool 之坑
+node(fdt.rs:851 `gfx_host@`,RM by-reg 匹配 bless;restricted-dma-pool 之坑
 已註解)、mthp 大頁(prepare_lend_region → order-9 → gh_hugepage_reserve supply hook)。
 **缺的只是「形式」**:env-var(NCTX_VRAM_MB/NCTX_POOL_FD/NCTX_POOL_GPA)+ Vm trait
 hack + GPA 在 high-MMIO window 上方(而非 RAM 尾端的 layout 常規位置)。
@@ -146,7 +146,7 @@ Goal 3 = 底座上的 gfxstream 子分配器 + chunk 協定 + guest 重映射。
 | rutabaga | gfxstream.rs:504 export_blob / 478 map_info | handle+cache/access | 攜 pool_offset 到 crosvm |
 | crosvm map | gpu/virtio_gpu.rs:1279 resource_map_blob | export→runtime_share BAR | pool-resident→**不 runtime_share**,回 pool GPA(kgsl 式,precedent=KgslPoolMap:101) |
 | 協定 | gpu/protocol.rs:528 resp_map_info.gunyah_handle | 一個 spare u32 | 3a:reuse 帶 pool_offset+flag;3b:變長帶 runs[] |
-| guest kernel | virtgpu_vram.c:47-102 mmap + :1363 resp parse | handle!=0→accept;vram_node 在 BAR | **handle==0 已 skip accept**(現成!);vram_node 改指 pool GPA(pool base 從 DT gpu_blob_reserved node 讀) |
+| guest kernel | virtgpu_vram.c:47-102 mmap + :1363 resp parse | handle!=0→accept;vram_node 在 BAR | **handle==0 已 skip accept**(現成!);vram_node 改指 pool GPA(pool base 從 DT gfx_host node 讀) |
 | guest kernel mmap | virtgpu_vram.c io_remap(vram_node.start) | 單段 BAR | 3b:複用 kgsl multi-run io_remap(kgsl_pt_chardev.c:799 / kgsl_pt_dmaheap.c:93) |
 | guest ICD | DrmVirtGpuBlob.cpp:155 mmap DRM fd | kernel 決定 GPA | **不改** |
 

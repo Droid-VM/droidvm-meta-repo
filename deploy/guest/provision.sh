@@ -78,7 +78,7 @@ $SSH "test -f '$icd' && echo '  ok ICD present' || echo '  !! ICD $icd missing'
 cat <<EOF
 
 Reboot the guest, then check from inside it:
-    dmesg | grep -E 'gunyah_guest|GpuPool base|drm2kgsl_reserved'
+    dmesg | grep -E 'gunyah_guest|GpuPool base|drm2kgsl_host'
     vulkaninfo | grep -E 'driverName|deviceName'
 Expect driverName=$([ "$VARIANT" = drm2kgsl ] && echo turnip || echo gfxstream).
 

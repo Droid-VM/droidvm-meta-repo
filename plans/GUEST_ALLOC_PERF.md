@@ -74,17 +74,17 @@ host gfxstream (不改):官方 attach_iov import
 不用「單池 + 邊界值傳遞」——**建兩個獨立 SHARE'd 池**,邊界變成結構本身(各池自己的 size),
 無 magic number 要傳/同步:
 - **CLI**:`--pre-alloc "gfx-host-mb=N gfx-guest-mb=M"`(拆自舊 `gfx-mb`)。
-- **host 池**(`gfx-host-mb`)= `MemoryRegionPurpose::GpuPool`,現有 `GFXSTREAM_POOL_*` env + `gpu_blob_reserved`
+- **host 池**(`gfx-host-mb`)= `MemoryRegionPurpose::GpuPool`,現有 `GFXSTREAM_POOL_*` env + `gfx_host`
   DT 節點。gfxstream `HostVisiblePool` **只認這個**(不動)。ASG ring + host-visible host-alloc 用它。
 - **guest 池**(`gfx-guest-mb`)= 新 `MemoryRegionPurpose::GpuPoolGuest`,**不給 GFXSTREAM_POOL_* env**;
-  新 `gpu_guest_reserved` DT 節點。guest kmod(guest-alloc 模式)**只認這個**,整塊 own、跑自己的
+  新 `gpu_guest` DT 節點。guest kmod(guest-alloc 模式)**只認這個**,整塊 own、跑自己的
   頁分配器。host 端 `get_slice_at_addr` 對它(host-accessible)解析 guest-blob mem-entries。
 - 兩池都 SHARE(lend=false)+ hugepage-prepare + shm-vdevice(stage-2 mapping 免 accept)。
 - **Component A(capset partition)退役**——沒有 partition 要傳了。env 橋:`gfx-host-mb→NCTX_GFX_POOL_MB`、
   `gfx-guest-mb→NCTX_GFX_GUEST_POOL_MB`。
 - tradeoff:兩固定池不能動態 rebalance(設計本就固定切片,無損)。
 - **crosvm 端已實作**:config.rs 拆參數、guest_memory.rs `GpuPoolGuest` purpose + check_host_access、
-  aarch64/lib.rs 第二 region + build_vm collect gpu_guest_resv、fdt.rs `gpu_guest_reserved` 節點、
+  aarch64/lib.rs 第二 region + build_vm collect gpu_guest_resv、fdt.rs `gpu_guest` 節點、
   gunyah bless/shm-vdevice/hugepage、geniezone。
 
 ## 實作順序(依賴序)
