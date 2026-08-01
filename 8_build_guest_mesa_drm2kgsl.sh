@@ -12,4 +12,7 @@
 # over vdrm and never touches a KGSL device of its own.
 #
 # Only ONE mesa-guest package can be installed in a guest at a time; see mesa-variants.sh.
-exec bash "$(dirname "$0")/mesa-cross/build-host.sh" drm2kgsl
+set -e
+cd "$(dirname "$0")"
+source ./lib_mesa_build.sh
+mesa_build_variant drm2kgsl

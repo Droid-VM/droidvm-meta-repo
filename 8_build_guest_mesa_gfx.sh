@@ -12,4 +12,7 @@
 # it tracks mesa 26.0.3 while the drm2kgsl variant tracks a different upstream entirely.
 #
 # Only ONE mesa-guest package can be installed in a guest at a time; see mesa-variants.sh.
-exec bash "$(dirname "$0")/mesa-cross/build-host.sh" gfxstream
+set -e
+cd "$(dirname "$0")"
+source ./lib_mesa_build.sh
+mesa_build_variant gfxstream

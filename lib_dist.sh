@@ -26,7 +26,10 @@ dist_add() {
         base=$(basename "$f")
         stem=${base%%_*}
         find "$DIST" -maxdepth 1 -name "${stem}_*.deb" ! -name "$base" -delete 2>/dev/null || true
-        cp -f "$f" "$DIST/"
+        # A builder that already writes here (the mesa container is given this directory as its
+        # output mount) hands us a file that IS the destination; copying it onto itself is an
+        # error, not a no-op, and under `set -e` it would abort the build right after it succeeded.
+        [ "$f" -ef "$DIST/$base" ] || cp -f "$f" "$DIST/"
     done
     ( cd "$DIST" && md5sum ./*.deb > MD5SUMS 2>/dev/null ) || true
 }
