@@ -43,6 +43,30 @@ for kdir in gunyah_host_mod/dist/*/; do
         cp -f "$ko" "$MB/usr/lib/modules/$kmi/"
     done
 done
+# "Why is this needed" pages for those modules (staged by gunyah_host_mod/build.sh).
+# The Kernel Module tab renders them in a WebView, reading them from
+# usr/lib/modules/descr/<module-prefix>.html.
+if [ -d gunyah_host_mod/dist/descr ]; then
+    mkdir -p "$MB/usr/lib/modules/descr"
+    cp -f gunyah_host_mod/dist/descr/*.html "$MB/usr/lib/modules/descr/"
+fi
+
+# Which devices each module is for. Without this the app falls back to its built-in
+# rules, which only know the modules that existed when the app was built -- ship it
+# alongside the .ko files so a module for a new SoC needs no app update.
+if [ -f gunyah_host_mod/dist/match.json ]; then
+    mkdir -p "$MB/usr/lib/modules"
+    cp -f gunyah_host_mod/dist/match.json "$MB/usr/lib/modules/match.json"
+fi
+
+# The pages' stylesheet is app-side, not device-side: the app inlines its own copy
+# into every page it renders, including the GH-Hugepage-Reserve page that ships in
+# the APK (that module is not one of the .ko files, so it has no prebuilt to ride
+# on). gunyah_host_mod owns the file; sync it so the two cannot drift. The app's
+# copy is checked in too, so the APK still builds without this repo present.
+if [ -f gunyah_host_mod/descr/style.css ]; then
+    cp -f gunyah_host_mod/descr/style.css DroidVM/app/src/main/assets/descr/style.css
+fi
 
 # Host turnip Vulkan driver (built by 5_prepare_turnip.sh) -> manual-build. gfxstream needs
 # it as its real GPU driver (ANDROID_EMU_VK_LOADER_PATH); without it host-visible coherent
