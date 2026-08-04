@@ -110,11 +110,20 @@ session 重啟的成功率在 **3/5 到 8/8 之間漂**,而失敗的那幾次裡
 
 ## 3. P2:整理與複查
 
-- [ ] 刪死碼:`seqnoRepairEnabled` 那條(四種變體全部失敗、預設關閉),
-      註解裡的四條死路移到 plans/ 保存
-- [ ] 複查繼承來、從未單獨驗證的改動:turnip `b43c434e`(sparse VMA)、`bf2112ca`(KHR_display,
-      當初的問題其實是 build config)、mesa `7177dd271f7`(同源)、mesa MAP_LOW 系列、
-      crosvm `fa1612b9f`(blessed blob arena,在 protected Gunyah 上已證實不通)
+- [x] **刪死碼**:`seqnoRepairEnabled` 已移除(gfxstream `e4608beab`),四條死路保存在
+      `plans/SEQNO_DEAD_ENDS.md`;順帶把該檔第二個 GFXSTREAM_DIAG 開關併入共用的那個
+- [x] **複查繼承的改動**(2026-08-05,四項都有結論):
+  - turnip `b43c434e`(sparse VMA 進 dump-bo 追蹤)——**留**。機制明確:不做的話
+    `dump_bo_list_idx` 會留在 0 而不是 `~0`,`tu_dump_bo_del` 就拿 0 當合法索引去寫。
+    和 mesa-drm2kgsl 的 `6c02bee2` 是同一族問題的兩種解法。
+  - turnip `bf2112ca`(容忍 KHR_display)+ mesa `7177dd271f7`(廣告 KHR_display)——
+    **成對的,留著但未驗證**。客體廣告了,所以主機的 turnip 不能因為 instance 啟用它就拒絕
+    (上游會直接 `vk_errorf("I can't KHR_display")`)。我們這條路上沒有已知的使用者,
+    所以兩者實際上是惰性的;要拿掉就要一起拿掉。
+  - mesa `MAP_LOW` 系列——**惰性**。`getenv("GFXSTREAM_MAP_LOW")` 開關,deb 和 devvm 都沒設。
+  - crosvm `fa1612b9f` 的 blessed arena——**已經不在樹上了**,`blob_arena_gpa` /
+    `prepare_blob_arena` / `blob_fixed_map` 三個方法都被後來重建 Vm trait 的工作移除,
+    現存的 `find_pci_bar` 才是那個 commit 裡還活著的部分。無事可做。
 - [ ] guest-additions deb 要重打(`fd9b8d0` 的 `droidvm_trace` module param 還沒進 deb)
 
 ### 明確延後,不在這一輪
