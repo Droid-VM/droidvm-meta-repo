@@ -115,10 +115,15 @@ session 重啟的成功率在 **3/5 到 8/8 之間漂**,而失敗的那幾次裡
 - [ ] 複查繼承來、從未單獨驗證的改動:turnip `b43c434e`(sparse VMA)、`bf2112ca`(KHR_display,
       當初的問題其實是 build config)、mesa `7177dd271f7`(同源)、mesa MAP_LOW 系列、
       crosvm `fa1612b9f`(blessed blob arena,在 protected Gunyah 上已證實不通)
-- [ ] 兩份 guest mesa deb 有 60/63 路徑相同、不能共存(`guest-mesa-variant-collision`)。
-      只出 gfxstream 就沒事;要同時提供 drm2kgsl 就得先解(改路徑或做 alternatives)
 - [ ] guest-additions deb 要重打(`fd9b8d0` 的 `droidvm_trace` module param 還沒進 deb)
-- [ ] MC 關閉時 OpenAL 崩潰 —— 客體沒有音效硬體,正解是 crosvm 加 virtio-snd(`mc-exit-openal-dummy-crash`)
+
+### 明確延後,不在這一輪
+
+- **virtio-snd**(MC 關閉時 OpenAL 崩潰的正解):要從 crosvm 接到 Android 的元件,
+  多半得有一個專門的服務負責這件事。那是獨立的一塊工作,以後做。
+- **兩份 guest mesa deb 路徑衝突**(`guest-mesa-variant-collision`):只出 gfxstream 就沒事,
+  等真的要同時提供 drm2kgsl 再處理。
+- **drm2kgsl 路線本身**:這一輪只做 gfx。
 
 ---
 
