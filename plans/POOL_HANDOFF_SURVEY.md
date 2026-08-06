@@ -441,6 +441,29 @@ POOL_RECLAIM_PLAN §4.4 已經寫了這個方法。沒有這個數字之前,「�
 4. 與自家 `alloc_contig_range` scavenger 的互動(它內部本來就會 isolate)要重測。
 5. watermark:isolate 的**空閒**頁不計入 `NR_FREE_PAGES`;我們的頁不是空閒的,理論上不受影響,但要量。
 
+### 2.6 「VM 關機後、crosvm 退出前的那個窗口呢?」
+
+**窗口是真的,而且是刻意留的**:`mem::drop(linux)` 在 `crosvm/src/crosvm/sys/linux.rs:4751`
+(註解:*Explicitly drop the VM structure here to allow the devices to clean up*),
+之後 crosvm 還會繼續跑(drop hotplug manager、metrics cleanup + join)才返回。
+這和**死亡路徑**不同——死亡路徑上 `exit_mm` 在 `exit_files` 之前,順序排不出來;
+這裡 crosvm 活著、在控制中、**可以阻塞**,是唯一能做同步握手的地方。
+
+**但這個窗口對本問題沒有用,兩個理由:**
+
+**(a) ownership 沒有改變。** memfd 的頁仍然屬於 shmem inode,直到 inode 被銷毀。
+`mem::drop(linux)` 做的 munmap + close(memfd) 讓 folio 走的還是**同一條 free path**,
+一樣 `free_unref_page` → pcp。「VM 已關機」不改變任何路由。
+
+**(b) 沒有東西可以等。** 實測(§5.4):2848/2850 在關機後 **約 3 秒內**就全部回來,
+剩下的 2 頁**永遠不回來**——`tracked` 停在 2,再等 40 秒完全沒有變化。
+那 2 頁在 crosvm 還沒退完就已經丟了,所以在窗口裡加一個「阻塞等模組回報歸零」的握手
+**買不到東西**。
+
+**而且窗口本身有代價**:gunyah 一 unpin,folio 就變回普通的 movable shmem THP,
+split 與遷移都恢復可能。把窗口拉長是**增加**暴露而不是減少——若之後真要在這裡加等待,
+必須是等模組的掃描結果,不能是單純 sleep。
+
 ---
 
 ## 5. 本輪實測
@@ -499,6 +522,25 @@ entry 在 free 到達時都還活著,所以一個「有走到 `__free_one_page`�
 > 若屬實,那個輪詢會在每次關機後的 grace 邊界上 purge 掉還沒回來的 entry,**放大損失**。
 > 這是一個獨立於本 survey、可以馬上檢查的東西:把面板的輪詢間隔拉長,或讓它讀一個
 > 不會 purge 的唯讀入口。
+
+### 5.4 損失發生得很快,不是晚到(`poolwindow.sh`)
+
+在手機上以 ~0.25 秒取樣 `tracked`,從關機前開始:
+
+```
+t=0      tracked=2850
+t≈3s     tracked=2
+（之後 40 秒完全沒有變化,一直停在 2）
+```
+
+**2848 頁在約 3 秒內回來,剩下 2 頁永遠不回來。** 所以損失不是「晚到、錯過 drain」,
+而是**在 free path 當下就發生了**。這是第三份指向路由的獨立證據
+(另外兩份:§5.2 兜底救不回來、§5.3 `del_hit` 固定短少 2)。
+
+**推論:crosvm 側在關機窗口裡加同步握手,對這個漏損買不到東西**(見 §2.6)。
+
+但書:該腳本的 `alive` 欄位被 `pgrep -f` 自我匹配污染(抓到取樣腳本自己),所以那一欄無效;
+結論只依賴 `tracked`,不受影響。
 
 ---
 
