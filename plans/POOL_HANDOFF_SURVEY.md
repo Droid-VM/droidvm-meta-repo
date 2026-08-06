@@ -449,8 +449,31 @@ hook 之後就配不上了」。所以有可能是猛踢 reconcile **自己造�
 | `del_miss` 每輪 +2 | 頁面**有**走到 `__free_one_page`,只是 entry 已被 purge → 病在 entry 生命週期,**選項 A 幫不上** |
 | `del_miss` 不動 | 頁面**從沒走到** hook,被 pcp 交給別人 → 病在路由,**選項 A 正中要害** |
 
-`poolwhere.sh` 就是跑這個(全程不手動 reconcile,只讓模組自己的 +3s worker 跑,
-最後才 reconcile 一次結帳)。**結果見下,它決定選項 A 值不值得做。**
+### 5.3 判定:病在路由(三輪,`poolwhere.sh`)
+
+全程不手動 reconcile,只讓模組自己的 +3s worker 跑,最後才結帳一次:
+
+```
+              lost   del_hit   del_miss      (每輪服務 2850 頁)
+cycle 1        1     +2848      +32
+cycle 2        0     +2848      +19
+cycle 3        1     +2848      +22
+```
+
+兩個結論:
+
+**(a) `del_hit` 每輪固定 +2848,恰好比服務出去的 2850 少 2。** 這一輪沒有任何提早的 purge,
+entry 在 free 到達時都還活著,所以一個「有走到 `__free_one_page`」的頁必定會記成 del_hit。
+它沒有 → **那 2 頁根本沒走到 hook**。`del_miss` 的 +19~32 是系統其他 order-9 free 的雜訊,
+量級對不上。**病在路由,不在 entry 生命週期 → 選項 A 正中要害。**
+
+**(b) 猛踢 reconcile 反而更糟:2/輪 → 0.67/輪。** §5.2 的混淆是真的。
+`reconcile` 過了 grace 會 purge,而 free 還在陸續到達,被 purge 掉的 entry 之後就配不上了。
+
+> **production 意涵**:模組註解提到「DroidVM 使用量面板每 ~2 秒 reconcile 一次」。
+> 若屬實,那個輪詢會在每次關機後的 grace 邊界上 purge 掉還沒回來的 entry,**放大損失**。
+> 這是一個獨立於本 survey、可以馬上檢查的東西:把面板的輪詢間隔拉長,或讓它讀一個
+> 不會 purge 的唯讀入口。
 
 ---
 
