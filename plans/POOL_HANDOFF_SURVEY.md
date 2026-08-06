@@ -272,6 +272,19 @@ unmap 不是頁面被釋放的時刻。客體 RAM 是 shmem page-cache folio,`mu
 (這是上面的選項 C。)方向對——它就是 POOL_RECLAIM_PLAN §3 說的「唯一的真出路:把 pool 頁面完全移出 buddy 管轄
 + 自有 allocator」。但**它不能是一個照慣例做的 dma_buf**,原因如下。
 
+#### (a0) 先講清楚:fd 不是現在缺的東西
+
+模組**已經有**可靠的拆機觸發——`gunyah_vm_release` / `gh_vm_free` 上的 kprobe,
+**SIGKILL / OOM / 強殺都照樣觸發**(POOL_RECLAIM_PLAN §8)。再加一個 dma_buf fd
+只是多一個同樣可靠的通知,**不會改變任何事**。
+
+缺的是 **ownership**:memfd 的頁屬於 shmem inode,page cache 自己持有
+`folio_nr_pages()` = 512 個 ref,模組永遠不是唯一擁有者,只能等 kernel 的 free path
+把它交回來——而 §5.3 證明那條路每輪固定漏 2 頁。
+
+所以「把大頁當 dma_buf 發給 crosvm」有沒有幫助,**取決於它有沒有改變誰擁有那些頁**,
+而不是取決於那個 fd。close 觸發回收是「頁面本來就是我們的」之後才成立的收尾動作。
+
 #### (a) 硬性阻擋:dma_buf 的 CPU mapping 不可被 GUP pin(選項 C 的擋門)
 
 `mm/gup.c:949` 的 `check_vma_flags()`:
@@ -313,11 +326,23 @@ POOL_RECLAIM_PLAN §2 否決過「模組借出時自己留一個 ref」,三個�
 
 這一段必須寫下來,否則下一個讀 §2 的人會以為這是在重提被否決的設計。
 
-#### (c) 仍然不是 O(0):歸還時機受 pin 牽制
+#### (c) release 可能早於 unpin
 
-最後一個 ref 掉落才能回收,而 gunyah 在 reclaim 之前一直 pin 著。
-所以歸還變成**確定會發生,但不是立刻**——模組仍需要一個有界的等待/重試,
-只是它等的是「pin 放掉」而不是「猜頁面回 buddy 了沒」。這是好交易,別宣稱成瞬時。
+gunyah **pin 的是 page,不是 dma_buf**,所以 fd 關掉、release 跑起來的時候那些頁可能
+還被 `FOLL_LONGTERM` pin 著。模組**絕不能把還被 pin 的頁放回池子**再發給下一個 VM,
+必須先確認 refcount / `folio_maybe_dma_pinned()`。歸還因此是**確定會發生,但不是立刻**
+——它等的是「pin 放掉」而不是「猜頁面回 buddy 了沒」。這是好交易,別宣稱成瞬時。
+
+#### (c2) 映射粒度是新成本
+
+`vm_insert_page` **一次插一個 4K struct page**。6GB 客體 RAM ≈ 150 萬個 PTE
+(~12MB page table)+ host TLB 壓力,而今天 memfd + THP(模組的前置條件就是
+`echo advise > .../shmem_enabled`)是 **PMD 映射**的。這是實打實的退步。
+
+`vmf_insert_pfn_pmd` 的 `BUG_ON` 只擋「`VM_PFNMAP` 與 `VM_MIXEDMAP` 兩個都設」,
+**接受純 `VM_MIXEDMAP`**,所以 PMD 級插入理論上可行。但 GUP 對這樣建出來的 PMD
+怎麼走(`follow_trans_huge_pmd` 對非 devmap 的 huge pfn map)**沒有驗過**,
+要一起列進 §4.1 的擋門實驗。
 
 #### (d) crosvm 側的代價
 
