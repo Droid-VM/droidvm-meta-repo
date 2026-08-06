@@ -221,6 +221,28 @@ teardown free → free_the_page → free_unref_page → [isolate] → free_one_p
 **isolate freelist——誰都配不走**,變成「停在那裡等 scavenger 撿」而不是「被別人占走」。
 今天的 `orphan_inuse`(永久損失)在這個設計下不存在。
 
+**跨 GKI 版本的可行性(四棵樹都查過:6.1.157 / 6.6.118 / 6.12.58 / 6.18.21)**
+
+| | 6.1 / 6.6 / 6.12 | 6.18 |
+|---|---|---|
+| isolation 存在哪 | migratetype 欄位的一個值 | **獨立 pageblock bit** `PB_migrate_isolate` |
+| 設定 | `set_pageblock_migratetype(page, MIGRATE_ISOLATE)`,**非 static**、未 export | `set_pageblock_isolate()` → `set_pfnblock_bit(page, pfn, PB_migrate_isolate)`,**非 static**、未 export |
+| 舊寫法在 6.18 | — | **被明確拒絕**(`VM_WARN_ONCE` + `return`),且該函式已改成 `static` |
+| 讀取 | `get_pfnblock_migratetype()` | 同一個函式,**仍回報 `MIGRATE_ISOLATE`**(相容層),且 `EXPORT_SYMBOL_GPL` |
+| free 路徑的 isolate 逃生口 | ✓ | **✓ 原封不動** |
+| `android_vh_free_one_page_bypass`(現用) | ✓ | **✓ 四版全在** |
+| `android_vh_free_unref_page_bypass`(選項 B) | ✓ | ✓ |
+
+**機制本身四個版本全部成立**;要改的只有設定端,而兩種介面都有**非 static、未 export**
+的具名符號可用 kallsyms 取得——模組本來就是這樣拿 `prep_compound_page` /
+`drain_all_pages` / `alloc_contig_range` 的,不是新的風險類別。
+
+> **會咬人的陷阱**:6.18 的 `set_pageblock_migratetype(page, MIGRATE_ISOLATE)`
+> **不回報失敗給呼叫者**——只印一行 `VM_WARN_ONCE` 然後 return。版本分支寫錯的話,
+> 行為是「什麼都沒發生」而不是編譯錯誤:池子照跑、漏損照舊、零訊號。
+> 所以 preflight **必須設完之後回讀 `get_pfnblock_migratetype()` 確認真的變成
+> `MIGRATE_ISOLATE`**,不能只驗「符號有沒有拿到」。
+
 要驗證的風險(動手前逐條確認):
 
 1. `set_pageblock_migratetype()` 沒有 export → 要走 `kallsyms_lookup_name`
