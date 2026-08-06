@@ -5,15 +5,23 @@ Survey,2026-08-06。問題:退出路徑上補「主動歸還」有沒有用、ud
 
 ## 結論先講
 
-1. **主動歸還解不了實測到的損失。** 損失的原因不是「還得太晚」也不是「被拆散」,
-   而是**頁面以 order-9 被 free 了,卻停在 per-CPU 的 THP free list,而 hook 掛在它的下游**。
-2. **把現有 memfd 包成 udmabuf 沒有用**;但「模組自己配置、自己 export」是真的新路徑。
-3. **在你的性能限制下,結論會翻轉**:唯一「便宜又對得上機制」的修法(把 hook 前移到 pcp 之前)
-   **觸發次數嚴格更多**,所以它買到 0.047% 卻要付更多錢——**不該做**。
-   要同時拿到正確性和性能,只有讓頁面**根本不進 buddy**。
-4. **那條路的地基卡在一個已經由原始碼回答的問題上**:客體 RAM 必須被 GUP pin,
-   而**所有 in-tree 的 dma_buf exporter 都設 `VM_PFNMAP`,GUP 對這種 VMA 無條件 `-EFAULT`**。
-   所以它不能是一個「照慣例做的 dma_buf」,必須是自有 chardev + `vm_insert_page`。
+1. **損失的成因**:頁面**以 order-9 被 free 了、沒有被拆散**,但它停在 per-CPU 的 THP free
+   list,而 hook 掛在它的下游(`__free_one_page`)。實測 **1.33 頁/輪、回收率 99.95%**。
+2. **crosvm 側做不到 100%**。它能影響的只有 free 的**時機**,而時機只能改善兜底
+   (`drain_all_pages` + scavenger)的命中率——那是 best-effort,不是可靠路徑。
+   「主動 pin 再 munmap/free」不但無效,還會把 free 推遲到那唯一一次 drain 之後,**更糟**。
+3. **要確定性只有三條路**,而且**最便宜的那條先前沒有被考慮過**:
+   - **A(首選)**:把池子的 pageblock 標成 `MIGRATE_ISOLATE`。`free_unref_page` 對 isolate
+     **直接轉呼 `free_one_page`,完全繞過 pcp**,而現有 hook 正是 `__free_one_page` 的第一件事。
+     **零新增攔截、零新增觸發頻率、模組側改動、不動 crosvm。**
+     副作用是好的:漏掉的頁會落到 isolate freelist(誰都配不走),失敗模式從永久損失降級成可回收。
+   - **B(備案)**:掛 `android_vh_free_unref_page_bypass`(pcp 插入之前)。確定性,
+     但觸發次數嚴格更多,在性能限制下不是首選。
+   - **C(終點)**:讓頁面根本不進 buddy(自有 chardev),**唯一涵蓋 SIGKILL**,
+     而且同時拆掉配置側那個最貴的 kretprobe。
+4. **C 的地基已由原始碼回答**:客體 RAM 必須被 GUP pin,而 in-tree 三個 dma_buf exporter
+   全都設 `VM_PFNMAP`、GUP 對這種 VMA 無條件 `-EFAULT`。所以它**不能是照慣例做的 dma_buf**,
+   必須是自有 chardev + `vm_insert_page`。
 
 ---
 
@@ -138,12 +146,133 @@ udmabuf 只是從 memfd 的 page cache 取頁並 pin 住,`ukv_release` 逐頁 `p
 頁面從頭到尾不進 buddy,於是:不需要猜 order、不需要 pcp drain、不需要
 `alloc_contig_range` 重組,**而且兩個全系統攔截點都可以拆掉**。
 
-### 2.3 「`/dev/gh_udmabuf` 專供 order-9,能保證 100% 嗎?」
+### 2.3 「crosvm 側有沒有手段讓正常關機路線的匹配率到 100%?」
 
-方向對——它就是 POOL_RECLAIM_PLAN §3 說的「唯一的真出路:把 pool 頁面完全移出 buddy 管轄
+先釘住決定一切的那條規則:**free 走哪條路由 folio 的 order 決定**。
+
+```c
+static inline bool pcp_allowed_order(unsigned int order)   /* mm/page_alloc.c */
+{
+        if (order <= PAGE_ALLOC_COSTLY_ORDER) return true;
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+        if (order == HPAGE_PMD_ORDER) return true;          /* ← order-9 就是這條 */
+#endif
+        return false;
+}
+```
+
+order-9 **就是** `HPAGE_PMD_ORDER`,所以它天生走 pcp。crosvm 改不了 folio 的 order,
+也就改不了走哪條路。逐條:
+
+| 手段 | 效果 |
+|---|---|
+| **主動 pin 再 munmap/free** | **無效,而且有害。** pin 不改變 free 路徑;退出時多一個 LONGTERM pin 只會把 free **推遲到模組那次 +3s drain 之後**,正好加大漏的窗口 |
+| **sbrk / brk** | 不適用。客體 RAM 是 memfd 的 `mmap`,不在 heap 上 |
+| **punch-hole 整段 memfd** | 已被 `F_SEAL_SHRINK` 封死;就算解封,放出來的 folio 一樣進 pcp |
+| **先 split 再 free** | 更糟:變成 order-0,**全部**進 pcp |
+| **以非 pcp-eligible 的 order 釋放** | 做不到:不能把一個 compound folio 拆成 order-4..8 去 free |
+| **控制 drop 順序 + 退出時踢一次回收** | **唯一有作用的槓桿**(見下),穩態成本為零 |
+| **另創新路徑(頁面不進 buddy)** | 見 §2.5,連 SIGKILL 都涵蓋 |
+
+**所以 crosvm 沒有辦法讓匹配率變成 100%。** 它能影響的只有 free 發生的**時機**,
+而時機只能改善兜底(`drain_all_pages` + `alloc_contig_range` 的 scavenger)的命中率——
+那條路本質上是 best-effort,不是可靠路徑,不該拿它當答案。
+
+### 2.4 三條**確定性**路徑(這才是問題的答案)
+
+要在正常路徑上必定命中,只有三種做法。全部都是「改變 free 的路由」或「讓頁面不進 buddy」,
+沒有第四種。
+
+#### 選項 A:把池子的 pageblock 標成 `MIGRATE_ISOLATE`(**模組側,零 crosvm 改動,成本最低**)
+
+`free_unref_page` 的第一個逃生口就是它:
+
+```c
+migratetype = get_pfnblock_migratetype(page, pfn);
+trace_android_vh_free_unref_page_bypass(page, order, migratetype, &skip_free_unref_page);
+if (skip_free_unref_page) return;
+if (unlikely(migratetype > MIGRATE_RECLAIMABLE)) {
+        if (unlikely(is_migrate_isolate(migratetype))) {
+                free_one_page(page_zone(page), page, pfn, order, FPI_NONE);
+                return;                          /* ← 完全繞過 pcp */
+        }
+```
+
+而 `free_one_page()` 無條件呼叫 `__free_one_page()`,**現有的 hook 就是那個函式的第一件事**
+(在 `account_freepages` 與所有 `VM_BUG_ON` 之前)。所以路由變成:
+
+```
+teardown free → free_the_page → free_unref_page → [isolate] → free_one_page → __free_one_page → 我們的 hook
+```
+
+**全程不碰 pcp,確定性命中,而且不需要任何新的攔截點。**
+
+為什麼成本趨近於零:
+
+- `is_migrate_isolate` 在 `mm/page_alloc.c` 裡只出現在 free/accounting 路徑
+  (那些檢查本來每次 free 都會跑)與 `alloc_contig`/isolation 專屬碼裡,
+  **不在配置熱路徑**(`rmqueue` / `get_page_from_freelist`)上。
+- `zone->nr_isolate_pageblock` 只被 `mm/page_isolation.c` 與 `mm/memory_hotplug.c` 碰,
+  `page_alloc.c` 完全不讀它——所以「有 isolate 區塊」不會讓整個 zone 走慢路徑。
+- **pageblock 就是 2MB,與 order-9 頁 1:1 對應**,所以每個池子頁剛好獨占一個 pageblock,
+  不會有「同一個區塊裡混著別人的頁」的問題。
+
+順帶一個很好的副作用:**失敗模式降級**。萬一 hook 仍然漏掉一頁,它會落到
+**isolate freelist——誰都配不走**,變成「停在那裡等 scavenger 撿」而不是「被別人占走」。
+今天的 `orphan_inuse`(永久損失)在這個設計下不存在。
+
+要驗證的風險(動手前逐條確認):
+
+1. `set_pageblock_migratetype()` 沒有 export → 要走 `kallsyms_lookup_name`
+   (模組已經在用,`disable_kapi = kallsyms_lookup_name`)。
+2. **`rmmod` 必須還原**,否則 3072 個 pageblock(6GB)會永久留在 isolate 狀態。
+   拆卸序列本來就有註解寫明順序,新增這一步要進清單。
+3. 若別的東西對同一範圍呼叫 `start_isolate_page_range` / `undo_isolate_page_range`,
+   `nr_isolate_pageblock` 的記帳會對不上(我們是直接設型別、沒有增減那個計數)。
+   手機上機率低,但要想清楚要不要走正規的 isolate API。
+4. 我們自己的 `alloc_contig_range` scavenger 與 isolate 區塊的互動要重測——
+   `alloc_contig_range` 內部本來就會 isolate,兩者疊加的行為要驗。
+5. watermark:isolate 的**空閒**頁不計入 `NR_FREE_PAGES`。我們的頁不是空閒的
+   (不是被服務出去就是在池子裡,兩者都是 allocated),所以理論上不受影響——但要量。
+
+#### 選項 B:掛 `android_vh_free_unref_page_bypass`(模組側,確定性,但觸發更頻繁)
+
+同一段程式碼的上一行就是這個 vendor hook,在**任何 pcp 插入之前**,而且帶 `order`,
+所以快路徑閘門一樣是 `order != 9 → return`。確定性命中。
+
+代價是**觸發次數嚴格多於今天**:今天的 hook 收不到「進 pcp 後又被 pcp 配走」的頁,
+而 `free_unref_page` 每一次 pcp-eligible 的 free 都收——那是熱路徑上最常見的情況。
+在「要考慮綜合性能」的前提下,這是選項 A 的備案而不是首選。
+
+ABI 注意(**這裡更正 `POOL_RECLAIM_PLAN.md` §4.2 的兩個錯誤**):
+
+| 符號 | `abi_gki_aarch64.stg` | `abi_gki_aarch64_honor` |
+|---|---|---|
+| `android_vh_free_unref_page_bypass` | 有 | **沒有** |
+| `android_vh_free_one_page_bypass`(現用) | 有 | 有 |
+| `android_vh_free_folio_bypass` | **這棵樹沒有** | 沒有 |
+
+舊文件寫的 `android_vh_free_page_bypass` / `android_vh_free_folio_bypass` 兩個名字,
+在 6.6.118 上一個名字不對、一個不存在。要用就用 `android_vh_free_unref_page_bypass`,
+並且因為它不在 honor 清單,必須靠 kapi preflight 偵測 + fallback。
+
+#### 選項 C:頁面根本不進 buddy(crosvm + 模組,涵蓋 SIGKILL)
+
+見 §2.5。它是唯一能連 SIGKILL 都涵蓋的,而且**同時拆掉配置側那個最貴的 kretprobe**。
+代價是動 crosvm 的記憶體後端。
+
+#### 不成立的:「hook unmap」
+
+unmap 不是頁面被釋放的時刻。客體 RAM 是 shmem page-cache folio,`munmap` 只掉 PTE 的 ref,
+**頁面仍留在 page cache 裡**(inode 持有 `folio_nr_pages()` 個 ref),要到 memfd 的 inode
+被銷毀才真的釋放。所以 unmap hook 會在錯誤的時間點觸發,而且那時我們也還不是擁有者。
+
+### 2.5 「`/dev/gh_udmabuf` 專供 order-9,能保證 100% 嗎?」
+
+(這是上面的選項 C。)方向對——它就是 POOL_RECLAIM_PLAN §3 說的「唯一的真出路:把 pool 頁面完全移出 buddy 管轄
 + 自有 allocator」。但**它不能是一個照慣例做的 dma_buf**,原因如下。
 
-#### (a) 硬性阻擋:dma_buf 的 CPU mapping 不可被 GUP pin
+#### (a) 硬性阻擋:dma_buf 的 CPU mapping 不可被 GUP pin(選項 C 的擋門)
 
 `mm/gup.c:949` 的 `check_vma_flags()`:
 
@@ -207,7 +336,12 @@ dma_buf / chardev 的 release 涵蓋 SIGKILL,但**不涵蓋 memparcel**。
 
 ## 3. 選項排序(套用性能限制之後)
 
-### ❌ 不要做:把 free hook 前移到 pcp 之前
+### ✅ 首選:選項 A(isolate pageblock)——確定性,而且幾乎不加成本
+
+見 §2.4。它把 free 的路由改掉,用**現有的** hook 就能確定性命中,
+順帶把「被別人占走」這個失敗模式整個消除。**先驗證 §4.4 的五條風險。**
+
+### ⚠️ 備案:選項 B(`android_vh_free_unref_page_bypass`)
 
 這棵 kernel 有兩個更早的 bypass hook(`android_vh_free_page_bypass` @ `free_unref_page`、
 `android_vh_free_folio_bypass` @ `free_unref_folios`),它們在**任何 pcp 插入之前**,
@@ -217,10 +351,10 @@ dma_buf / chardev 的 release 涵蓋 SIGKILL,但**不涵蓋 memparcel**。
 而 `free_unref_page` **每一次 free 都收**——那正好是熱路徑上最常見的情況。
 它是**正確性修正,不是成本改善**,買到的是 0.047%。
 
-**在「要考慮綜合性能」的前提下,這個交易不划算。** 保留在文件裡是為了說明為什麼不做。
-(如果哪天決定要做:三個都掛、不要做 primary/fallback 推舉——走哪條 free path 是 runtime
-由別的廠商模組 `android_vh_customize_thp_pcp_order` 決定的;並且這兩個符號不在
-`abi_gki_aarch64_honor` 清單裡,要靠 kapi preflight 偵測。細節見 POOL_RECLAIM_PLAN §4.2–4.4。)
+**確定性有了,但觸發次數嚴格更多**——所以它是選項 A 失敗時的備案,不是首選。
+真要做:不要做 primary/fallback 推舉(走哪條 free path 是 runtime 由別的廠商模組
+`android_vh_customize_thp_pcp_order` 決定的,insmod 時推舉必然判斷錯),
+並且它不在 `abi_gki_aarch64_honor` 清單裡,要靠 kapi preflight 偵測 + fallback。
 
 ### ✅ 值得做:自有 chardev + `vm_insert_page`,頁面永不進 buddy
 
@@ -234,7 +368,7 @@ dma_buf / chardev 的 release 涵蓋 SIGKILL,但**不涵蓋 memparcel**。
 | SIGKILL | 靠 kernel free path,會漏 | 涵蓋(`exit_files` 保證關 fd) |
 | 遷移/拆散 | 靠 pin + 封印擋住大部分 | 不適用(頁不在 buddy 管轄內) |
 
-前提是 §2.3(a):`mmap` 必須用 `vm_insert_page`,不能是 `VM_PFNMAP`。
+前提是 §2.5(a):`mmap` 必須用 `vm_insert_page`,不能是 `VM_PFNMAP`。
 
 ### ⚪ 過渡:先量,別先改
 
