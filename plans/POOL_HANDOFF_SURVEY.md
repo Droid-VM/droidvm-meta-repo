@@ -407,6 +407,51 @@ dma_buf / chardev 的 release 涵蓋 SIGKILL,但**不涵蓋 memparcel**。
 新舊並行掛一段時間,用**分站點**的 `dbg_o9_seen` 比對觸發次數與 order 分佈。
 POOL_RECLAIM_PLAN §4.4 已經寫了這個方法。沒有這個數字之前,「貴多少」是猜的。
 
+### 4.4 選項 A 動手前要逐條確認的五件事
+
+1. `set_pageblock_migratetype()` 沒有 export → 走 `kallsyms_lookup_name`(模組已在用)。
+2. **`rmmod` 必須還原**,否則 3072 個 pageblock(6GB)永遠留在 isolate 狀態。
+3. 與正規 isolate API 的記帳:我們直接設型別、不動 `zone->nr_isolate_pageblock`,
+   若別處對同一範圍呼叫 `undo_isolate_page_range` 會對不上。
+4. 與自家 `alloc_contig_range` scavenger 的互動(它內部本來就會 isolate)要重測。
+5. watermark:isolate 的**空閒**頁不計入 `NR_FREE_PAGES`;我們的頁不是空閒的,理論上不受影響,但要量。
+
+---
+
+## 5. 本輪實測
+
+### 5.1 漏損速率(六輪,`poolcycle.sh`)
+
+```
+cycle 1..6 lost: 0, 2, 2, 2, 2, 0     →  8 頁 / 6 輪 = 1.33 頁/輪,回收率 99.95%
+```
+**三輪不夠**:同一份建置的前三輪曾經連續量到 0。任何關於這個數字的結論都要 ≥6 輪。
+
+### 5.2 兜底救不回來(四輪,`poolkick.sh`)
+
+假說是「損失的頁只是晚到,錯過了模組那唯一一次 +3s drain」。測法:從**關機之前**就開始
+每 0.25 秒寫一次 `reconcile`(它會跑 scavenger,而 `alloc_contig_range` 內部會 drain pcp),
+一路持續到 crosvm 消失後 55 秒。
+
+```
+cycle 1..4: 每輪仍然 lost 2 pages    →  兜底一頁都沒救回來
+```
+
+**所以「調整兜底的時機」不是出路**,這也是為什麼 §3 的首選是改變 free 的**路由**而不是時機。
+
+**但這個測法有一個混淆,必須寫下來**:`reconcile` 過了 `RECONCILE_GRACE_MS` 會**purge**
+served entry,而模組自己的註解就說 purging reconcile「會丟掉它們待處理的 free,
+hook 之後就配不上了」。所以有可能是猛踢 reconcile **自己造成**那 2 頁。
+分辨方法很便宜——看 `del_miss`:
+
+| 觀察 | 判讀 |
+|---|---|
+| `del_miss` 每輪 +2 | 頁面**有**走到 `__free_one_page`,只是 entry 已被 purge → 病在 entry 生命週期,**選項 A 幫不上** |
+| `del_miss` 不動 | 頁面**從沒走到** hook,被 pcp 交給別人 → 病在路由,**選項 A 正中要害** |
+
+`poolwhere.sh` 就是跑這個(全程不手動 reconcile,只讓模組自己的 +3s worker 跑,
+最後才 reconcile 一次結帳)。**結果見下,它決定選項 A 值不值得做。**
+
 ---
 
 ## 5. 不要再提案的(已有證據推翻,細節在 POOL_RECLAIM_PLAN.md §1、§2、§3、§7)
