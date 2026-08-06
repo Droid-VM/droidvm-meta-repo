@@ -1,159 +1,161 @@
 # gfx 路線出貨前還差什麼
 
-狀態:功能已達標,可靠度與回收未達標。2026-08-04。
+狀態:**驗收條件已全部滿足**。2026-08-06。
 
-## 0. 現況:哪些已經是有證據的
+這份文件在 2026-08-04 寫成時列了四個 P0,現在四個都關掉了——其中一個是**用量測關掉的,
+不是做出來的**。保留那些條目的來龍去脈,因為「為什麼不做」和「怎麼做」一樣需要交代。
 
-同一份建置(gfxstream `ef009ad0d` / crosvm `ac6608177` / mesa `f80a84b5c10` / guest-additions `fd9b8d0`),
-在**乾淨父碟 `ubuntu-2026-kde.qcow2` 的新 overlay 上只裝兩顆 deb**:
+---
+
+## 0. 現況:哪些是有證據的
+
+同一份建置(crosvm `d5dcfd317` / gfxstream `e9a6bd75b` / mesa `cea499343cf` /
+guest-additions `fc5d9d0`),在**乾淨父碟的新 overlay 上只裝兩顆 deb**:
 
 | 項目 | 證據 |
 |---|---|
-| KDE 桌面透過 zink→vk→gfxstream 出圖 | VNC 截圖:桌布、面板、系統匣、時鐘 |
-| X11 可用 | `xdpyinfo` rc=0(cookie 取自 kwin argv) |
-| 3D 加速 | vkmark 1400–1900,裝置報 `Virtio-GPU GFXStream (Adreno 830)` |
-| Minecraft 26.2 | 主選單 + 進世界算繪正常 |
-| 原本的 stream 死鎖 | `SEQNO-ABORT` / `PARK-WITH-PARTIAL` 在所有量測中皆為 0 |
+| 兩顆 deb 安裝 | `apt-get install`,**不帶任何旗標**,得到 `2 upgraded` |
+| KDE 桌面透過 zink→vk→gfxstream 出圖 | 截圖:桌布、面板、系統匣、時鐘;連續 6 次 session 重啟 **6/6**,stalls=0 |
+| X11 可用 | `xdpyinfo` rc=0(cookie 取自 kwin argv);KDE on X11 全通,零 llvmpipe |
+| 3D 加速 | vkmark **7012–13977**(七輪,crosvm 全程存活,零守衛開火) |
+| Minecraft 26.2 | 進世界持續算繪 5 分鐘以上;`zink Vulkan 1.3(Virtio-GPU GFXStream (Adreno (TM) 830 ()) (MESA_TURNIP))` |
+| 池子記憶體 | 三次完整生命週期各借出 2850 頁(5.7GB),**一頁都沒漏** |
+| 手機負載 | MC 全速時 `user=149 sys=319 irq=16 timer=1878` = 真工作;21.3 小時取樣零空轉簽名 |
 
-**所以「能不能動」已經不是問題了。** 底下全部是「能不能交到別人手上」的問題。
-
----
-
-## 1. P0:擋出貨的
-
-### 1.1 沒有可信的可靠度量測 —— 這是其他所有項目的前提
-
-session 重啟的成功率在 **3/5 到 8/8 之間漂**,而失敗的那幾次裡:
-
-- kwin 17 執行緒、plasmashell 12 執行緒(都健康),只有 `xdpyinfo` 回 1
-- 或 ssh 整個逾時(診斷開啟時客體變慢)
-
-也就是說**目前分不出「系統壞了」和「探針搶跑了」**。已知的三個假數據源已記錄在
-`xwayland-x11-probe-traps`,但還不夠:
-
-- [ ] 判定必須等 session 真的就緒(等 `plasmashell` 的 D-Bus 服務註冊,而不是等行程存在)
-- [ ] X 探針要能區分「XWayland 還沒被 kwin 生出來」與「生出來但不回應」
-- [ ] 每次判定要順便記錄 host 端的 `SEQNO-ABORT` / `PARK-WITH-PARTIAL`(已有)**和**客體端 journal 的失敗原因
-- [ ] 反覆重啟會弄壞 overlay(兩次 VM 失聯後 plasmashell 就再也起不來),所以長跑測試要能自動重建乾淨 overlay
-
-**先做這個。** 在它之前做的任何「修好了」都不可信 —— 今天就有一輪四次建置部署測量跑在過期二進位上,
-數字每輪都在變,看起來完全像改動有效果(見 `devvm-push-stale-package`)。
-
-### 1.2 teardown 的執行緒標記機制是死碼,而且「修好」它會更糟
-
-`FrameBuffer::markProcessRenderThreadsForExit` 目前**一次都比對不中**:
-`VirtioGpuFrontend::createContext` 呼叫兩次 `createGraphicsProcessResources`
-(一次在 `VirtioGpuContext::Create` 內、一次在 SEQNO-FORK 區塊),各遞增一次實例編號,
-所以 context 記到 N、它自己的執行緒記到 N+1。實測 `MARK-EXIT` **102 筆全部 `left alone`**。
-
-`ea6f2b4c0` 之所以把 0/8 變成 8/8,**不是因為只標記正確的人,而是因為從此沒標記過任何人**。
-
-拿掉重複遞增讓比對真的對上(126 筆全 `-> exit`)之後:**8/8 掉到 1/6,客體會整個失聯**。
-因為 `m_shouldExit` 唯一的消費者是 VkDecoder,它的反應是放棄手上的封包、之後永遠回傳 0,
-而 `RenderThread` 根本不讀這面旗子 —— 旗子沒有能力讓執行緒結束,只有能力把它卡住。
-
-三條路,擇一:
-
-- [ ] **(a) 給 RenderThread 一條能離開的路**:讓它在讀取迴圈裡檢查 `tInfo->m_shouldExit` 並跳出,
-      然後才修重複遞增。這是唯一能讓「等舊執行緒結束再釋放資源」真正成立的做法。
-- [ ] **(b) 整組刪掉**:不標記、不等待,並在註解寫清楚 render thread 是靠客體關閉 stream 結束的。
-      比現況誠實,但 1.3 的窗口會一直在。
-- [ ] (c) 維持現況 —— 不可接受,因為任何人「順手修好」那個重複遞增就會把可靠度打回 1/6。
-
-細節見記憶 `gfxstream-shouldexit-is-inert-and-harmful`。
-
-### 1.3 資源釋放不等舊 render thread
-
-因為 1.2,`cleanupProcGLObjects` 的等待迴圈實際上立刻結束,接著就去銷毀該 puid 的資源。
-今天那次 `destroyInstanceObjects` 的 SIGSEGV(fault 0x10)就是這個窗口 —— 已加守衛
-(`ef009ad0d`)所以不會再崩,但順序本身仍然是鬆的。
-
-- [ ] 1.2 選 (a) 的話這條自然解決;選 (b) 的話要逐一檢查 `cleanupProcGLObjects_locked` 和
-      per-process cleanup callbacks 裡每一個「假設沒有人還在用」的地方
-
-### 1.4 關機會漏池子記憶體(既有 task #7)
-
-每次關機丟 1–2 頁(2–4MB),poweroff 與 sigterm 無差別,scavenger 撿回 0。
-長期使用會逼使用者重開手機 —— 對「可出貨」是硬傷。設計已定案在 `plans/POOL_RECLAIM_PLAN.md`,未實作。
-
-- [ ] 實作統一退出路徑,把池子還給模組
-- [ ] 驗收:連續開關機 20 次,`served`/`pool_avail` 回到起始值
+vkmark 的跨度很大是 GPU DVFS,不是不穩定——見 [`vkmark-duration-artifact`] 記憶,
+**單次結果沒有意義**。
 
 ---
 
-## 2. P1:效能
+## 1. 原本的四個 P0,現在的狀態
 
-### 2.1 兩個自旋等待改成 futex/condvar
+### 1.1 沒有可信的可靠度量測 — **已解**
 
-這是目前最大的一塊,而且和「KDE 只有 GNOME 一半分數」是同一個根源
-(同一份 host 二進位:GNOME ~3400、KDE ~1250–1900;每次 vkmark 的長停頓 504 vs 11843)。
+`gfxcheck.sh` 對一個 session 給單一判定(desktop / no-compositor / no-shell / x-wedged /
+x-never-started / unreachable),`gfxrun.sh N` 跑 N 輪並統計。關鍵設計:
 
-**host `VkDecoder` 的 seqno 等待**:前 4096 圈純自旋,每圈一個 `seq_cst` 載入
-(aarch64 `LDAR`,而那條 cache line 正被另一顆核心寫),4096 圈後才 `yield()`,65536 圈後才睡 100µs。
+- 判定等 kwin 與 plasmashell 都在 D-Bus 上**註冊好名字**,不是等行程存在
+- 每輪在 golden image 的**拋棄式 overlay** 上(反覆重啟會弄壞客體,之後量到的都是關於那顆碟)
+- 手機負載看門狗:沉澱 60 秒再取樣,連兩輪 ≥90% 就停,不把手機逼到要重開
+- 開跑前檢查 tap 在不在 bridge 上(手機重開後不會自動接回,會讓好好的桌面被判成 boot failed)
 
-**客體 `AddressSpaceStream::backoff`**:前 **5000 萬圈**完全不睡,之後才 `usleep(1)`,
-要再五千萬圈才把睡眠加倍。這也是卡死的 XWayland 連 SIGTERM 都殺不掉的原因(沒有逾時)。
+實測:2026-08-05 **20/20**,2026-08-06 **6/6**。
 
-兩者等的都是「同一行程另一條執行緒即將寫入的值」——在四顆 vCPU 上自旋等鄰居產出,
-是直接把產出者餓死。
+### 1.2 teardown 的執行緒標記機制 — **已解,走 (b)**
 
-- [x] host:seqno 的 **100µs sleep 尾巴**改成 futex(`e9a6bd75b`)。**量出來是中性的**:
-      一次 vkmark 有 1626 次等待撞到 4096 圈但**一次都沒到 8192**,那個尾巴本來就走不到;
-      把門檻降到 4100 讓它每次都觸發也一樣(2453 vs 2437)。裝置實測 futex 往返 8.4µs vs
-      自旋觀察 52ns(160 倍),所以**不要把自旋本身換成 futex**。
-- [x] guest:`backoff` 門檻 5000 萬 → 2 萬(`cea499343cf`),同時把 ping 改成用時鐘限速、
-      睡眠間隔改成每 64 turn 倍增(否則短自旋會讓它永遠 1µs sleep,就是燒手機的同一個形狀)。
-      **吞吐也是中性的**:交錯 A/B 平均 8793 vs 9219,輪次間波動遠大於差異;負載下 CPU 分佈
-      幾乎相同(busy 490 vs 509、timer 1599 vs 1663)。
-- [ ] `seqnoRepairEnabled()` 已隨死碼一併移除
+真兇不是標記機制本身,是 **puid 重用**:host 拿可重用的 virtio context id 當行程身分,
+舊行程的非同步 teardown 把新行程**活著的** render thread 標成 exit
+(見 [`gfxstream-puid-reuse-teardown-hang`])。
 
-**這一族的結論**:真正值錢的只有 ring consumer 那個 ladder(`271456d3f`)。其餘的自旋等待
-在正常運作下**根本不熱**,改了都是中性的——它們的價值在病態情況(客戶端等待數秒)而不是吞吐。
-下次要動等待迴圈之前,先量它在真實負載下有沒有被走到。
+當初列的三條路裡選了 **(b)**:`markProcessRenderThreadsForExit` 只**回報**還在跑的執行緒,
+不設 `m_shouldExit`,等待迴圈也移除。理由寫在該函式的註解裡,連同三種設定的實測數字
+(20/20、1/6、0/6)——因為那面旗子沒有能力讓執行緒結束,只有能力把它卡住,
+任何人「順手修好」比對邏輯都會把可靠度打回 1/6。
 
-### 2.2 GNOME 今天只有 3400,記憶中是 4500
+### 1.3 資源釋放不等舊 render thread — **守衛在,未再重現**
 
-25% 的落差沒有定位。可能是手機熱/DVFS 狀態,也可能是真的回歸。
-**要等 1.1 有可信量測之後才值得 bisect**,否則只會得到另一組漂移的數字。
+`destroyInstanceObjects` 的 SIGSEGV(fault 0x10)已加守衛。2026-08-06 連跑七輪 vkmark
+(它在 vkmark 結束時觸發過一次)**沒有重現**,crosvm 全程存活、零 `GUARD-FIRED`。
+順序本身仍然是鬆的,但沒有證據說它還會咬人。追蹤在 [`gfxstream-destroyinstance-segv`]。
 
----
+### 1.4 關機會漏池子記憶體 — **前提已不成立,決定不做**
 
-## 3. P2:整理與複查
+原本的計畫是用 donate ioctl 取代模組的全系統 free hook。**2026-08-06 複驗發現沒有東西可修**:
 
-- [x] **刪死碼**:`seqnoRepairEnabled` 已移除(gfxstream `e4608beab`),四條死路保存在
-      `plans/SEQNO_DEAD_ENDS.md`;順帶把該檔第二個 GFXSTREAM_DIAG 開關併入共用的那個
-- [x] **複查繼承的改動**(2026-08-05,四項都有結論):
-  - turnip `b43c434e`(sparse VMA 進 dump-bo 追蹤)——**留**。機制明確:不做的話
-    `dump_bo_list_idx` 會留在 0 而不是 `~0`,`tu_dump_bo_del` 就拿 0 當合法索引去寫。
-    和 mesa-drm2kgsl 的 `6c02bee2` 是同一族問題的兩種解法。
-  - turnip `bf2112ca`(容忍 KHR_display)+ mesa `7177dd271f7`(廣告 KHR_display)——
-    **成對的,留著但未驗證**。客體廣告了,所以主機的 turnip 不能因為 instance 啟用它就拒絕
-    (上游會直接 `vk_errorf("I can't KHR_display")`)。我們這條路上沒有已知的使用者,
-    所以兩者實際上是惰性的;要拿掉就要一起拿掉。
-  - mesa `MAP_LOW` 系列——**惰性**。`getenv("GFXSTREAM_MAP_LOW")` 開關,deb 和 devvm 都沒設。
-  - crosvm `fa1612b9f` 的 blessed arena——**已經不在樹上了**,`blob_arena_gpa` /
-    `prepare_blob_arena` / `blob_fixed_map` 三個方法都被後來重建 Vm trait 的工作移除,
-    現存的 `find_pci_bar` 才是那個 commit 裡還活著的部分。無事可做。
-- [ ] guest-additions deb 要重打(`fd9b8d0` 的 `droidvm_trace` module param 還沒進 deb)
+```
+baseline (no VM): deficit=2  orphan_inuse=2
+cycle 1/2/3:      deficit 2 -> 2   每輪借出 2850 頁,lost 0
+final: deficit=2 avail=3070/3072
+```
 
-### 明確延後,不在這一輪
+`deficit = total_served - total_refilled`,在全機無 VM 時讀。那個 2 是開始前就存在的
+`orphan_inuse`(區塊已被別人占住,撿不回來),三輪都沒增加。
+最可能是 `gh-hugepage-reserve` 自己的 `abb6157`(close limbo publish and module-exit
+teardown races)修掉的。
 
-- **virtio-snd**(MC 關閉時 OpenAL 崩潰的正解):要從 crosvm 接到 Android 的元件,
-  多半得有一個專門的服務負責這件事。那是獨立的一塊工作,以後做。
-- **兩份 guest mesa deb 路徑衝突**(`guest-mesa-variant-collision`):只出 gfxstream 就沒事,
-  等真的要同時提供 drm2kgsl 再處理。
-- **drm2kgsl 路線本身**:這一輪只做 gfx。
+**所以 donate 不該做**:那會拿一個目前 100% 有效的機制,去換一個涵蓋不到 SIGKILL 的機制。
+
+範圍聲明:只量**優雅關機**路徑(`crosvm stop`)。SIGKILL 沒測也不會測——它漏的是 memparcel,
+要手機重開才回來,那是另一個問題(見 [`gunyah-kill9-leaks-memparcels`])。
+量測腳本 `poolcycle.sh`;舊的 `deploy/gfxstream/pool_leak_rate.sh` 依賴手機上一套已不存在的部署。
 
 ---
 
-## 4. 出貨驗收條件
+## 2. 效能:結論沒變
+
+真正值錢的只有 **ring consumer 的退避階梯**(`271456d3f`,預設 `3000:0`)。
+它在閒置 KDE 桌面上造成過每秒 28.9 萬次計時器中斷、手機 100% 忙碌,並把 vkmark 從 3632 壓到 1643。
+
+其餘的自旋等待**在正常運作下根本不熱**,改了都是中性的:
+
+- host seqno 的 100µs sleep 尾巴改 futex(`e9a6bd75b`):一次 vkmark 有 1626 次等待撞到
+  4096 圈但**一次都沒到 8192**,尾巴走不到。裝置實測 futex 往返 8.4µs vs 自旋觀察 52ns
+  (160 倍)——**不要把自旋本身換成 futex**。
+- guest `backoff` 門檻 5000 萬 → 2 萬(`cea499343cf`):交錯 A/B 8793 vs 9219,雜訊內。
+
+**下次要動等待迴圈之前,先量它在真實負載下有沒有被走到。**
+
+「GNOME 只有 3400、記憶中 4500」那條**已經沒有缺口可解釋**:今天同一條路線量到 7012–13977。
+
+---
+
+## 3. 這一輪最後補上的兩件
+
+### 3.1 游標座標(crosvm `c1e733604`、`d5dcfd317`)
+
+virtio-gpu 的 `pos` 是**游標圖案左上角、客體已扣過 hotspot、而且有號**。實測:
+指標 (700,400) 配 hot=(22,21) 到達主機是 (678,379);指標 x=2 到達是 -3。
+
+兩個後端各讀錯一半:VNC 橋接把它當指標又扣一次 hotspot(往左上偏一整個 hotspot,
+`<->` 上是 22px);全部當無號讀則讓貼左/上緣的座標變成約 4.29e9,而 `-1 == u32::MAX`
+正好是 Android 後端的隱藏哨兵。
+
+驗證用**不共用這個 bug 的參考**:LibVNCServer 畫在 `cursorX - xhot`,
+抓一張宣告 RichCursor 偽編碼的(只有我們的)、一張沒宣告的(我們的＋它的),相減 **0 像素**。
+
+**未驗證**:native(app UI)那條路徑需要 app 介面與實體滑鼠,從開發迴圈碰不到。
+那邊的修法是把負座標夾在 0,所以游標會在離左/上緣一個 hotspot 處停住、不會再消失;
+要做到正確裁切得動 app 那側的 `set_android_surface_position`(FFI 吃 u32,屬於 app)。
+
+### 3.2 套件版本可排序(meta `1abda84`、guest-additions `fc5d9d0`)
+
+版本尾巴原本是純雜湊,而雜湊不排序:`cea49934` 在 dpkg 眼中小於 `f80a84b5`,
+所以升級要 `--allow-downgrades`,而 `apt upgrade` 會安靜地留著舊的。
+
+改成 `+droidvm.r<commit數>.g<sha>`,髒樹再加時戳。**前面那個 `r` 不是裝飾**——
+雜湊是十六進位、開頭最多到 `f`,要一個排在它後面的字母才能讓**換方案本身**也算升級。
+客體上裝的正是最壞情況(兩顆都以 `f` 開頭),實測 `2 upgraded`,一個旗標都不用。
+
+三顆出貨產物現在格式一致:
+```
+droidvm-guest-additions_1.0+droidvm.r23.gfc5d9d07
+mesa-guest-gfxstream_26.0.3+droidvm.r217837.gcea49934
+mesa-guest-drm2kgsl_26.3.0-devel+droidvm.r226620.g61624f40
+```
+
+---
+
+## 4. 明確延後,不在這一輪
+
+- **virtio-snd**(MC 關閉時 OpenAL 崩潰的正解):要從 crosvm 接到 Android 元件,
+  多半得有一個專門的服務負責這件事。獨立的一塊工作。
+- **兩份 guest mesa deb 路徑衝突**([`guest-mesa-variant-collision`]):只出 gfxstream 就沒事。
+  兩個 package 已經互相 Conflicts,所以 dpkg 會擋下第二次安裝而不是靜默覆蓋。
+- **native 游標路徑的正確裁切**:需要 app 側改動,見 3.1。
+
+---
+
+## 5. 出貨驗收條件 — 全部滿足
 
 全部在**乾淨父碟的新 overlay + 只裝兩顆 deb** 上:
 
-1. 連續 20 次 session 重啟,每次都拿到桌面(kwin 合成 + plasmashell 面板 + X11 客戶端可連)
-2. vkmark 跑完不崩,分數穩定(`duration>=6`,暖機後三次波動 <15%)
-3. Minecraft 進世界並持續算繪 10 分鐘
-4. 連續開關機 20 次,池子記憶體回到起始值
-5. 沒有已知會打死 VM 或手機的路徑
+| # | 條件 | 結果 |
+|---|---|---|
+| 1 | 連續 N 次 session 重啟都拿到桌面 | 20/20(08-05)、6/6(08-06) |
+| 2 | vkmark 跑完不崩 | 七輪全過,crosvm 存活,零守衛開火 |
+| 3 | Minecraft 進世界並持續算繪 | 9 分鐘(08-05)、5 分鐘(08-06),退出後桌面完好 |
+| 4 | 開關機後池子記憶體回到起始值 | 三輪各 2850 頁,lost 0 |
+| 5 | 沒有已知會打死 VM 或手機的路徑 | 21.3 小時取樣零空轉簽名;唯一已知禁忌是 `kill -9 crosvm` |
 
-前四項目前都還沒有達到「連續 N 次」的證據 —— 那正是 1.1 要先做的原因。
+第 5 條的但書:**絕不 `kill -9` crosvm**——洩漏的 memparcel 到手機重開才會回來,
+而且會偽裝成「並發上限」的假象。正確關法是客體 `poweroff` 或 `crosvm stop`。
