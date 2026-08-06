@@ -856,17 +856,23 @@ gh_hugepage_reserve: serving only __folio_alloc callers (0xffffffdf0435eec0)
 
 | | 修之前 | 修之後 |
 |---|---|---|
-| 每輪服務(`held`) | 2850 | **2848** |
+| 每輪服務(`held`) | 2850 | **2848**(直接量到) |
 | `del_hit` | +2848(**永遠短少 2**) | +2848(**沒有缺口**) |
 | 每輪永久損失 | 1.33 頁 | **0** |
 
+**六輪**(兩支腳本各三輪,符合本文件自己訂的「不要用 3 輪下結論」):
+
 ```
-cycle 1: lost=0  del_hit=+2848
-cycle 2: lost=0  del_hit=+2848
-cycle 3: lost=0  del_hit=+2848
+del_hit 視角:  cycle 1/2/3  lost=0  del_hit=+2848
+held   視角:  cycle 1/2/3  held=2848  deficit 0 -> 0
+最終:          total_served=17088  total_refilled=17088   → deficit 精確為 0
+               pool_avail=3050/3050
 ```
 
 (`del_miss` 的 14/75/22 是系統其他 order-9 free 的雜訊,與此無關。)
+
+**收尾**:診斷模組必須卸掉——`ghhr_sites` 在 `__alloc_pages` 上掛 kprobe,那是全系統成本。
+最後一次檢查時它還掛著,已 `rmmod`。
 
 ---
 
