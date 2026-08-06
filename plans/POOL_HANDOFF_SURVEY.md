@@ -3,9 +3,9 @@
 Survey,2026-08-06。問題:退出路徑上補「主動歸還」有沒有用、udmabuf 是不是多一條歸還路徑、
 專用的 `/dev/gh_udmabuf` 能不能保證 100%、以及**這些攔截各自的綜合性能代價**。
 
-> **直接讀 §4.7。** 這份文件對 `MIGRATE_ISOLATE` 來回過三次(§2.4 推薦 → §4.5 作廢 →
-> §4.6 恢復 → **§4.7 最終否決**)。前面的段落保留是為了記錄每一步被什麼證據推翻,
-> **動手前只以 §4.7 為準。**
+> **直接讀 §4.8。** 這份文件對修法來回過四次。**現況:機制成立、但「哪個配置在漏」沒有證據**,
+> 所以**目前沒有可執行的修法建議**。前面段落保留是為了記錄每一步被什麼推翻;
+> 唯一該做的下一步在 §4.8。
 
 ## 結論先講
 
@@ -704,6 +704,51 @@ __free_one_page(page, pfn, zone, order, mt, FPI_NONE); /* ← hook 在這裡 */
 VMA 被切開、deferred-split shrinker。修法不需要知道答案,但如果要根治
 「任何被拆的池子頁都收不回」這個通則,就需要——那要靠 §4.2 的 pfn debugfs
 加上 `page_owner` 拿配置堆疊。
+
+## 4.8 **識別被推翻:顯示緩衝不可能是 THP,所以不是它們**
+
+§4.6/§4.7 認定漏的是 crosvm 的顯示緩衝,依據是大小算術
+(1280×720×4=3.5MB 跨 2 個 2MB 頁,改 640×480 後 `held` 少 1)。**那個識別是錯的。**
+
+### 為什麼不可能
+
+手機上 `/sys/kernel/mm/transparent_hugepage/enabled = madvise`(run.sh 自己設的),
+**只有被明確 madvise 的 VMA 才拿得到 THP**。而 crosvm 全樹呼叫 `use_hugepages()`
+(即 `MADV_HUGEPAGE`)的地方**只有一處**:
+
+```rust
+/* vm_memory/src/guest_memory/sys/linux.rs:52-61 */
+for region in self.regions.iter() {
+    if mem_policy.contains(MemoryPolicy::USE_HUGEPAGES) {
+        let ret = region.mapping.use_hugepages();
+```
+
+**只對 guest memory regions。** 顯示緩衝(`VncSurface.local_buffer`、
+`SharedFramebuffer.data`、C 側 `screen->frameBuffer`)是普通堆積配置,
+在非 madvise 的 VMA 裡,**永遠拿不到 order-9 folio**,kretprobe 從沒服務過它們。
+所以 §4.7 建議的 `MADV_NOHUGEPAGE` 是打在不存在的目標上。
+
+順帶確認(這部分仍然成立):**顯示緩衝完全不與客體共享**——virtio-gpu 把客體 scanout
+**複製**進 `local_buffer`,客體看不到它們,沒有任何 lend / share / memparcel 路徑。
+
+### 那解析度為什麼會改變 `held`?
+
+只能是透過**客體側**的配置(virtio-gpu 的 blob / scanout 緩衝隨解析度變大小,
+而那些確實來自池子)。但這同樣是相關性推論,**不再拿它當結論**。
+
+### 現況
+
+| | 狀態 |
+|---|---|
+| **機制** | **成立**:THP 被拆成 order-0 釋放,order-9 的 hook 看不見。證據見 §4.7 的三點 |
+| **識別(哪個配置在漏)** | **無證據**。用大小算術猜了兩次,兩次被更基本的事實推翻 |
+| **修法** | **暫無可執行建議**。isolate 已否決;`MADV_NOHUGEPAGE` 目標不存在 |
+
+### 唯一該做的下一步
+
+加 debugfs 印出**殘留 served entry 的 pfn**,配 `page_owner=on` 拿配置堆疊
+(§4.2 早就列了,被我推遲四次)。它會直接說出:誰配的、多大、從哪條路徑來。
+**在那之前任何修法都是賭。**
 
 ---
 
