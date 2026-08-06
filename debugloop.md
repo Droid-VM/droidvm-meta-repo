@@ -37,7 +37,9 @@ ssh root@172.22.68.12 'apt-get install -y --allow-downgrades ./<deb>'
 | `gfxcheck.sh` | 對一個 session 給**一個判定**:desktop / no-compositor / no-shell / x-wedged / x-never-started / unreachable |
 | `gfxrun.sh N` | 跑 N 次 session 重啟並統計。每輪在 golden image 的**拋棄式 overlay** 上,並有手機負載看門狗 |
 | `rfb_grab.py` | VNC 截圖 + 亮點統計 |
-| `mv.py` / `rfb_click.py` | VNC 移動指標 / 點擊 |
+| `grab2.py` | 同上,但可宣告 RichCursor 偽編碼,讓畫面裡**只剩 crosvm 合成的游標** |
+| `curdiff.py` | 兩張截圖相減,把變動像素分群成 blob,回報各自的外框 |
+| `mvonly.py` / `rfb_click.py` | VNC 移動指標(不按鍵) / 點擊 |
 | `rfb_watch.py` | 保持一條 VNC 連線並連續回報畫面亮度 |
 | `mclaunch.py` | 繞過 HMCL GUI 直接起 Minecraft(從 version JSON 組出命令列) |
 
@@ -83,7 +85,30 @@ ssh root@172.22.68.12 'apt-get install -y --allow-downgrades ./<deb>'
 - **0 是可信的,任何大於 0 的計數都不可信**(重播只會增加)。這個不對稱很陰險。
 - 取計數前先 `pgrep -cf 'tail .*crosvm.log'`。
 
-### 3.3 `pkill -f` 會匹配到自己
+### 3.3 不存在的輔助工具,加上被丟掉的 stderr
+
+`python3 $SP/mv.py ... >/dev/null 2>&1` 連跑十幾次都「成功」——**那個檔案根本不在那個目錄**。
+於是「移動指標」全是空操作,而我從中得出了一個很有說服力的錯誤結論
+(「客體從不送 MOVE_CURSOR」);真相是那些移動從沒發生過。
+
+- 輔助工具第一次用之前先讓它**印一行**,或至少別把 stderr 丟掉。
+- 有預期副作用的步驟要有**正控制**:這裡就是「移動之後計數應該增加」。零增加要當成
+  「這一步沒發生」的嫌疑,而不是「被測物沒反應」的結論。
+- 想在客體端確認輸入有沒有進來,`cat /dev/input/eventN` 會讀到**零位元組**——
+  `kwin_wayland` 對那些節點下了 `EVIOCGRAB`。要看輸入,去看它造成的下游效果
+  (這裡是 crosvm 收到的 `MOVE_CURSOR`),別去讀被獨佔的裝置節點。
+
+### 3.4 VNC 截圖裡有一顆不是你畫的游標
+
+LibVNCServer 會替**不支援游標偽編碼**的客戶端把游標混進送出去的畫面。所以一般的截圖裡
+同時有 crosvm 合成的那顆和它自己畫的那顆,疊在一起——想用截圖判斷「我們的游標畫對了沒」
+會直接被它蓋掉。
+
+反過來這也是免費的**參考實作**:它畫在 `cursorX - xhot`,和我們的路徑不共用 bug。
+抓一張有宣告偽編碼的(只有我們的)、一張沒宣告的(我們的 + 它的),相減得 0 就是對齊。
+再抓一張指標移開的當正控制,證明我們那顆真的在畫面上。
+
+### 3.5 `pkill -f` 會匹配到自己
 
 這一輪踩了**三次**:殺 sampler 時把整條 `su -c` 一起殺掉、殺測試腳本時殺到自己的 shell、
 `until ! pgrep -f '2_build_crosvm.sh'` 的等待迴圈因為命令列裡有那個字串而**永遠不結束**
@@ -91,13 +116,13 @@ ssh root@172.22.68.12 'apt-get install -y --allow-downgrades ./<deb>'
 
 用 pid 殺,或用 `[t]ail` 這種讓模式不匹配自己的寫法。
 
-### 3.4 環境變數架空編譯預設
+### 3.6 環境變數架空編譯預設
 
 `devvm.sh` 一度無條件導出 `GFXSTREAM_ASG_SPIN_LEVELS` 的 fallback,於是 committed 的預設
 根本不是實際在跑的值,而事後**無法從紀錄判斷當時跑的是哪個**——一段 40 分鐘的中斷風暴
 因此無法歸因。已改成「呼叫端有給才導出」。任何「用環境變數覆蓋預設」的除錯設施都有這個風險。
 
-### 3.5 效能數字
+### 3.7 效能數字
 
 - **`vkmark -b :duration=2` 在冷 shader cache 上低估四倍**(615 vs duration=6 的 1920),
   而且連跑六次會「穩定」在錯的值上。跨映像比較一律 `duration>=6`。
@@ -105,7 +130,7 @@ ssh root@172.22.68.12 'apt-get install -y --allow-downgrades ./<deb>'
   第八輪 4723。**單次結果沒有意義**,要嘛交錯 A/B,要嘛鎖頻。
 - 全新 overlay 的 `~/.cache/mesa_shader_cache` 是空的,前幾輪一定要丟掉。
 
-### 3.6 判定「桌面好了沒」
+### 3.8 判定「桌面好了沒」
 
 - **只看行程存在不夠**。要等 `kwin` 和 `plasmashell` 兩個都在 D-Bus 上**註冊好名字**
   (`busctl --user --acquired list`)。
@@ -118,7 +143,7 @@ ssh root@172.22.68.12 'apt-get install -y --allow-downgrades ./<deb>'
 - **閒置熄屏會讓好的桌面看起來全黑**。X11 下 `xset -q` 會說 `Monitor is Off`,
   而**VNC 的滑鼠移動不會重設 DPMS 計時器**。測之前先 `xset s off -dpms`。
 
-### 3.7 環境本身會壞掉
+### 3.9 環境本身會壞掉
 
 - **反覆重啟 session 會弄壞 overlay**(兩次 VM 失聯之後 plasmashell 就再也起不來),
   之後量到的一切都是關於那顆碟而不是關於程式碼。所以 `gfxrun.sh` 每次都從
