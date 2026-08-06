@@ -545,24 +545,53 @@ entry 在 free 到達時都還活著,所以一個「有走到 `__free_one_page`�
 > 這是一個獨立於本 survey、可以馬上檢查的東西:把面板的輪詢間隔拉長,或讓它讀一個
 > 不會 purge 的唯讀入口。
 
-### 5.4 損失發生得很快,不是晚到(`poolwindow.sh`)
+### 5.4 精確時序:free 發生在 crosvm 退出那一刻(`poolwindow.sh` / `poolwhen2.sh`)
 
-在手機上以 ~0.25 秒取樣 `tracked`,從關機前開始:
+以 0.25 秒在手機上取樣,同時記 `tracked`、crosvm 是否還活著、`MemFree`:
 
 ```
-t=0      tracked=2850
-t≈3s     tracked=2
-（之後 40 秒完全沒有變化,一直停在 2）
+ t(s)   tracked       crosvm   MemFree
+ 0.00   tracked=2850  alive    419480 kB
+ 3.00   tracked=2     gone     497656 kB      （之後 15 秒不再變動）
 ```
 
-**2848 頁在約 3 秒內回來,剩下 2 頁永遠不回來。** 所以損失不是「晚到、錯過 drain」,
-而是**在 free path 當下就發生了**。這是第三份指向路由的獨立證據
-(另外兩份:§5.2 兜底救不回來、§5.3 `del_hit` 固定短少 2)。
+**crosvm 在 `crosvm stop` 之後還活著約 3 秒,而 `tracked` 正好在它消失的那一刻掉下來。**
+所以頁面是在**行程退出、mm 被拆掉**的瞬間才 free 的,不是早就 free 然後在 pcp 裡躺了三秒。
 
-**推論:crosvm 側在關機窗口裡加同步握手,對這個漏損買不到東西**(見 §2.6)。
+機制因此很清楚:2850 個 order-9 free 同時湧向 `free_unref_page`,**pcp 的 THP list 一下就滿**,
+超出的部分經 `free_pcppages_bulk` 溢流到 `__free_one_page`,2848 頁幾乎立刻被 hook 接住;
+**剩下 2 頁停在 pcp 門檻以下,永遠沒被沖出來**——正是模組註解寫的
+*can park a few of them in pcp lists indefinitely on an idle system*。
 
-但書:該腳本的 `alive` 欄位被 `pgrep -f` 自我匹配污染(抓到取樣腳本自己),所以那一欄無效;
-結論只依賴 `tracked`,不受影響。
+**這解釋了為什麼每輪恰好是 2**(`del_hit` 六輪全部 `+2848`):那不是機率性的偷竊,
+是 pcp list 的殘留水位,**結構性的**。
+
+兩個推論:
+
+- **把 `PCP_DRAIN_DELAY_MS` 調小沒有用,甚至更糟**。free 發生在 t≈3s,而 drain 是從
+  VM destroy 起算的;調小只會讓 drain 更早於 free。要用兜底修就得是**會重試的 reaper**
+  (POOL_RECLAIM_PLAN §5),而那仍然是 best-effort。
+- **isolate 的理由更強**:那 2 頁不是「來不及撿」,是**從一開始就不該進 pcp**。
+  isolate 讓它們跟其他 2848 頁走同一條路、在同一瞬間進 hook,不需要 drain 也不需要 reaper。
+
+> **更正**:本文件早先一版寫「free 在 250ms 內完成」,那是把 awk 只印變動行的取樣序號
+> 讀錯了(第 13 個樣本是 t=3.0s)。同樣的誤讀也讓「crosvm 退出後才 free」的推測站不住——
+> 實際上 free 與退出是同一刻。`poolwindow.sh` 的 `alive` 欄位另外被 `pgrep -f` 自我匹配
+> 污染,`poolwhen2.sh` 用 `[c]rosvm` 修好了。
+
+### 5.5 提早 scavenge 沒有幫助(三輪,`poolearly.sh`)
+
+在 `RECONCILE_GRACE_MS` **之內**每 0.25 秒觸發一次 scavenger(grace 內不 purge,安全),
+等於把掃描從 +3s 提前到 +0.25s:
+
+```
+cycle 1: lost=2  del_hit=+2848   tracked: 2850@0.0s → 2@3.5s
+cycle 2: lost=0  del_hit=+2848   tracked: 2850@0.0s → 2@3.2s
+cycle 3: lost=0  del_hit=+2848   tracked: 2850@0.0s → 2@3.5s
+```
+
+提早掃描**完全沒有改變時序**——因為那時候頁面根本還沒被 free(見 §5.4)。
+`del_hit` 依然固定 `+2848`。淨損失 0~2 的差別來自事後 scavenger 撿不撿得回那 2 頁。
 
 ---
 
