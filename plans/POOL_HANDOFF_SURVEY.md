@@ -3,6 +3,10 @@
 Survey,2026-08-06。問題:退出路徑上補「主動歸還」有沒有用、udmabuf 是不是多一條歸還路徑、
 專用的 `/dev/gh_udmabuf` 能不能保證 100%、以及**這些攔截各自的綜合性能代價**。
 
+> **先讀 §4.5。** 本文件 §2.4 / §3 推薦的 `MIGRATE_ISOLATE` 方案,建立在「頁面被 free 了
+> 但走進 pcp」的假設上;更精確的量測顯示**那 2 頁從沒被 free 過**,該推薦已作廢。
+> 推理鏈保留供參考,動手前請以 §4.5 為準。
+
 ## 結論先講
 
 1. **損失的成因**:頁面**以 order-9 被 free 了、沒有被拆散**,但它停在 per-CPU 的 THP free
@@ -542,6 +546,46 @@ guest memory 之後**——而那已經在 `run_control` 之外,回到 POOL_RECL
 **而且窗口本身有代價**:gunyah 一 unpin,folio 就變回普通的 movable shmem THP,
 split 與遷移都恢復可能。把窗口拉長是**增加**暴露而不是減少——若之後真要在這裡加等待,
 必須是等模組的掃描結果,不能是單純 sleep。
+
+---
+
+## 4.5 **重大更正(2026-08-06 稍晚):那 2 頁從沒被 free 過**
+
+下面 §3 的排序、以及 §2.4 選項 A 的推薦,**建立在「頁面被 free 了但走進 pcp」這個假設上。
+更精確的量測推翻了它。** 保留原文是因為推理鏈本身有用,但**不要照著它動手**。
+
+### 新證據
+
+| # | 觀察 | 方法 |
+|---|---|---|
+| 1 | 每輪服務 2850,hook 精確回收 **2848**,永遠少 2 | 六輪以上,`del_hit` 固定 `+2848` |
+| 2 | 那 2 頁在 crosvm 消失後 **`page_count != 0`** | scavenger 專撿 `page_count==0` 的 served 頁;以 4Hz 觸發 27 次橫跨 6.75s,一次都沒撿到,`orphan_freed` 全程 0 |
+| 3 | **沒有人事後把它們 free 掉** | **唯讀**輪詢五分鐘(完全不寫 `reconcile`,entry 因此不會被 purge),`tracked=2` 紋風不動 |
+| 4 | 是**實體損失**不只是記帳 | `served − refilled` 每輪 +2,池子必須向系統重新 acquire 補回 |
+| 5 | **不是 share 模組** | `gunyah_host_share_gki_6.6` 的 `outstanding` = `total=0 dying=0 parked=0` |
+| 6 | **不是 crosvm** | 取樣顯示行程在 `tracked` 掉到 2 的同一刻就消失了 |
+
+### 這對前面的結論代表什麼
+
+- **選項 A(`MIGRATE_ISOLATE`)不再被支持。** 它改變的是「free 往哪走」,而證據指向
+  **根本沒有 free 發生**。§2.4 與 §3 的推薦作廢。
+- 選項 B(前移 hook)同理無效——沒有 free 就沒有東西可攔。
+- 選項 C(頁面不進 buddy)**仍然有意義**,但理由回到它原本的那個:拆掉配置側的 kretprobe。
+  它是否也修掉這個洩漏,取決於下面兩個候選是哪一個。
+
+### 兩個候選,現有 sysfs 分辨不了
+
+- **(A) 核心側參照洩漏**:某個物件從沒放掉 ref,頁面永遠不會被 free。
+  crosvm 與 share 模組都已排除,剩下 stock gunyah 驅動的 lend 路徑(GUP pin 沒 unpin 到)
+  或 udmabuf。
+- **(B) free 了但立刻被長壽的新主人配走**:free 繞過 hook(pcp),新主人一直不放。
+  **只有這種情況 isolate 才有用。**
+
+### 下一步(唯一該做的)
+
+加一個 debugfs,把每個**殘留的 served entry** 印出 `pfn / page_count / PageCompound /
+compound_order`,再對照 `/proc/kpageflags`(必要時開 `page_owner=on` 拿配置堆疊)。
+這原本是 §4.2 的「可選」項,現在是**先決條件**——在拿到 pfn 之前,任何修法都是在猜。
 
 ---
 
