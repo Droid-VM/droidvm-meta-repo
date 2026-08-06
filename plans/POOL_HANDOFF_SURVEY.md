@@ -3,8 +3,8 @@
 Survey,2026-08-06。問題:退出路徑上補「主動歸還」有沒有用、udmabuf 是不是多一條歸還路徑、
 專用的 `/dev/gh_udmabuf` 能不能保證 100%、以及**這些攔截各自的綜合性能代價**。
 
-> **直接讀 §4.9——那是定案。** 這份文件對機制與修法來回過五次,每一次都被下一個量測推翻。
-> 前面的段落按順序保留,標明各自被什麼推翻;**§4.9 之前的所有結論都不要照著動手。**
+> **直接讀 §4.9(真兇)與 §4.10(修法與驗證)。** 這份文件對機制來回過五次,每一次都被下一個
+> 量測推翻;前面的段落按順序保留並標明各自被什麼推翻,**§4.9 之前的結論都不要照著動手。**
 
 ## 結論先講
 
@@ -816,6 +816,57 @@ total=2850 sites=4
    **這是一個普通的 dma_buf 洩漏獵捕,不再是記憶體管理的謎題。**
 2. 修掉之後用 `ghhr_sites` 複驗那個 `v_gpu` 條目消失、用 `poolcycle.sh` 複驗缺口歸零。
 3. (可選)讓 kretprobe 不要服務 dma-buf heap 的配置——那是縱深防禦,不是修法。
+
+## 4.10 修法與驗證
+
+### 改了什麼
+
+`gh-hugepage-reserve` `0cec8a1`:kretprobe 的 entry handler 多一道檢查——
+**只服務 `__folio_alloc` 的呼叫者**。
+
+```c
+/* arm64 上函式進入時呼叫者還在 LR 裡 */
+static bool serve_this_caller(struct pt_regs *regs)
+{
+        if (!folio_alloc_addr)          /* 解不到就跳過檢查,行為與改動前一致 */
+                return true;
+        return regs->regs[30] - folio_alloc_addr < FOLIO_ALLOC_WINDOW;
+}
+```
+
+客體 RAM 與兩個預配置池走的都是 `__folio_alloc`(實測全部回到 `+0x18`,而該函式長 `0x38`,
+所以窗口取 `0x40`);dma-heap 那條被擋掉後退回 buddy 配置,而那個 heap 本來就是
+`alloc_largest_available`,拿不到最大尺寸它自己會處理。
+符號解不到時 fail-open 並印一行警告,不會變成「什麼都不服務」。
+
+### 熱換(不必重開機)
+
+`rmmod` 之後用手機上的 `load.sh`(它自稱是 insmod 參數的唯一真實來源)重載:
+
+```
+pool_avail=3050  pool_total=3050  served=0  tracked=0     ← 池子完整回來
+gh_hugepage_reserve: serving only __folio_alloc callers (0xffffffdf0435eec0)
+```
+
+**擔心的「rmmod 之後 acquire 不回來」沒有發生**——釋放出去的正是剛剛要拿回來的那些頁,
+中間窗口很短。舊 .ko 備份在 `/data/local/tmp/gh_hugepage_reserve.ko.bak`,
+新的也已寫進 `/data/adb/modules/gh-hugepage-reserve/`,所以下次開機仍然生效。
+
+### 驗證
+
+| | 修之前 | 修之後 |
+|---|---|---|
+| 每輪服務(`held`) | 2850 | **2848** |
+| `del_hit` | +2848(**永遠短少 2**) | +2848(**沒有缺口**) |
+| 每輪永久損失 | 1.33 頁 | **0** |
+
+```
+cycle 1: lost=0  del_hit=+2848
+cycle 2: lost=0  del_hit=+2848
+cycle 3: lost=0  del_hit=+2848
+```
+
+(`del_miss` 的 14/75/22 是系統其他 order-9 free 的雜訊,與此無關。)
 
 ---
 
