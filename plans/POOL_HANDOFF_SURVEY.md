@@ -375,16 +375,48 @@ gunyah **pin 的是 page,不是 dma_buf**,所以 fd 關掉、release 跑起來�
 必須先確認 refcount / `folio_maybe_dma_pinned()`。歸還因此是**確定會發生,但不是立刻**
 ——它等的是「pin 放掉」而不是「猜頁面回 buddy 了沒」。這是好交易,別宣稱成瞬時。
 
-#### (c2) 映射粒度是新成本
+#### (c2) 映射粒度:先分清楚「2MB」是哪一層的 2MB
 
-`vm_insert_page` **一次插一個 4K struct page**。6GB 客體 RAM ≈ 150 萬個 PTE
-(~12MB page table)+ host TLB 壓力,而今天 memfd + THP(模組的前置條件就是
-`echo advise > .../shmem_enabled`)是 **PMD 映射**的。這是實打實的退步。
+**只有一層會被影響,而客體那層完全不受影響。**
 
-`vmf_insert_pfn_pmd` 的 `BUG_ON` 只擋「`VM_PFNMAP` 與 `VM_MIXEDMAP` 兩個都設」,
-**接受純 `VM_MIXEDMAP`**,所以 PMD 級插入理論上可行。但 GUP 對這樣建出來的 PMD
-怎麼走(`follow_trans_huge_pmd` 對非 devmap 的 huge pfn map)**沒有驗過**,
-要一起列進 §4.1 的擋門實驗。
+| 哪一層的 2MB | 誰在用 | 用 chardev 後 |
+|---|---|---|
+| **實體連續** | memparcel entry 512:1 合併,撐住 RM 的 per-parcel 上限 | **不變** |
+| **客體 stage-2 映射** | gunyah 用 2MB block descriptor | **不變** |
+| **host userspace PTE 粒度** | crosvm 自己讀寫客體記憶體時的 TLB | **只有這層變** |
+
+前兩層不變的證據在我們自己的 share 模組(`gunyah_share_mod.c:452-458`):entry 是靠
+**GUP 拿到的 `pages[]` 陣列的實體連續性**合併出來的
+(`page_to_phys(pages[i]) == page_to_phys(pages[i-1]) + PAGE_SIZE`)——**與 host PTE 粒度無關**。
+註解自己就寫著 *THP/mthp-backed buffers (2MB folios) collapse 512:1, which is what keeps
+large blobs under the RM's per-parcel resource limits*。
+
+第三層的代價:6GB ≈ 150 萬個 PTE(~12MB page table),加上 crosvm 實際碰到的那些頁走
+4K TLB 而不是 2MB TLB。**是真的成本,但只落在 host 側,且只在 crosvm 觸及的工作集上。**
+
+**而且這層在 6.18 上已經沒有問題了:**
+
+```c
+vm_fault_t vmf_insert_folio_pmd(struct vm_fault *vmf, struct folio *folio, bool write)
+{
+        if (WARN_ON_ONCE(folio_order(folio) != PMD_ORDER))
+                return VM_FAULT_SIGBUS;
+        return insert_pmd(vma, addr, vmf->pmd, fop, vma->vm_page_prot, write);
+}
+EXPORT_SYMBOL_GPL(vmf_insert_folio_pmd);
+```
+
+吃的是 **refcounted folio**、唯一條件是 `folio_order == PMD_ORDER`(池子的頁正好是 order-9),
+而且**已 export**,模組直接呼叫、連 kallsyms 都不用。
+
+| | PMD 級 + refcount 正確的介面 | 結果 |
+|---|---|---|
+| **6.18+** | `vmf_insert_folio_pmd`(已 export) | **PMD 映射與 refcount 契約兼得,沒有技術債** |
+| 6.1 / 6.6 / 6.12 | 無 | 要嘛 `vm_insert_page`(4K,refcount 正確),要嘛 `vmf_insert_pfn_pmd`(PMD,但 pfn map、PTE 不持 ref,回收觸發要改用 `vm_ops->close`) |
+
+**所以我們今天出貨的 6.6 反而是比較麻煩的那個版本,不是未來的 6.18。**
+6.6 上「PMD 與正確 refcount 二選一」這件事要列進 §4.1 的擋門實驗
+(`vmf_insert_pfn_pmd` 建出來的 PMD,GUP 走不走得通)。
 
 #### (d) crosvm 側的代價
 
