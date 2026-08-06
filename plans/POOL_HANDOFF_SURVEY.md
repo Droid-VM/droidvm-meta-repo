@@ -477,10 +477,15 @@ POOL_RECLAIM_PLAN §4.4 已經寫了這個方法。沒有這個數字之前,「�
 `mem::drop(linux)` 做的 munmap + close(memfd) 讓 folio 走的還是**同一條 free path**,
 一樣 `free_unref_page` → pcp。「VM 已關機」不改變任何路由。
 
-**(b) 沒有東西可以等。** 實測(§5.4):2848/2850 在關機後 **約 3 秒內**就全部回來,
-剩下的 2 頁**永遠不回來**——`tracked` 停在 2,再等 40 秒完全沒有變化。
-那 2 頁在 crosvm 還沒退完就已經丟了,所以在窗口裡加一個「阻塞等模組回報歸零」的握手
-**買不到東西**。
+**(b) 那個窗口在 free 之前就結束了。** 實測(§5.4):**頁面是在 crosvm 行程退出、
+mm 被拆掉的那一刻才 free 的**——`tracked` 正好在 crosvm 消失的同一個取樣點從 2850 掉到 2。
+`mem::drop(linux)` 之後、行程還活著的那段,**guest RAM 根本還沒被釋放**
+(devices/metrics 那些 drop 與 join 還沒跑完,memfd 的 inode 還在)。
+
+所以在那個窗口裡阻塞等待「模組回報歸零」是**等一件還沒發生的事**;真正的 free 要等到
+`run_control` 返回、main 收尾、行程退出。要讓握手有意義,得把等待放到**行程真的放掉
+guest memory 之後**——而那已經在 `run_control` 之外,回到 POOL_RECLAIM_PLAN §1.4/§1.5
+判死的那個順序問題裡。
 
 **而且窗口本身有代價**:gunyah 一 unpin,folio 就變回普通的 movable shmem THP,
 split 與遷移都恢復可能。把窗口拉長是**增加**暴露而不是減少——若之後真要在這裡加等待,
