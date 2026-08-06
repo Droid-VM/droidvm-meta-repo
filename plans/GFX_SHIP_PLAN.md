@@ -1,9 +1,10 @@
 # gfx 路線出貨前還差什麼
 
-狀態:**驗收條件已全部滿足**。2026-08-06。
+狀態:**功能與可靠度的驗收條件已滿足;池子回收率 99.95%,是唯一未達 100% 的項目**。2026-08-06。
 
-這份文件在 2026-08-04 寫成時列了四個 P0,現在四個都關掉了——其中一個是**用量測關掉的,
-不是做出來的**。保留那些條目的來龍去脈,因為「為什麼不做」和「怎麼做」一樣需要交代。
+這份文件在 2026-08-04 寫成時列了四個 P0。三個關掉了;第四個(池子回收)**量出來仍然存在**,
+但原本計畫的解法被證據推翻,改由 `POOL_HANDOFF_SURVEY.md` 接手。
+保留那些條目的來龍去脈,因為「為什麼不做」和「怎麼做」一樣需要交代。
 
 ---
 
@@ -19,7 +20,7 @@ guest-additions `fc5d9d0`),在**乾淨父碟的新 overlay 上只裝兩顆 deb**
 | X11 可用 | `xdpyinfo` rc=0(cookie 取自 kwin argv);KDE on X11 全通,零 llvmpipe |
 | 3D 加速 | vkmark **7012–13977**(七輪,crosvm 全程存活,零守衛開火) |
 | Minecraft 26.2 | 進世界持續算繪 5 分鐘以上;`zink Vulkan 1.3(Virtio-GPU GFXStream (Adreno (TM) 830 ()) (MESA_TURNIP))` |
-| 池子記憶體 | 三次完整生命週期各借出 2850 頁(5.7GB),**一頁都沒漏** |
+| 池子記憶體 | 六次生命週期各借出 2850 頁,回收率 **99.95%**(每輪丟 1.33 頁,見 1.4) |
 | 手機負載 | MC 全速時 `user=149 sys=319 irq=16 timer=1878` = 真工作;21.3 小時取樣零空轉簽名 |
 
 vkmark 的跨度很大是 GPU DVFS,不是不穩定——見 [`vkmark-duration-artifact`] 記憶,
@@ -58,9 +59,10 @@ x-never-started / unreachable),`gfxrun.sh N` 跑 N 輪並統計。關鍵設計:
 (它在 vkmark 結束時觸發過一次)**沒有重現**,crosvm 全程存活、零 `GUARD-FIRED`。
 順序本身仍然是鬆的,但沒有證據說它還會咬人。追蹤在 [`gfxstream-destroyinstance-segv`]。
 
-### 1.4 關機會漏池子記憶體 — **前提已不成立,決定不做**
+### 1.4 關機會漏池子記憶體 — **仍在,但 donate 不是解法**
 
-原本的計畫是用 donate ioctl 取代模組的全系統 free hook。**2026-08-06 複驗發現沒有東西可修**:
+原本的計畫是用 donate ioctl 取代模組的全系統 free hook。先複驗基準,結果分兩段——
+先是三輪量到 0:
 
 ```
 baseline (no VM): deficit=2  orphan_inuse=2
@@ -70,10 +72,18 @@ final: deficit=2 avail=3070/3072
 
 `deficit = total_served - total_refilled`,在全機無 VM 時讀。那個 2 是開始前就存在的
 `orphan_inuse`(區塊已被別人占住,撿不回來),三輪都沒增加。
-最可能是 `gh-hugepage-reserve` 自己的 `abb6157`(close limbo publish and module-exit
-teardown races)修掉的。
 
-**所以 donate 不該做**:那會拿一個目前 100% 有效的機制,去換一個涵蓋不到 SIGKILL 的機制。
+**但不要把這讀成「漏損已修好」。** 我一度歸因給模組的 `abb6157`——**那是錯的**,
+它是 2026-07-16,在 07-30 那份基準**之前**,而模組從那天起就沒再改過。所以漏損機制
+(order-9 free 停在 THP pcp list,而 hook 掛在 pcp 下游的 `__free_one_page`)原封不動還在,
+模組的補救仍然是 destroy 後 `PCP_DRAIN_DELAY_MS` 的 `drain_all_pages` +
+`served_reacquire_free_orphans()`。今天量到 0 只代表**這個配置、這幾輪,drain 每次都趕上了**。
+
+**六輪複驗(同日稍後)推翻了那三輪**:`0, 2, 2, 2, 2, 0`,合計 8 頁,**1.33 頁/輪、
+回收率 99.95%**,與 07-30 基準一致,而且 `drain recovered=0`。三輪不足以下結論。
+
+donate ioctl 仍然不該做(理由見 `POOL_RECLAIM_PLAN.md` §1 的五條)。
+完整的取捨、成本帳與唯一值得投入的方向見 **`POOL_HANDOFF_SURVEY.md`**。
 
 範圍聲明:只量**優雅關機**路徑(`crosvm stop`)。SIGKILL 沒測也不會測——它漏的是 memparcel,
 要手機重開才回來,那是另一個問題(見 [`gunyah-kill9-leaks-memparcels`])。
@@ -154,7 +164,7 @@ mesa-guest-drm2kgsl_26.3.0-devel+droidvm.r226620.g61624f40
 | 1 | 連續 N 次 session 重啟都拿到桌面 | 20/20(08-05)、6/6(08-06) |
 | 2 | vkmark 跑完不崩 | 七輪全過,crosvm 存活,零守衛開火 |
 | 3 | Minecraft 進世界並持續算繪 | 9 分鐘(08-05)、5 分鐘(08-06),退出後桌面完好 |
-| 4 | 開關機後池子記憶體回到起始值 | 三輪各 2850 頁,lost 0 |
+| 4 | 開關機後池子記憶體回到起始值 | **未滿足**:99.95%,每輪丟 1.33 頁(4483 頁的池子,約 750 輪掉 1%)。取捨見 `POOL_HANDOFF_SURVEY.md` |
 | 5 | 沒有已知會打死 VM 或手機的路徑 | 21.3 小時取樣零空轉簽名;唯一已知禁忌是 `kill -9 crosvm` |
 
 第 5 條的但書:**絕不 `kill -9` crosvm**——洩漏的 memparcel 到手機重開才會回來,
