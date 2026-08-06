@@ -3,8 +3,9 @@
 Survey,2026-08-06。問題:退出路徑上補「主動歸還」有沒有用、udmabuf 是不是多一條歸還路徑、
 專用的 `/dev/gh_udmabuf` 能不能保證 100%、以及**這些攔截各自的綜合性能代價**。
 
-> **先讀 §4.5 與 §4.6。** §4.5 曾作廢 `MIGRATE_ISOLATE` 的推薦;**§4.6 又把它翻回來**,
-> 並補上能解釋全部觀察的機制。動手前以 §4.6 為準。
+> **直接讀 §4.7。** 這份文件對 `MIGRATE_ISOLATE` 來回過三次(§2.4 推薦 → §4.5 作廢 →
+> §4.6 恢復 → **§4.7 最終否決**)。前面的段落保留是為了記錄每一步被什麼證據推翻,
+> **動手前只以 §4.7 為準。**
 
 ## 結論先講
 
@@ -654,6 +655,55 @@ compound_order`,再對照 `/proc/kpageflags`(必要時開 `page_owner=on` 拿配
 兩者不衝突:crosvm 側消滅這個特定來源,模組側則對「任何在 `exit_mm` 階段被釋放的池子頁」
 都成立——包括未來新增的、我們還不知道的配置。
 **先做 crosvm 側驗證缺口歸零,再決定要不要投入模組側。**
+
+## 4.7 **最終機制:THP 被拆成 order-0 釋放,hook 根本看不見**
+
+§4.6 說那幾頁「落進空的 pcp list 停在門檻以下」。**讀完 pcp 的程式碼之後,那是錯的。**
+
+### 為什麼不是 pcp 殘留
+
+```c
+/* free_pcppages_bulk */
+page = list_last_entry(list, struct page, pcp_list);   /* 尾端 = 最早進來的先走(FIFO) */
+__free_one_page(page, pfn, zone, order, mt, FPI_NONE); /* ← hook 在這裡 */
+```
+
+- pcp 是 **FIFO** 沖刷,最早 free 的**最先**出去,不是留在底部。
+- `drain_all_pages()` 會把整個 list 清空。模組在 destroy+3s 有一次 drain,
+  我又用 reconcile 讓 `alloc_contig_range`(內部也 drain pcp)跑了幾十次。
+  **只要它們在 pcp 裡,任何一次 drain 都會把它們沖進 hook。** 沒有。
+
+### 真正的機制(模組註解早就寫了)
+
+> any served entry whose page reads free AFTER the drain is a hook-missed free
+> (**e.g. a split THP freed as order-0s**)
+
+**那幾個顯示緩衝的 THP 在拆解時被拆成 512 個 order-0 頁釋放,不是一次 order-9。**
+而 hook 的第一行就是 `if (order != PAGE_ORDER || !page) return;` ——**它從頭到尾沒看見。**
+
+三個獨立證據:
+
+| # | 觀察 | 推論 |
+|---|---|---|
+| 1 | `o9_seen` 每輪只有 **2848 + 雜訊**,不是 2850 | hook 連「看見一個 order-9 free」都沒有,不只是沒配對上 |
+| 2 | 任何 drain 都救不回來 | 排除 pcp 殘留 |
+| 3 | scavenger **有時候**救得回來(淨損失 0 的輪次) | 它的條件是 `page_count==0` 且 `alloc_contig_range` 能收回整個 2MB 窗口——**正是「拆成 512 個 order-0、碰巧都還 free」的簽名**;輸的時候是窗口已被別人破壞 |
+
+### 對修法的影響
+
+- **`MIGRATE_ISOLATE` 最終否決。** 它改變的是 order-9 free 的路由,而這裡**沒有 order-9 free**;
+  isolate 之後那 512 個 order-0 一樣走 `__free_one_page(order=0)`,hook 一樣第一行就 return。
+  §2.4 選項 A、§4.6 的恢復,**全部作廢**。
+- **選項 B(前移 hook)同樣無效**,理由相同。
+- **crosvm 側的 `MADV_NOHUGEPAGE` 不受影響,而且現在是唯一乾淨的解**:
+  顯示緩衝不再是 THP → 不會被 kretprobe 服務 → 沒有東西可漏,順帶不再浪費池子的頁。
+
+### 還沒回答的(不影響修法)
+
+**為什麼那些 THP 會被拆?** 候選:配置器歸還記憶體時的 partial `MADV_DONTNEED`、
+VMA 被切開、deferred-split shrinker。修法不需要知道答案,但如果要根治
+「任何被拆的池子頁都收不回」這個通則,就需要——那要靠 §4.2 的 pfn debugfs
+加上 `page_owner` 拿配置堆疊。
 
 ---
 
