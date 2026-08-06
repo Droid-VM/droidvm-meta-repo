@@ -329,10 +329,30 @@ if (vm_flags & (VM_IO | VM_PFNMAP))
 
 **所以照 dma_buf 慣例做的 `/dev/gh_udmabuf`,客體 RAM 一頁都 lend 不出去。**
 
-出路:自有 chardev,`mmap` 用 **`vm_insert_page`**(refcounted struct page、`VM_MIXEDMAP`、
-**不設** `VM_PFNMAP`)。這偏離 dma_buf 慣例,但我們自己的裝置可以這樣做。
-(慣例的理由也很清楚:dma_buf 要 exporter 能控制 buffer 的搬移與釋放,
-允許 long-term GUP pin 會拿掉那個控制權——而我們**正好想要**那個 pin。)
+**出路:不設 `VM_PFNMAP`——這是正當的,而且核心裡有正規先例。**
+
+- `dma_buf_mmap()` **完全沒有碰 `vm_flags`**,只驗 offset 就交給 `dmabuf->ops->mmap`。
+  所以 PFNMAP 是 in-tree exporter 的**慣例,不是框架要求**。
+- `remap_vmalloc_range_partial`(`mm/vmalloc.c:3920`)就是把**核心自有頁面**映射給
+  userspace 的標準做法:`vm_insert_page` + `VM_DONTEXPAND | VM_DONTDUMP`,**沒有 PFNMAP**。
+- 慣例的理由對我們是**反的**:exporter 設 PFNMAP 是為了保留「隨時能搬走/釋放 buffer」的權利,
+  不讓別人拿到它不知道的參照——而我們**正是要 gunyah 的 LONGTERM pin 拿得到**。
+
+**安全性不是靠旗標,是靠構造。** `insert_page_into_pte_locked` 做的是
+`folio_get()` + `inc_mm_counter(mm_counter_file)` + `folio_add_file_rmap_pte()`,
+頁面因此是有 refcount、有 rmap、算進 RSS 的正常頁。但模組用 `alloc_pages` 配出來的頁
+**從來不在任何 LRU 上**,而 vmscan 只走 LRU(`lru_to_folio`),遷移也只處理 LRU folio 或
+`__PageMovable`——兩者都不是,compaction 遇到它們是「隔離失敗、跳過」而不是搬走。
+
+要跟著處理的四件事:
+
+1. **refcount 變成契約**:每個 PTE 持有一個 ref,模組必須等**所有**參照消失
+   (PTE、gunyah 的 pin)才能把頁放回池子。見 (c)。
+2. **要設 `VM_DONTCOPY`**:否則 crosvm 若為 sandbox 而 fork,會複製出額外的 ref 拖住回收。
+3. **RSS 記帳**:映射算進 crosvm 的 file RSS。今天 memfd 也是,多半無變化,
+   但 Android 側若有 OOM score / 記憶體上限邏輯要確認。
+4. **絕不能兩個旗標都設**:`vm_insert_page` 對 `VM_PFNMAP` 會 `BUG_ON`,
+   `vmf_insert_pfn_pmd` 對「兩者並存」會 `BUG_ON`。
 
 #### (b) 這看起來像被否決過的「借出時持有 refcount」,但不是同一件事
 
