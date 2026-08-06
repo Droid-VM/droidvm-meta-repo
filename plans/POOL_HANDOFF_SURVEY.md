@@ -3,9 +3,8 @@
 Survey,2026-08-06。問題:退出路徑上補「主動歸還」有沒有用、udmabuf 是不是多一條歸還路徑、
 專用的 `/dev/gh_udmabuf` 能不能保證 100%、以及**這些攔截各自的綜合性能代價**。
 
-> **直接讀 §4.8。** 這份文件對修法來回過四次。**現況:機制成立、但「哪個配置在漏」沒有證據**,
-> 所以**目前沒有可執行的修法建議**。前面段落保留是為了記錄每一步被什麼推翻;
-> 唯一該做的下一步在 §4.8。
+> **直接讀 §4.9——那是定案。** 這份文件對機制與修法來回過五次,每一次都被下一個量測推翻。
+> 前面的段落按順序保留,標明各自被什麼推翻;**§4.9 之前的所有結論都不要照著動手。**
 
 ## 結論先講
 
@@ -749,6 +748,74 @@ for region in self.regions.iter() {
 加 debugfs 印出**殘留 served entry 的 pfn**,配 `page_owner=on` 拿配置堆疊
 (§4.2 早就列了,被我推遲四次)。它會直接說出:誰配的、多大、從哪條路徑來。
 **在那之前任何修法都是賭。**
+
+## 4.9 **定案:漏的是高通的 dma-buf system heap,不是任何我猜過的東西**
+
+前面五節都在用間接指標(`page_count`、`orphan_*`、時序、大小相關性)推機制,五次全錯。
+拿到 **pfn 與配置堆疊**之後,答案一次就出來了。工具在
+`deploy/gfxstream/poolprobe/`(兩支獨立的診斷模組,不動池子、不 rmmod 主模組)。
+
+### 那 2 頁到底是什麼(`ghhr_probe`)
+
+```
+pool_count=3043  limbo_n=0
+[0] pfn=0x96c200 tgid=3526 count=1 mapcount=0 order=9 LARGE flags=0x2000000000000040
+     ^ location: not in pool/limbo
+[1] pfn=0xa1c400 tgid=3526 count=1 mapcount=0 order=9 LARGE flags=0x2000000000000040
+     ^ location: not in pool/limbo
+```
+
+`flags` 只有 bit 6 = `PG_head`,其他旗標全空。所以那 2 頁是
+**完整的 order-9 compound、沒被拆、沒被映射、不在任何 LRU、沒有 GUP pin、
+也不在模組自己的 pool 或 limbo 裡,只被單一個參照握著。**
+
+這一口氣推翻了三個先前的說法:**沒被拆**(§4.7 錯)、**不在 pcp**(§4.6 錯)、
+**沒有被別人配走**(§4.5 的候選 B 錯)。§4.5 的候選 A「確實沒被 free」是對的那一半。
+
+### 誰配的(`ghhr_sites`)
+
+在 `__alloc_pages` 上掛 kprobe,對 order-9 的配置按呼叫者做直方圖:
+
+```
+total=2850 sites=4
+    2784  dbgvm            __folio_alloc+0x18/0x38
+      63  crosvm_vcpu0     __folio_alloc+0x18/0x38
+       1  blockingPool0    __folio_alloc+0x18/0x38
+       2  v_gpu            qcom_sys_heap_alloc_largest_available+0xb4/0x258 [qcom_dma_heaps]
+```
+
+**`2784 + 63 + 1 = 2848`,正好等於 hook 每輪回收的數字。**
+剩下 2 頁由 crosvm 的 **`v_gpu`** 執行緒走**高通的 dma-buf system heap** 配置。
+
+### 為什麼這解釋了每一個先前對不上的觀察
+
+| 觀察 | 為什麼 |
+|---|---|
+| 永遠不進 buddy,hook 看不到 | dma-buf heap 的頁不走一般的 free path |
+| `page_count` 永遠不是 0 | heap 還握著它 |
+| 完整 order-9、只有 `PG_head` | 從沒被當成 shmem/anon folio 用過 |
+| 數量固定、與客體記憶體大小無關 | 是 GPU 側的配置,不是客體 RAM |
+| 隨顯示解析度改變 | `v_gpu` 是 virtio-gpu/gfxstream 的執行緒 |
+| 關機階段沒有多餘的 order-9 配置 | 直方圖確認過(只多了模組自己的 `refill_worker`) |
+| **每輪的 pfn 都是新的** | 逐輪累積的真洩漏,不是同幾頁被借走 |
+
+### 這是誰的 bug
+
+**不是池子模組的。** 模組的 kretprobe 只認「order-9 + 來自被追蹤的 VM owner mm」,
+於是把 GPU 走 dma-buf heap 的配置也一起服務了——**而那些頁根本不需要來自池子**
+(不需要實體連續給 gunyah、不進 memparcel),而且它們不走 buddy 的釋放路徑,
+所以池子永遠收不回。
+
+**真正的 bug 在我們自己的 GPU 路徑:每個 VM 生命週期有 2 個 dma-buf 沒有被釋放。**
+池子少 2 頁只是它的副作用。
+
+### 下一步(範圍很小了)
+
+1. 找出 `v_gpu` 執行緒是在哪裡向 `/dev/dma_heap/*` 要 buffer 而沒有釋放
+   (crosvm 的 virtio-gpu / gfxstream host 側,可能經 minigbm 或 gralloc)。
+   **這是一個普通的 dma_buf 洩漏獵捕,不再是記憶體管理的謎題。**
+2. 修掉之後用 `ghhr_sites` 複驗那個 `v_gpu` 條目消失、用 `poolcycle.sh` 複驗缺口歸零。
+3. (可選)讓 kretprobe 不要服務 dma-buf heap 的配置——那是縱深防禦,不是修法。
 
 ---
 
