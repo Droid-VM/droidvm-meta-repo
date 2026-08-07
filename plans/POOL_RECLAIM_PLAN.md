@@ -151,6 +151,35 @@ fallback_sweep=0:  cycle 1  deficit 9->9   del_hit=+2112  released_idle=+2112  a
 保留 `fallback_sweep`(預設開)不是因為需要它,而是因為它現在**可證明是靜止的**:
 留著等於留一個「碎片化是否重新出現」的偵測器,拆掉就沒有了。
 
+### 運行中的 shrink 必須當場歸還(2026-08-07 補)
+
+持有參照的代價是**頁面再也不能靠自己回到 buddy**——refcount 永遠掉不到 0。原本的兩個釋放點
+(VM destroy 之後的 worker、手動寫 `reconcile`)對動態池等於把 shrink 變成「關機才還」。
+實測:128MB shrink 後 `served` 停在 2121、`avail` 停在 942,**21 秒後仍然不動**,
+手動 `reconcile` 一寫就精確掉 64 / 回 64 ——**頁一直都還回來了,缺的只是 sweep**。
+
+修法是從 reclaim 路徑本身觸發,沿用 destroy 偵測既有的 kprobe + delayed work 形狀。
+兩個踩到的點:
+
+1. **符號要用量的,不能用猜的。** 第一版掛 `gunyah_gup_reclaim_parcel`(名字最像),
+   註冊成功、log 也印了「watching for runtime unshare」,但 sweep 從來沒跑。
+   用 tracefs 把候選符號全掛上數命中:**shrink 只穿過 `gunyah_rm_mem_reclaim`(1 次),
+   `gup_reclaim_parcel` 一次都沒有。**
+2. **+300ms 太早。** handler 跑在進入 reclaim 的路上,RM 往返與 unpin 都還在後面。
+   與其挑一個剛好適合這支手機的延遲,worker 改成**加倍退避、五次為限**(300ms→4.8s,約 9.3 秒),
+   而且只由真正的 reclaim 觸發——靜止時完全不跑(輪詢版本正是先前把手機燒滿的作法)。
+
+驗收:`grow +128MB` → served +64(另加 `v_gpu` 的零頭),`shrink −128MB` → **served 當場 −64、
+`avail` +64、`released_idle` +64**;連續四輪皆收在 `deficit=0 / avail=3072/3072`,兜底 0 次。
+
+### 殘留的 9 頁:是 GUP pin 沒放,不是本機制(不累積)
+
+有時關機後會留下個位數的 entry(觀察到 9)。`ghhr_probe` 直接讀出來全部同一個樣態:
+`count=260 mapcount=0 order=9 LRU LARGE **DMA-PINNED**`,而擁有的 tgid 早已不存在。
+**跟持有參照無關**——就算沒有我們那一份,refcount 260 也到不了 0;是 gunyah 側的 pin 延遲釋放。
+**不累積**:接續兩輪起始 9 → 收在 0,四輪 A/B 也是 9 停三輪後回 0。
+它會在後續生命週期內自己回來,所以是延遲而非損失。
+
 ---
 
 ## 2. 被推翻的:借出時持有一個 refcount(**已於 §2b 復活,先讀那節**)
