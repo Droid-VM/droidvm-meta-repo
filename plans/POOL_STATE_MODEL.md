@@ -122,10 +122,24 @@ limbo 處理的條件、acquire sweep 的一個決策)——**沒有一個在熱
 **`pool_total` 不可導出。** `refill_worker` 的停止條件是 `held_pool() >= pool_total`;
 若把它改成導出(= `held_pool()`),條件恆真,**refill 永遠不會執行**。
 
-實際語意(查 `pool_do_resize`、`pool_push_grow`、`pool_take_frozen`、`refill_worker` 才拼得出來):
-它是**帶遲滯的額度**——resize 時設成 `pool_want`,acquire 超收時被 `pool_push_grow` 抬高,
-purge 掉一頁之後**故意不降**,於是 `pool_total - held_pool()` 就是欠債,refill 照著補。
-所以它是與 `pool_want`(目標)、`held_pool()`(實際持有)並列的**第三個量**。
+**真正的語意是風險歸屬**,不是我一開始寫的「帶遲滯的額度」(描述對、理由錯):
+
+| | 目標量 | 誰承擔風險 |
+|---|---|---|
+| 背景補充(`refill_worker`) | `pool_total` | 模組——**不准把系統推到記憶體不足** |
+| 使用者觸發(`acquire`) | `pool_want` | 使用者——按下去就是承擔 |
+| acquire 成功之後 | 抬高 `pool_total` | 已證明安全,背景才准拿這麼多 |
+
+程式碼分離得沒有一處交叉:讀 `pool_total` 的全在 `gh_hooks`/`gh_sysfs`(被動側),
+讀 `pool_want` 的全在 `gh_cma`(acquire)。`pool_push_grow()` 的註解自己寫了
+"Used only by the acquire path (real new allocations **proven to succeed**)"。
+
+free hook 也會抬高 `pool_total`,看似例外其實不是:它歸還的是**我們原本就持有過**的頁,
+不製造新風險,所以把天花板抬回原位是安全的;而它的**准入閘門用 `pool_want` 不是 `pool_total`**,
+註解說明那是為了讓 shrink 可逆。
+
+在這個框架下,「purge 之後 `pool_total` 不降」也不再是怪癖:
+**天花板不會因為掉了一頁就變得比較不安全。**
 
 **誤導我的是 `gh_hooks.c.inc:75` 那句註解**「keeping avail+served == pool_total」——
 它描述的只是 grow 路徑上的一個瞬間關係,不是定義。那句要改掉。
