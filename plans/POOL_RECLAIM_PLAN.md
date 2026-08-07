@@ -186,6 +186,36 @@ fallback_sweep=0:  cycle 1  deficit 9->9   del_hit=+2112  released_idle=+2112  a
 驗收:`grow +128MB` → served +64(另加 `v_gpu` 的零頭),`shrink −128MB` → **served 當場 −64、
 `avail` +64、`released_idle` +64**;連續四輪皆收在 `deficit=0 / avail=3072/3072`,兜底 0 次。
 
+### hook 關閉時不放手(2026-08-07 驗證通過)
+
+釋放參照是一次**交接**:我們放掉最後一份,由 free hook 接住那個 order-9 free、`served_del`、入池。
+`reclaim_enable=0` 會在執行中把 hook 拆掉,而三個觸發點都跟它無關 → 頁會真的流進 buddy、
+entry 留在原地,`served_count` 高報,之後重新啟用還可能把**別人的頁**匹配進池子
+(正是 hook 裡「Never steal unrelated order-9 frees」要防的事)。
+
+修法是 hook 沒掛就不放手。實測兩輪:
+
+```
+hook OFF → shrink 128MB → 等 25s :  served 2121 不動、rel_idle 不動   ← 頁停在我們手上
+hook ON  → reconcile              :  served -64、rel_idle +64          ← 全數復原
+VM stop                           :  deficit=0、avail=3072/3072
+收尾: del_hit=4233 == released_idle=4233、take_fail=0、take FAILED 警告 0 行
+```
+
+**這讓 soft-disable 變成真的可逆**——模組註解原本就這樣宣稱,但在持有參照之前做不到:
+以前 hook 關掉時頁面直接流走,現在它安全地停著等 hook 回來(或等 `rmmod`,那條路徑自己 `served_del`)。
+
+### `gate_drop`:縮 `pool_want` 不再被當成失敗(**未在裝置上觸發過**)
+
+`pool_want` 被調低時,回流的頁被 gate 拒收是**故意的**,卻曾計進 `take_fail` 並每頁印
+`reclaim take FAILED` → 縮池子看起來像池子壞了。現在分成獨立的 `gate_drop`,不發警告。
+
+**誠實聲明:這條分支沒有在裝置上跑到過。** 要觸發得把 `pool_want` 壓到 `served` 以下,
+而本機 `pool_want_with_cma=4483 > pool_want=3072`,那會把約 2GB 的 avail 頁 flip 進 CMA 儲備池
+再拉回來——動到一整個與本變更無關的子系統,池子拉不回來就是 VM 起不來。
+判斷是不成比例:兩個分支裡**頁面的去向完全相同**(都不設 `*bypass`,照樣落回系統),
+最壞情況只是診斷歸類錯,不可能弄丟頁。要驗的話請單獨設計,別夾在回收測試裡。
+
 ### 殘留的 9 頁:是 GUP pin 沒放,不是本機制(不累積)
 
 有時關機後會留下個位數的 entry(觀察到 9)。`ghhr_probe` 直接讀出來全部同一個樣態:
