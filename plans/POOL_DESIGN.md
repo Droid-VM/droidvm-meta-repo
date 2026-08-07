@@ -416,20 +416,23 @@ user_ctx(m) = { pool_want,  m,                 true  };
 
 ```c
 static const step steps[] = {
-  /* 依「成本」排序,不依「種類」。每步先問自己的 goal 還有沒有欠債。 */
-  /* name                  goal      需要      means(多數是步驟自己的屬性) */
+  /* 排序原則:① 先把帳算清 ② 拿回自己的 ③ 才向系統要,最便宜的先。
+   * 每步先問自己的 goal 還有沒有欠債;means 多數是步驟自己的屬性,只有 gather 吃 ctx。 */
+  /* name                  goal      需要      means           */
   { "release idle",         -,        always,   -               },  /* 與 release_worker 共用方法 */
   { "purge expired",        -,        always,   -               },  /* released 逾時 → external */
-  { "sweep released",       POOL,     always,   CONTIG_AT       },  /* 拿回自己的:去 released 原址搶 */
-  { "light intake",         POOL,     always,   ALLOC_LIGHT     },  /* 向系統要:最便宜的一級,失敗即停 */
-  { "shrink pool",          POOL,     always,   -               },  /* §2.2 的去向規則 */
-  { "shrink total",         TOTAL,    cma,      -               },
+  { "shrink pool",          POOL,     always,   -               },  /* 目標調小:§2.2 的去向規則 */
+  { "shrink total",         TOTAL,    cma,      -               },  /* 先縮再採集,否則是白工 */
 
-  { "drop slab",            POOL,     user_run, -               },  /* 只有使用者觸發;不丟 page cache */
-  { "stage-in (total met)", POOL,     cma,      -               },
+  { "sweep released",       POOL,     always,   CONTIG_AT       },  /* 拿回自己的:去 released 原址搶 */
+  { "stage-in (total met)", POOL,     cma,      -               },  /* 拿回自己的:從儲備池 */
   { "stage-in",             POOL,     cma,      -               },
+
+  { "light intake",         POOL,     always,   ALLOC_LIGHT     },  /* 向系統要:最便宜的一級 */
+  { "drop slab",            POOL,     user_run, -               },  /* 只有使用者觸發;不丟 page cache */
   { "gather",               POOL,     always,   ctx.max_means   },  /* ★ 唯一吃 ctx 的一步 */
-  { "pair fill",            QUALITY,  target,   CONTIG_AT       },
+
+  { "pair fill",            QUALITY,  target,   CONTIG_AT       },  /* 品質:湊完整塊 */
   { "reservoir fill",       TOTAL,    cma,      -               },
   { "quality",              QUALITY,  target,   CONTIG_AT       },
 };
