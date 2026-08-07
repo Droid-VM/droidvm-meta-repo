@@ -108,7 +108,30 @@ LibVNCServer 會替**不支援游標偽編碼**的客戶端把游標混進送出
 抓一張有宣告偽編碼的(只有我們的)、一張沒宣告的(我們的 + 它的),相減得 0 就是對齊。
 再抓一張指標移開的當正控制,證明我們那顆真的在畫面上。
 
-### 3.5 `pkill -f` 會匹配到自己
+### 3.5 `rmmod` 池子模組的風險不對稱,而且第一次會騙你
+
+換 `gh_hugepage_reserve` 的新版要 `rmmod` + `insmod`,而 **`rmmod` 會把 6GB 池子還給 buddy**。
+成敗不取決於池子本身,取決於**當下 host 有多少空閒記憶體**:
+
+- 第一次熱換:剛釋放的大頁還躺在 buddy 裡,`insmod` 立刻搶回來,`pool_avail=3050/3050`,毫髮無傷。
+- 第二次熱換:同一台機器、同樣的指令,MemFree 只剩 364MB(7.4GB 在 page cache),
+  那個空檔被 page cache 吃掉,**只搶回 461/3072**。`acquire` 掃到 2383 就停在
+  `cma sources exhausted`,而開一個 VM 需要 2960——**手機從此開不了 VM**。
+
+**正確做法:把 .ko 寫進 `/data/adb/modules/gh-hugepage-reserve/` 然後重開機,不要熱換。**
+真的要熱換就先 `sync; echo 3 > /proc/sys/vm/drop_caches` 把空閒記憶體拉起來再做。
+
+**而重開機有它自己的代價**(`deploy/SETUP.md` 早就寫了):**會清掉 app 建的 `br-wifi`**,
+客體從此連不上,而 `/data/local/tmp/bridge.sh` 只會把 tap 掛上**已存在**的橋、不會建橋。
+恢復方法:`monkey -p cn.classfun.droidvm -c android.intent.category.LAUNCHER 1`
+把 app 叫起來,橋十秒內就回來。
+
+順帶一個會誤導判斷的坑:池子縮水之後,`devvm.sh` 的 preflight 會直接拒絕啟動
+(`pool below what this VM needs`),而如果你只複製 devvm.sh 改 `--mem`,
+**preflight 的 `need 2960` 不會跟著變**。當時我看到 `total_served=0` 差點以為是自己的
+過濾器把服務擋光了——其實 VM 根本沒起來。
+
+### 3.6 `pkill -f` 會匹配到自己
 
 這一輪踩了**三次**:殺 sampler 時把整條 `su -c` 一起殺掉、殺測試腳本時殺到自己的 shell、
 `until ! pgrep -f '2_build_crosvm.sh'` 的等待迴圈因為命令列裡有那個字串而**永遠不結束**
@@ -116,13 +139,13 @@ LibVNCServer 會替**不支援游標偽編碼**的客戶端把游標混進送出
 
 用 pid 殺,或用 `[t]ail` 這種讓模式不匹配自己的寫法。
 
-### 3.6 環境變數架空編譯預設
+### 3.7 環境變數架空編譯預設
 
 `devvm.sh` 一度無條件導出 `GFXSTREAM_ASG_SPIN_LEVELS` 的 fallback,於是 committed 的預設
 根本不是實際在跑的值,而事後**無法從紀錄判斷當時跑的是哪個**——一段 40 分鐘的中斷風暴
 因此無法歸因。已改成「呼叫端有給才導出」。任何「用環境變數覆蓋預設」的除錯設施都有這個風險。
 
-### 3.7 效能數字
+### 3.8 效能數字
 
 - **`vkmark -b :duration=2` 在冷 shader cache 上低估四倍**(615 vs duration=6 的 1920),
   而且連跑六次會「穩定」在錯的值上。跨映像比較一律 `duration>=6`。
@@ -130,7 +153,7 @@ LibVNCServer 會替**不支援游標偽編碼**的客戶端把游標混進送出
   第八輪 4723。**單次結果沒有意義**,要嘛交錯 A/B,要嘛鎖頻。
 - 全新 overlay 的 `~/.cache/mesa_shader_cache` 是空的,前幾輪一定要丟掉。
 
-### 3.8 判定「桌面好了沒」
+### 3.9 判定「桌面好了沒」
 
 - **只看行程存在不夠**。要等 `kwin` 和 `plasmashell` 兩個都在 D-Bus 上**註冊好名字**
   (`busctl --user --acquired list`)。
@@ -143,7 +166,7 @@ LibVNCServer 會替**不支援游標偽編碼**的客戶端把游標混進送出
 - **閒置熄屏會讓好的桌面看起來全黑**。X11 下 `xset -q` 會說 `Monitor is Off`,
   而**VNC 的滑鼠移動不會重設 DPMS 計時器**。測之前先 `xset s off -dpms`。
 
-### 3.9 環境本身會壞掉
+### 3.10 環境本身會壞掉
 
 - **反覆重啟 session 會弄壞 overlay**(兩次 VM 失聯之後 plasmashell 就再也起不來),
   之後量到的一切都是關於那顆碟而不是關於程式碼。所以 `gfxrun.sh` 每次都從
