@@ -821,58 +821,62 @@ total=2850 sites=4
 
 ### 改了什麼
 
-`gh-hugepage-reserve` `0cec8a1`:kretprobe 的 entry handler 多一道檢查——
-**只服務 `__folio_alloc` 的呼叫者**。
+`gh-hugepage-reserve` `03461ca`:kretprobe 的 entry handler 多一道檢查——
+**只服務帶 `__GFP_MOVABLE` 的配置**。
 
 ```c
-/* arm64 上函式進入時呼叫者還在 LR 裡 */
-static bool serve_this_caller(struct pt_regs *regs)
+static bool serve_this_gfp(struct pt_regs *regs)
 {
-        if (!folio_alloc_addr)          /* 解不到就跳過檢查,行為與改動前一致 */
+        gfp_t gfp = (gfp_t)regs_get_kernel_argument(regs, 0);
+
+        if (gfp & __GFP_MOVABLE)
                 return true;
-        return regs->regs[30] - folio_alloc_addr < FOLIO_ALLOC_WINDOW;
+        atomic_long_inc(&dbg_skip_unmovable);
+        return false;
 }
 ```
 
-客體 RAM 與兩個預配置池走的都是 `__folio_alloc`(實測全部回到 `+0x18`,而該函式長 `0x38`,
-所以窗口取 `0x40`);dma-heap 那條被擋掉後退回 buddy 配置,而那個 heap 本來就是
-`alloc_largest_available`,拿不到最大尺寸它自己會處理。
-符號解不到時 fail-open 並印一行警告,不會變成「什麼都不服務」。
+實測 gfp 完美分開兩條路:客體 RAM 與兩個預配置池的 2848 筆全是 `0x021c24ca`(MOVABLE),
+dma-heap 那 2 筆是 `0x001521c2`(不是)。
 
-### 熱換(不必重開機)
+**第一版是比對呼叫者位址**(arm64 的 LR 落在 `__folio_alloc` 附近),也驗證通過,
+但被換掉了:它只在 arm64 成立、依賴一個可能被 inline 或改名的符號、解不到時 fail-open
+(靜默恢復漏損),而且會誤殺任何不經 `__folio_alloc` 的合法配置。
+gfp 是第 0 個參數,不需要 LR、不需要解符號,而且**說的就是我們真正的意思**——
+一個呼叫者打算 pin 住的頁不是客體 RAM。
 
-`rmmod` 之後用手機上的 `load.sh`(它自稱是 insmod 參數的唯一真實來源)重載:
-
-```
-pool_avail=3050  pool_total=3050  served=0  tracked=0     ← 池子完整回來
-gh_hugepage_reserve: serving only __folio_alloc callers (0xffffffdf0435eec0)
-```
-
-**擔心的「rmmod 之後 acquire 不回來」沒有發生**——釋放出去的正是剛剛要拿回來的那些頁,
-中間窗口很短。舊 .ko 備份在 `/data/local/tmp/gh_hugepage_reserve.ko.bak`,
-新的也已寫進 `/data/adb/modules/gh-hugepage-reserve/`,所以下次開機仍然生效。
+被拒絕的次數記在 `reclaim_debug` 的 `skip_unmovable`,所以「客體記憶體哪天不再是 movable」
+會表現成一個數字,而不是一個安靜地不再被使用的池子。
 
 ### 驗證
 
 | | 修之前 | 修之後 |
 |---|---|---|
-| 每輪服務(`held`) | 2850 | **2848**(直接量到) |
+| 每輪服務(`held`) | 2850 | **2848** |
 | `del_hit` | +2848(**永遠短少 2**) | +2848(**沒有缺口**) |
 | 每輪永久損失 | 1.33 頁 | **0** |
 
-**六輪**(兩支腳本各三輪,符合本文件自己訂的「不要用 3 輪下結論」):
-
 ```
-del_hit 視角:  cycle 1/2/3  lost=0  del_hit=+2848
-held   視角:  cycle 1/2/3  held=2848  deficit 0 -> 0
-最終:          total_served=17088  total_refilled=17088   → deficit 精確為 0
-               pool_avail=3050/3050
+cycle 1/2/3:  held=2848  deficit 0 -> 0  lost 0
+final:        deficit=0  avail=3072/3072
+另外四次生命週期的累計帳:total_served = total_refilled = del_hit = 11392 (= 4 × 2848)
+                        skip_unmovable = 5
 ```
 
-(`del_miss` 的 14/75/22 是系統其他 order-9 free 的雜訊,與此無關。)
+(第一版 LR 過濾器另有六輪 0 損失的驗證。)
 
-**收尾**:診斷模組必須卸掉——`ghhr_sites` 在 `__alloc_pages` 上掛 kprobe,那是全系統成本。
-最後一次檢查時它還掛著,已 `rmmod`。
+### 部署:**不要熱換,寫進 Magisk 模組然後重開機**
+
+`rmmod` 會把 6GB 池子還給 buddy,而 `insmod` 拿不拿得回來取決於**當下 host 有多少空閒
+記憶體**。第一次熱換完好無損(3050/3050),第二次同樣的指令只搶回 **461/3072**
+(當時 MemFree 364MB、Cached 7.4GB),`acquire` 掃到 2383 就停在 `cma sources exhausted`,
+低於開一個 VM 需要的 2960——**手機從此開不了 VM**。重開機後池子回到 3072/3072。
+
+重開機也有代價:**會清掉 app 建的 `br-wifi`**(`deploy/SETUP.md` 早有警告),客體從此連不上;
+`bridge.sh` 只把 tap 掛上已存在的橋。恢復:
+`monkey -p cn.classfun.droidvm -c android.intent.category.LAUNCHER 1`。
+
+完整的坑見 `debugloop.md` §3.5。
 
 ---
 
