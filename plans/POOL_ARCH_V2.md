@@ -320,9 +320,22 @@ limbo 存在的唯一原因是**容量約束**:要湊滿一個 CMA block,得先�
 
 ### 四個必須做對的地方
 
-1. **收尾要掛在每一條離開路徑**,不只正常結束:使用者寫 0 中斷、能力檢查提前返回、模組卸載。
-   今天 limbo 的老化就是它的安全網(acquire 被中斷,孤兒三輪後仍會還回去);
-   換成鬆弛額度後少掛一條,就是幾百 MB 卡住不還。
+1. **收尾不能掛在 acquire 的離開路徑上**(這條 2026-08-08 修正,原本寫錯)。
+   limbo 今天有**兩個**餵食者,只有一個在 acquire 裡:
+
+   | 餵食者 | 上下文 | 情境 |
+   |---|---|---|
+   | `cma_limbo_exchange()` | acquire worker | 湊 block 要騰位子 |
+   | **`pool_take_frozen_exchange()`** | **free hook(atomic)** | `pool_want` 中途調小,回流的頁被閘門拒收,但兄弟還被守著 |
+
+   第二個是**歸還路徑**,隨時可能發生,跟 acquire 有沒有在跑無關——
+   所以**根本沒有「acquire 結束」可以掛**。收尾必須是與 acquire 解耦的獨立觸發
+   (掛在 reconcile/release worker),條件是「目前超額且採集靜止」。
+   今天 limbo 的老化之所以能當安全網,正是因為它也與 acquire 解耦。
+
+   連帶兩條變嚴:**free hook 在 atomic 上下文**,那裡的鬆弛只能是
+   「查一個計數器然後收下」,不能配置、不能掃描;而 **SLACK 的用量有兩個來源**
+   (湊 block 的暫存 + resize 中途回流的頁),不能只按前者估。
 2. **鬆弛期間 deficit 會是負的**。`held_pool() > pool_want` 暫時合法,
    所以讀 deficit 的地方都要能吃負值。建議在命名上分開:`pool_deficit()` 與 `pool_overshoot()`。
 3. **SLACK 不該是常數 256**(=512MB,而 acquire 正是系統最緊的時候)。
