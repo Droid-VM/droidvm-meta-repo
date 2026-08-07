@@ -889,6 +889,30 @@ final:        deficit=0  avail=3072/3072
 
 (第一版 LR 過濾器另有六輪 0 損失的驗證。)
 
+### 考慮過但不做:讓 crosvm 用「不可遷移」的方式拿 shmem
+
+想法是:VM 關機到模組收回之間有個窗口,folio 不再被 pin,可能被 compaction 搬走。
+**三個層面都不成立。**
+
+**不能**——userspace 沒有這個介面。`mapping_set_gfp_mask(mapping, GFP_HIGHUSER_MOVABLE)`
+是通用 VFS 在 inode 配置時就設好的(`fs/inode.c:216`),而 `memfd_create` 的旗標只有
+`MFD_CLOEXEC / ALLOW_SEALING / HUGETLB / NOEXEC_SEAL / EXEC` 加大頁尺寸,**沒有一個管
+movability**。核心裡唯一不可遷移的 page cache 是 `mm/secretmem.c:207` 的 `GFP_HIGHUSER`,
+但 memfd_secret 把記憶體移出 direct map 並**完全禁止 GUP**——而 gunyah 正是靠 GUP pin
+客體 RAM,語意相反。
+
+**不該**——6GB 客體 RAM 配成 unmovable 會被放進 `MIGRATE_UNMOVABLE` 的 pageblock,
+**碎片化的正是池子賴以取得 order-9 頁的那片 movable 區域**;而且它會通不過
+`serve_this_gfp`,池子反而拒絕服務客體 RAM。
+
+**不需要**——那個窗口裡被搬走**不是損失,是提早歸還**。遷移的動作是「配新頁、複製、
+釋放舊頁」,舊頁就是我們的池子頁,它的釋放走 `__free_one_page`,**正好落進 free hook,
+配對 served entry 後收回池子**。而遷移由 kcompactd 這類核心執行緒執行,`current->mm`
+是 NULL,所以 kretprobe 也不會把池子的頁配給遷移目標。VM 執行期間則有 gunyah 的
+`FOLL_LONGTERM` pin 擋住遷移——**連續性在該被保護的時候有被保護**。
+
+實測佐證:修好後八次生命週期 `total_served = total_refilled = 22784`,零損失。
+
 ### 部署:**不要熱換,寫進 Magisk 模組然後重開機**
 
 `rmmod` 會把 6GB 池子還給 buddy,而 `insmod` 拿不拿得回來取決於**當下 host 有多少空閒
