@@ -278,6 +278,30 @@ v2 的步驟表結構上會讓 mode 1 也跑到 `reservoir fill`。
 
 ---
 
+## 8.6b 實作面測繪(2026-08-08):範圍與一個不是純簿記的函式
+
+limbo 觸及 **5 個檔案、約 100 行、57 處直接引用**:
+
+```
+gh_cma.c.inc     48    gh_data.c.inc  28    gh_hooks.c.inc 18
+gh_hugepage_reserve.c 4     gh_sysfs.c.inc  2
+```
+
+要刪的:`limbo_pages[]`/`limbo_age[]`/`limbo_lock`、`PB_LIMBO` 位元、
+`limbo_add`/`limbo_del_idx`/`limbo_age_bump`/`limbo_add_rebuild_order9`、
+`cma_limbo_exchange`/`cma_limbo_intake_cap`、以及 `pool_take_frozen_exchange`
+(free hook 那條,見 §8.6 的討論——可直接刪,不需要以鬆弛取代)。
+
+**一個要小心的**:`cma_limbo_process()` **不是純簿記**。除了處理孤兒老化,
+它還負責「兄弟湊齊時把整塊 commit 進儲備池」。刪掉 limbo 時**那段邏輯必須有去處**,
+不能跟著一起消失。這是這項工作裡唯一不是機械式刪除的部分,
+也是為什麼它該當成一次完整的 pass 做,而不是分次刪。
+
+**做這件事的前置都已備妥**:`cma_flip_commit()` 是唯一的 avail→cma 機制(`069a84c`)、
+雙鍵排序讓 `cma_able` 在底端連續(`e965678`)、`in_*` 計數器能分辨頁的來源(`5ff218a`)。
+
+---
+
 ## 8.5b 【擋路石】3b 必須排在 §8.6 之後
 
 3b 的目標是消掉 `ext→cma` 直達邊,讓 acquire 改成組合 `ext→avail` + `avail→cma`。
