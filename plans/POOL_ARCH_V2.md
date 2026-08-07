@@ -274,6 +274,38 @@ v2 的步驟表結構上會讓 mode 1 也跑到 `reservoir fill`。
 
 ---
 
+## 8.6 暫存塊併入 avail,用鬆弛額度取代 limbo(**設計已定,未實作**)
+
+limbo 存在的唯一原因是**容量約束**:要湊滿一個 CMA block,得先把某頁移出 avail 騰位子,
+被移出的那頁無處可去 → 發明第三個桶。**給鬆弛額度就不必移出**,limbo 整個消失。
+
+```
+掃描期間:  held_pool()  <= pool_want            + SLACK
+           held_total() <= pool_want_with_cma   + SLACK
+結束時  :  cma→avail,再 avail→external,把多餘的還掉
+```
+
+一併消失的:`limbo_pages[64]`、`limbo_age[]`、`limbo_lock`、`PB_LIMBO` 位元、
+`cma_limbo_exchange`、`cma_limbo_process`、`limbo_age_bump`、`cma_limbo_intake_cap`,
+以及 `LIMBO_MAX_AGE=3` 這個猜測性的老化啟發式——**改用確定性的「結束時清掉多餘」**。
+收尾寫成 `cma→avail` + `avail→external` 兩步,沒有 `cma→external` 直達,與 §3b 同一個原則。
+
+### 四個必須做對的地方
+
+1. **收尾要掛在每一條離開路徑**,不只正常結束:使用者寫 0 中斷、能力檢查提前返回、模組卸載。
+   今天 limbo 的老化就是它的安全網(acquire 被中斷,孤兒三輪後仍會還回去);
+   換成鬆弛額度後少掛一條,就是幾百 MB 卡住不還。
+2. **鬆弛期間 deficit 會是負的**。`held_pool() > pool_want` 暫時合法,
+   所以讀 deficit 的地方都要能吃負值。建議在命名上分開:`pool_deficit()` 與 `pool_overshoot()`。
+3. **SLACK 不該是常數 256**(=512MB,而 acquire 正是系統最緊的時候)。
+   湊滿一個 block 最多需要 `SUBBLKS-1` 個兄弟,所以實際需求 =
+   **同時在湊的 block 數 × (SUBBLKS-1)**,應該由此導出。
+4. **暫存頁會被 serve 優先吃掉**:暫存按定義是 `!cma_able`,而 serve 偏好正好優先挑 `!cma_able`。
+   這是對的(VM 的需求勝過品質優化),但代表 VM 活躍時湊 block 幾乎不會成功。
+   是行為不是 bug,但要先知道。
+
+---
+
 ## 9. 遷移順序
 
 每一步都要能單獨部署與回退。**不做大爆炸式重寫。**
