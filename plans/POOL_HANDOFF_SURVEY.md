@@ -843,9 +843,19 @@ dma-heap 那 2 筆是 `0x001521c2`(不是)。
 `SharedMemory::new` → `memfd_create`,兩個 `--pre-alloc` 池也是 crosvm 記憶體裡切的
 memfd region。shmem 的 `mapping_gfp_mask` 就是 `GFP_HIGHUSER_MOVABLE`,
 因為 **page cache 的頁依定義必須可遷移**,否則 compaction 與 CMA 無法運作。
-而被拒絕的那條是**必須能被 DMA pin 住**的 buffer,依定義不能是 movable。
-所以 `__GFP_MOVABLE` 問的正是「這頁是 page cache/匿名記憶體,還是釘死的 DMA 緩衝」,
-不是一個代理指標。
+**要注意 `__GFP_MOVABLE` 的語意**:它是**出身的宣告,不是「這頁此刻搬得動」**。
+核心自己的說法是 *hints about how mobile the page is ... pages with similar mobility are
+placed within the same pageblocks*——它宣告這次配置屬於「可遷移/可回收」那一類,
+好讓配置器把同類的頁放在一起以減少碎片。
+
+**它完全不保證頁面保持可遷移**:客體 RAM 帶著這個旗標,接著就被 gunyah 用
+`FOLL_LONGTERM` pin 住整個 VM 生命週期,那時 `folio_maybe_dma_pinned()` 會讓遷移失敗。
+**兩條路最後都被 pin 住,所以「會不會被 pin」根本分不出東西**——先前這份文件用那個理由
+解釋過這個過濾器,那是錯的。
+
+真正被分開的是**這塊記憶體是什麼**:客體 RAM 與兩個池是 crosvm 的 memfd,shmem 用
+`GFP_HIGHUSER_MOVABLE` 配置,因為 page cache 屬於核心有遷移/回收處理常式的那一類;
+dma-buf heap 配的是核心側的 DMA 記憶體,不屬於。池子該畫的線就在這裡。
 
 **runtime-share 不受影響(實測)**:整個 vkmark 期間 `ghhr_sites` 記到
 **零筆 order-9 配置**(`total=0 sites=0`)。`--runtime-share` 是從
