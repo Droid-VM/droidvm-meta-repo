@@ -105,10 +105,24 @@ donate 需要的順序(先關 fd、再趁 mapping 還在把頁拿走)在非自�
 | 破壞遷移,連自己的 `alloc_contig_range` scavenger 一起關掉 | **scavenger 就是要拿掉的兜底** |
 | 移除模組唯一的回收事件 | **不再需要事件**——頁面沒離開過我們手上 |
 
-### 附帶好處:釋放側的全系統 tracepoint 可以整個拆掉
+### ~~附帶好處:釋放側的全系統 tracepoint 可以整個拆掉~~ —— **這是錯的(2026-08-07 收回)**
 
-頁面永遠不進 buddy,所以 `android_vh_free_one_page_bypass`(全系統每頁回 buddy 都打一次)
-不再需要。**兩個全系統攔截點去掉一個**,只剩配置側的 kretprobe——那是發頁的必要手段。
+原本的推論是「頁面永遠不進 buddy,所以 `android_vh_free_one_page_bypass` 不再需要」。
+**前提就錯了**:釋放參照之後,頁面走的是**完整的一般 free 路徑**,tracepoint 在
+`__free_one_page` 攔截它,只是趕在真正併回 buddy 之前。頁面確實有進到 free 流程。
+
+所以分工是 **sweep 負責偵測(何時)、hook 負責捕獲(放進池子)**,兩者缺一不可。
+量測直接證實:`del_hit` 恆等於 `released_idle`(4233 = 4233)——每一次放手都由 hook 認領。
+若 hook 真的可以拿掉,`del_hit` 應該是 0。
+
+**為什麼不能改成「跳過 free、直接入池」**:被攔截時頁面**已經走完 `free_pages_prepare`**——
+compound 結構被拆、每個 subpage 的 flags/mapping 清掉、poisoning、memcg 結算都在那裡做。
+`rebuild_order9_compound()` 之所以要呼叫 `prep_compound_page`,正是為了重建被拆掉的結構。
+直接入池等於要自己重做一遍那段版本敏感的核心內部流程(`ghhr_probe` 讀到的 served 頁
+flags 是 `0x200c000000080068`,帶 LRU,這些都得有人清)——那是風險不是簡化。
+
+**結論:釋放側的 tracepoint 留著。** 它的快路徑閘門只有 `order != 9 → return`,
+成本從來不是問題;貴的一直是配置側掛在 `__alloc_pages` 的 kretprobe。
 
 ### 要付的代價(動手前先接受)
 
