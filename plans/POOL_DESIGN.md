@@ -471,11 +471,11 @@ gather_worker():
 
 **兩件事靠「有進展就重排自己」自然發生,不需要在表裡重複列:**
 
-1. **丟掉 slab 之後那批剛解毒的窗口,由下一輪的 `cheap intake` 撿走。**
-   不必把 cheap intake 列兩次——丟 slab 算「有進展」,worker 重排,下一輪從頭跑。
+1. **丟掉 slab 之後那批剛解毒的窗口,由下一輪的 `light intake` 撿走。**
+   不必把它列兩次——丟 slab 算「有進展」,worker 重排,下一輪從頭跑。
    `drop slab` 自己記 `ctx.slab_dropped`,一輪 gather 只做一次。
 2. **昂貴的 `gather` 只在便宜的都用盡之後才輪到**,因為每步都先問欠債,
-   而 cheap intake 會把欠債補掉一部分。
+   而前面那些會把欠債補掉一部分。
 
 ### 6.2a hook 怎麼「叫起」worker:一個 ctx + 一條優先權規則
 
