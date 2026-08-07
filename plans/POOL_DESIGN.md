@@ -327,16 +327,30 @@ gather_sync(&(struct gather_ctx){ pool_want, MEANS_ALLOC, .may_promote = true })
 而且 insmod 參數本身就是使用者授權。`may_promote = true` 讓拿到多少就成為背景的天花板
 ——這正是 `pool_total = i` 那一行今天在做的事,只是換成參數表達。
 
-### 5.4 清 cache:只綁在使用者觸發的 acquire,而且在 worker 裡
+### 5.4 清 cache:只丟 slab,不丟 page cache
 
-「清 cache」指 `echo 3 > drop_caches` 的等價物(page cache + dentry + inode),
-比今天只有的 `drop_slab()` 更廣。它的定位是**使用者主動的決定**:
+現行 acquire 的 Phase 0 已經在做這件事,而它的理由比「清 cache 提高成功率」精確:
 
-- **背景永遠不做。** 丟掉使用者的整個 page cache 是全系統可感的代價,
-  背景採集的整個存在前提就是「不自作主張動使用者的東西」。
-- **只在使用者按 acquire 時可用**,因為那一下就是授權;而且它確實會顯著提高成功率
-  (order-9 常常是被 page cache 佔住而不是真的沒空間)。
-- **在 worker 裡,不在寫入路徑。** 觸發點只記錄意圖然後返回。
+> drop reclaimable slab (dentry/inode) once. **That slab is not on the LRU so no acquire
+> path can reclaim it**, yet a single dentry page poisons a whole window.
+
+**只丟 slab 是刻意的,不是做不到別的:**
+
+| | 在 LRU 上? | acquire 碰得到嗎 | 該不該先丟 |
+|---|---|---|---|
+| dentry/inode slab | **否** | **碰不到**——遷移與回收都走 LRU | **要**,否則一個 dentry 頁永久毒化整個 2MB 窗口 |
+| page cache | 是 | 碰得到,可以**搬走**而不是丟掉 | **不要**——先丟等於把遷移能保住的東西白扔 |
+
+所以 `echo 3 > drop_caches` 的兩半裡,模組只需要 slab 那一半。
+我先前寫成「清整個 cache」是錯的,已改。
+
+定位仍照使用者的決定:
+
+- **背景永遠不做**。丟掉使用者的 dentry/inode cache 是全系統可感的代價,
+  背景採集的存在前提就是不自作主張。
+- **只在使用者按 acquire 時**——那一下就是授權。
+- **在 worker 裡,不在寫入路徑**;觸發點只記錄意圖然後返回。
+- **仍有欠債才做**(今天也是這樣 gate 的:「Skipped when Phase S already met the target」)。
 
 ---
 
@@ -395,7 +409,7 @@ static const step steps[] = {
   { "shrink pool",          POOL,     always   },  /* §2.2 的去向規則 */
   { "shrink total",         TOTAL,    cma      },
   { "cheap intake",         POOL,     always   },  /* ★ 不論 means 都先跑;失敗即停 */
-  { "drop caches",          POOL,     user_run },  /* ★ 只有使用者觸發;每輪一次 */
+  { "drop slab",            POOL,     user_run },  /* ★ 只有使用者觸發;每輪一次;不丟 page cache */
   { "stage-in (total met)", POOL,     cma      },
   { "stage-in",             POOL,     cma      },
   { "gather",               POOL,     always   },  /* ★ 真正的 means,唯一分歧的一步 */
@@ -414,7 +428,7 @@ gather_worker():
 		if stop_requested()                        break
 		if s.needs == cma      && !cma_capable     continue
 		if s.needs == target   && !means_can_target(ctx.max_means) continue
-		if s.needs == user_run && !ctx.may_promote continue   /* 背景不清 cache */
+		if s.needs == user_run && !ctx.may_promote continue   /* 背景不丟 slab */
 		if !deficit_for(s.goal, ctx)               continue
 		progress |= s.run(ctx)
 
@@ -434,13 +448,13 @@ gather_worker():
 
 **兩件事靠「有進展就重排自己」自然發生,不需要在表裡重複列:**
 
-1. **清 cache 之後那批剛釋放的記憶體,由下一輪的 `cheap intake` 撿走。**
-   不必把 cheap intake 列兩次——清 cache 算「有進展」,worker 重排,下一輪從頭跑。
-   `drop caches` 自己記 `ctx.caches_dropped`,一輪 gather 只做一次。
+1. **丟掉 slab 之後那批剛解毒的窗口,由下一輪的 `cheap intake` 撿走。**
+   不必把 cheap intake 列兩次——丟 slab 算「有進展」,worker 重排,下一輪從頭跑。
+   `drop slab` 自己記 `ctx.slab_dropped`,一輪 gather 只做一次。
 2. **昂貴的 `gather` 只在便宜的都用盡之後才輪到**,因為每步都先問欠債,
    而 cheap intake 會把欠債補掉一部分。
 
-**表是依成本排序,不是依種類。** 這讓「先撿現成、再考慮動使用者的東西、最後才遷移」
+**表是依成本排序,不是依種類。** 這讓「先撿現成、再解毒窗口、最後才遷移」
 成為結構,而不是每個呼叫者自己記得的順序。
 
 ### 6.3 欠債判定 —— 每個 goal 唯一來源
