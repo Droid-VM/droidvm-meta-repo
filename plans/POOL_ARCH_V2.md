@@ -278,6 +278,30 @@ v2 的步驟表結構上會讓 mode 1 也跑到 `reservoir fill`。
 
 ---
 
+## 8.5b 【擋路石】3b 必須排在 §8.6 之後
+
+3b 的目標是消掉 `ext→cma` 直達邊,讓 acquire 改成組合 `ext→avail` + `avail→cma`。
+**但組合會讓儲備池的頁經過 avail,而 avail 成長正是抬高 `pool_total` 的觸發條件**
+(`pool_push_grow()`:`if (idx + 1 > pool_total) WRITE_ONCE(pool_total, idx + 1);`)。
+
+`pool_total` 是**背景補充的安全天花板**(見 `POOL_STATE_MODEL.md` §3.2 與
+[[pool-want-vs-pool-total-risk]])。被儲備池的量抬高之後,`refill_worker` 會認為
+「持有這麼多已被證明安全」,然後在背景自己補到那個量——**那正是它存在要防的事**。
+
+**所以順序是 §8.6 先、3b 後**:要先有「暫存/過境的頁不計入額度」的帳,
+組合才不會污染風險模型。可行的兩條路:
+
+1. 一條**不抬高 `pool_total`** 的過境 push(`pool_push_transient()`),或
+2. §8.6 的鬆弛額度正式化,`pool_total` 的推進明確排除鬆弛區。
+
+我傾向 2:鬆弛本來就要記帳,多一條 push 路徑只是把問題換個地方藏。
+
+已完成的前置(不受此擋):`cma_flip_avail_page()` 已抽出(`0dca52b`),
+雙鍵排序讓 `cma_able` 在底端連續(`e965678`)。
+另有第三份 avail→cma 實作 `cma_block_commit()`(singles-held 路徑)待一併合併。
+
+---
+
 ## 8.6 暫存塊併入 avail,用鬆弛額度取代 limbo(**設計已定,未實作**)
 
 limbo 存在的唯一原因是**容量約束**:要湊滿一個 CMA block,得先把某頁移出 avail 騰位子,
