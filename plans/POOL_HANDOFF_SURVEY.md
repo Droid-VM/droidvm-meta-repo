@@ -839,6 +839,20 @@ static bool serve_this_gfp(struct pt_regs *regs)
 實測 gfp 完美分開兩條路:客體 RAM 與兩個預配置池的 2848 筆全是 `0x021c24ca`(MOVABLE),
 dma-heap 那 2 筆是 `0x001521c2`(不是)。
 
+**為什麼那三者天生是 movable**:它們全都是 crosvm 的 **memfd(shmem)**——客體 RAM 走
+`SharedMemory::new` → `memfd_create`,兩個 `--pre-alloc` 池也是 crosvm 記憶體裡切的
+memfd region。shmem 的 `mapping_gfp_mask` 就是 `GFP_HIGHUSER_MOVABLE`,
+因為 **page cache 的頁依定義必須可遷移**,否則 compaction 與 CMA 無法運作。
+而被拒絕的那條是**必須能被 DMA pin 住**的 buffer,依定義不能是 movable。
+所以 `__GFP_MOVABLE` 問的正是「這頁是 page cache/匿名記憶體,還是釘死的 DMA 緩衝」,
+不是一個代理指標。
+
+**runtime-share 不受影響(實測)**:整個 vkmark 期間 `ghhr_sites` 記到
+**零筆 order-9 配置**(`total=0 sites=0`)。`--runtime-share` 是從
+`--pre-alloc` 已經要走的那 800 頁裡分享出去,不是向系統要新的,所以它連 kretprobe 都碰不到。
+同一輪 `served=2848`、vkmark 5027、桌面正常。
+(這一條原本是我的量測缺口——先前只量了開機 + 記憶體 touch,沒量圖形負載。)
+
 **第一版是比對呼叫者位址**(arm64 的 LR 落在 `__folio_alloc` 附近),也驗證通過,
 但被換掉了:它只在 arm64 成立、依賴一個可能被 inline 或改名的符號、解不到時 fail-open
 (靜默恢復漏損),而且會誤殺任何不經 `__folio_alloc` 的合法配置。
