@@ -407,6 +407,47 @@ reconcile_worker():
 		stop_reason = why_stopped()
 ```
 
+### 6.4b 縮小的去向:由「哪個不變式變了」決定
+
+之前只寫了「調小 → 排 reconcile」,沒交代 reconcile 要做什麼。目的地不是額外的政策,
+**是從兩個不變式推導出來的**:
+
+```
+pool_want 調小,pool_want_with_cma 不變
+    I1 held()     必須下降  → avail 要少掉
+    I2 held_all() 必須不變  → 那些頁不能離開監護
+    ⇒ 唯一解: avail → cma
+    ⇒ CMA 未啟用/無處可去時退化為: avail → ext
+
+pool_want_with_cma 調小
+    I2 held_all() 必須下降  → 監護總量要少
+    ⇒ cma → avail(拆儲備池)後 avail → ext
+    ⇒ 不走 cma → ext 直達:avail 是樞紐,而拆下來的頁本來就要重貼 MOVABLE 標籤再釋放,
+      走 avail 讓它與一般釋放共用同一條路
+```
+
+寫成步驟:
+
+```c
+step_shrink_pool():        /* I1 下降 */
+	n = held() - ceiling
+	if cma_capable && held_all() <= want_all:
+		moved = pool_to_cma(n)      /* 監護權換形式,不放走 */
+		n -= moved
+	pool_to_ext(n)                      /* 剩下的還給系統 */
+
+step_shrink_total():       /* I2 下降 */
+	n = held_all() - want_all
+	pool_from_cma(n)                    /* 先拆回 avail */
+	/* 之後由 step_shrink_pool / pool_shed_excess 循上面那條把多的送出去 */
+```
+
+**今天的 `pool_do_resize()` 已經是這個行為**(`flip` 旗標的條件正是
+`pool_want_with_cma > newt`,並以 `- cma_pool_cma_2mb()` 為上限避免灌爆儲備池)。
+它只是從未出現在任何設計文件裡——所以這節是把既有行為寫下來,不是提案。
+
+搬進 worker 之後多一個好處:今天這段在 **sysfs 寫入路徑裡同步排掉幾千頁**。
+
 ### 6.5 每個 goal 的欠債判定(唯一來源)
 
 ```c
