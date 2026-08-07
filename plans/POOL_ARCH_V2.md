@@ -63,7 +63,11 @@ static int held_total(void) { return held_pool() + cma_count(); }         /* I2 
  * Q : 最小化 avail_partial_count()(= avail 之中 !cma_able 的部分)  */
 ```
 
-三者都是**導出量**,沒有對應的儲存變數。`pool_total` 刪除(見 `POOL_STATE_MODEL.md` §3.2)。
+兩者都是**導出量**,沒有對應的儲存變數。
+
+**`pool_total` 不刪**(原本說要刪,已收回——見 `POOL_STATE_MODEL.md` §3.2):
+它是第三個量,是**帶遲滯的額度**,`refill_worker` 靠 `held_pool() < pool_total` 判斷欠債。
+導出化會讓 refill 永遠不執行。要改的只有「`pool_do_resize` 拿它兼差當柵欄」那個 hack。
 
 ---
 
@@ -314,7 +318,7 @@ limbo 存在的唯一原因是**容量約束**:要湊滿一個 CMA block,得先�
 |---|---|---|---|
 | 1 | `served_remove(pfn, reason)` 收斂三個出口 | 低 | 唯一「不做會再出事」的 |
 | 2 | 不變式四函式(純新增),呼叫端逐步搬 | 低 | 後面每一步都要用 |
-| 3 | 刪 `pool_total`,resize 柵欄改顯式旗標 | 中 | 依賴 2 |
+| 3 | resize 柵欄改顯式旗標(**不刪** `pool_total`,見 §3.2 收回) | 低 | 依賴 2 |
 | 4 | `avail` 拆雙堆疊 + serve 偏好 | 中 | 一併消掉 `pb_full_avail` |
 | 5 | 六個邊原語,同步點收進去 | 中高 | 依賴 4 |
 | 6 | 步驟表 + 兩個 worker | 中高 | 依賴 5;§8.2 在這裡定案 |

@@ -117,7 +117,22 @@ limbo 處理的條件、acquire sweep 的一個決策)——**沒有一個在熱
 順帶:SUBBLKS==1 的路徑**本來就是純推導**(`return atomic_read(&pool_count)`,零狀態)。
 所以這項建議實際上是**讓複雜的那個情況追上簡單情況已經在做的事**,不是發明新做法。
 
-### 3.2 `pool_total` 是導出量,卻被當成儲存量
+### 3.2 ~~`pool_total` 是導出量,卻被當成儲存量~~ —— **這是錯的(2026-08-07 收回)**
+
+**`pool_total` 不可導出。** `refill_worker` 的停止條件是 `held_pool() >= pool_total`;
+若把它改成導出(= `held_pool()`),條件恆真,**refill 永遠不會執行**。
+
+實際語意(查 `pool_do_resize`、`pool_push_grow`、`pool_take_frozen`、`refill_worker` 才拼得出來):
+它是**帶遲滯的額度**——resize 時設成 `pool_want`,acquire 超收時被 `pool_push_grow` 抬高,
+purge 掉一頁之後**故意不降**,於是 `pool_total - held_pool()` 就是欠債,refill 照著補。
+所以它是與 `pool_want`(目標)、`held_pool()`(實際持有)並列的**第三個量**。
+
+**誤導我的是 `gh_hooks.c.inc:75` 那句註解**「keeping avail+served == pool_total」——
+它描述的只是 grow 路徑上的一個瞬間關係,不是定義。那句要改掉。
+
+原提議只有一半站得住,見下:
+
+### 3.2b `pool_do_resize()` 拿它兼差當柵欄(**這部分仍要做**)
 
 `gh_hooks.c.inc:75` 自己寫了意圖:「keeping avail+served == pool_total」——
 **它就是不變式 1 的左邊**。但它被至少四個寫入者增量維護
@@ -128,7 +143,8 @@ limbo 處理的條件、acquire sweep 的一個決策)——**沒有一個在熱
 `pool_do_resize()` 之所以需要它可寫,只是為了「把 `pool_total` 暫時停在 `target_avail`,
 好讓併發的 refill worker 不要把剛排掉的頁補回來」——**借用一個計數器當柵欄**。
 
-**建議:刪掉變數,改成導出函式**;那個柵欄改用明確的 `resize_draining` 旗標。
+**建議:柵欄改用明確的 `resize_draining` 旗標**,把 `pool_total` 還原成單純的額度。
+(原本還提議刪掉變數本身,已於 §3.2 收回。)
 
 ### 3.3 兩個不變式沒有被寫成程式碼
 
