@@ -292,8 +292,21 @@ write pool_want_with_cma = N:
 write acquire = m (1..N):
 	if !means_usable(m)                                return -ENOSYS
 	if !any_deficit(user_ctx(m))                       { stop="already at target"; return 0 }
+
+	/* 便宜的一趟,同步做完:先撿現成的。
+	 *
+	 * MEANS_ALLOC_CHEAP 的失敗就是終止條件——不回收不壓縮的配置拿不到,
+	 * 代表現在沒有現成的 order-9 躺著,再試也變不出來。所以這個迴圈
+	 * 「試到第一次失敗為止」,自我限制,通常很短,而且常見情況
+	 * (剛關掉一個 VM、記憶體很乾淨)會在這裡就滿足,連 worker 都不必排。 */
+	while (pool_intake_room(pool_want) > 0)
+		if (!pool_from_ext(MEANS_ALLOC_CHEAP, ORIGIN_USER, 0))
+			break;                                 /* 沒有現成的了 */
+
+	if (!any_deficit(user_ctx(m)))                     { stop="filled cheaply"; return 0 }
+
 	gather_ctx = user_ctx(m);  gathering = true
-	arm(gather_worker, 0);     return 0                /* fire-and-return */
+	arm(gather_worker, 0);     return 0                /* 剩下的交給 worker */
 
 write acquire = 0:
 	gathering = false                                  /* gather 下一輪自己停 */
@@ -301,6 +314,41 @@ write acquire = 0:
 write reclaim_enable = 0/1:
 	attach/detach free hook                            /* E2 據此決定能不能交接 */
 ```
+
+### 5.3 insmod 的首次取得是同一條邊
+
+今天 `module_init` 裡是這樣:
+
+```c
+for (i = 0; i < pool_want; i++) {
+	page_pool[i] = alloc_pages(GFP_KERNEL|__GFP_COMP|__GFP_NOWARN|__GFP_RETRY_MAYFAIL, 9);
+	if (!page_pool[i]) break;
+	if ((i + 1) % 50 == 0) cond_resched();
+}
+```
+
+**同步、沒有 worker、有 loop、用的是 `MEANS_ALLOC`(會回收+壓縮)。**
+也就是說 prefill / refill / acquire 是同一條邊的三個呼叫者,各寫一份。
+
+v3 之後它就是:
+
+```c
+gather_sync(&(struct gather_ctx){ pool_want, MEANS_ALLOC, .may_promote = true });
+```
+
+開機用 `MEANS_ALLOC` 而不是 cheap 版是**對的**:那是這台機器一輩子記憶體最乾淨的時刻,
+而且 insmod 參數本身就是使用者授權。`may_promote = true` 讓拿到多少就成為背景的天花板
+——這正是 `pool_total = i` 那一行今天在做的事,只是換成參數表達。
+
+### 5.4 `drop_slab` 放哪:留在 worker
+
+「清 cache」若指 `drop_slab()`,**不要放進 sysfs 寫入路徑**:
+它會丟掉使用者整個 dentry/inode cache,是全系統可感的代價,
+而 §5.2 那趟便宜取得的重點是「快、常常就夠了」。
+先撿現成的;真的不夠再進 worker,由步驟表在確認仍有欠債之後才付那個代價
+(今天也是這樣 gate 的)。
+
+---
 
 **縮小即動、放大不動**把風險歸屬變成明文:背景永遠只維持 `pool_total`,
 擴張一律要人按。調大目標值不會讓模組自己去要記憶體。
