@@ -363,6 +363,17 @@ gather_sync(&(struct gather_ctx){ pool_want, MEANS_ALLOC, .may_promote = true })
 
 **只有兩個,分野是延遲要求。永不互相排程,只能重排自己。**
 
+**兩個 worker 共用方法,但不互相排程。** `pool_release_idle()` 是 pool 的方法,
+兩邊都能呼叫,靠方法內的 mutex 互斥:
+
+- `release_worker` 存在的理由是**延遲**——unshare/關機要快回應,不能排在長跑的採集後面。
+- `gather_worker` 把它當**第一步**,因為縮小目標值時應該先收回「VM 已用完、我們還沒掃到」
+  的頁,再決定要丟什麼;否則會先排掉 avail、那些頁稍後才回來、可能又超過新目標再排一次。
+
+這也是為什麼縮小 `pool_want` / `pool_want_with_cma` **只排 gather 就夠了**:
+它自己會先做 release 那一步。分派原則是**按成因**——
+release_worker 回應 VM 的動作,gather_worker 回應目標值的改變。
+
 今天 `refill_worker` 尾巴排 `vm_owner_sweep_work`,那正是卸載路徑需要一整段註解
 交代取消順序的原因——**寫在註解裡的順序就是遲早會被違反的順序**。
 
@@ -405,6 +416,7 @@ user_ctx(m) = { pool_want,  m,                 true  };
 static const step steps[] = {
   /* 依「成本」排序,不依「種類」。每步先問自己的 goal 還有沒有欠債。 */
   /* name                  goal      需要        備註 */
+  { "release idle",         -,        always   },  /* 與 release_worker 共用方法,不是排它 */
   { "purge expired",        -,        always   },  /* released 逾時 → external */
   { "shrink pool",          POOL,     always   },  /* §2.2 的去向規則 */
   { "shrink total",         TOTAL,    cma      },
@@ -490,7 +502,12 @@ deficit_for(QUALITY, ctx) = pool_cma_able_count() < pool_avail_count()
 
 ## 8. 待決
 
-- **`MEANS_ALLOC_CHEAP` 會讓背景補得比較慢**,碎片化時補不滿。這是刻意的,
+- **背景改用 `MEANS_ALLOC_CHEAP` 是這份設計裡唯一使用者會直接感受到的行為變更。**
+  今天背景用的是 `alloc_pages(GFP_KERNEL|__GFP_COMP|__GFP_NOWARN|__GFP_RETRY_MAYFAIL, 9)`
+  ——`GFP_KERNEL` 允許 direct reclaim,`__GFP_RETRY_MAYFAIL` 在 order-9 上拉起 compaction,
+  也就是**背景會回收使用者的 page cache、會做記憶體壓縮**。
+  這與 `pool_total` 的存在理由(模組不准自作主張把系統推到記憶體不足)直接矛盾,
+  所以降到 cheap 是把實作拉回設計意圖。但它**會讓背景補得比較慢**、碎片化時補不滿。這是刻意的,
   但**要先量**:現在背景每輪補幾頁,換成不回收之後補幾頁。
   差多少決定使用者多久要按一次按鈕——這是唯一會被直接感受到的取捨。
 - **`pool_in_flight()` 要能分辨「還在路上」與「已經丟了」**。前者會自己消失,
