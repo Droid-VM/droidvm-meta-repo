@@ -186,6 +186,34 @@ fallback_sweep=0:  cycle 1  deficit 9->9   del_hit=+2112  released_idle=+2112  a
 驗收:`grow +128MB` → served +64(另加 `v_gpu` 的零頭),`shrink −128MB` → **served 當場 −64、
 `avail` +64、`released_idle` +64**;連續四輪皆收在 `deficit=0 / avail=3072/3072`,兜底 0 次。
 
+### 【待實作】三階段命名與計數器拆分(2026-08-08 分類完成)
+
+回收是**三階段**設計:先試著把發出去的頁拿回來,失敗才延遲後向外蒐集。
+按「階段_手段」命名應為 `reclaim_hook` / `reclaim_sweep` / **`refill_alloc`**
+——第三個**不叫 sweep**,因為它不掃描(就是一次 `alloc_pages`),
+而且 `sweep` 在本 codebase 已被 `acquire_sweep()`(掃描實體記憶體找窗口)佔用。
+
+**但 `total_refilled` 遠比三階段更混**:11 個遞增點、**五種來源**:
+
+| 來源 | 位置 | 是我們的頁嗎 |
+|---|---|---|
+| `reclaim_hook` | `gh_free_one_page_cb` ×2 | ✅ 精確認領 |
+| `reclaim_sweep` | `served_reacquire_free_orphans` | ✅ 但靠實體重搶(猜) |
+| **`staged_in`** | **`cma_stage_in`** | ✅ **自己的儲備池回流,沒有新記憶體** |
+| `acquired` | `acquire_grab_free`、`acquire_worker_v1`、`acquire_sweep`、`cma_grab_missing_siblings` | ❌ 新記憶體(使用者觸發) |
+| `purchased` | `refill_worker` | ❌ 新記憶體(兜底自動) |
+
+所以 `deficit = total_served - total_refilled` **不是回收指標**,
+是「發出去的 減 曾經以任何方式進池的」。`cma_stage_in` 那筆最刺眼:
+儲備池回流會讓 deficit 變好看,但沒有任何一頁被回收或購買。
+
+**修法**:按上表拆成五個計數器,`deficit` 只用前兩個算;
+`total_refilled` 保留為五者之和(sysfs 向前相容)。
+拆完之後所有回收量測都不必再關 refill 來隔離階段。
+
+**真正的分界線**是「有沒有向系統要新記憶體」——跨過它代表我們放棄了一頁,
+那應該是顯眼的事件,不是被加總進一個計數器裡看不見的事件。
+
 ### 【量測陷阱,2026-08-08】`deficit` 被 refill 污染,不可用來量回收
 
 `refill_worker` 用 `alloc_pages()` 買**全新的頁**,再 `atomic_inc(&total_refilled)`
