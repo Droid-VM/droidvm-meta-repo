@@ -280,3 +280,139 @@ static void reconcile_worker(struct work_struct *w)
 3. 六條邊的方法,同步點收進去
 4. `pool_from_ext` 的手段表,取代 `acquire_mode` 的整數分支
 5. `pool_check()` + debug 模式常駐呼叫
+
+---
+
+## 6. 完整呼叫圖與 worker 虛擬碼
+
+### 6.1 hook 點位
+
+```c
+/* 配置側 kretprobe —— atomic。entry 只過濾,ret 才動 pool。 */
+entry_handler(regs):
+	if arg_order(regs) != PAGE_ORDER      return SKIP
+	if pool_avail_count() == 0            return SKIP
+	if !vm_owner_contains(current->mm)    return SKIP
+	if !(arg_gfp(regs) & __GFP_MOVABLE)   return SKIP   /* 只服務會還回來的那條配置路線 */
+	return TAKE
+
+ret_handler(regs):
+	pg = pool_to_served(current->tgid)     /* ← 唯一碰 pool 的呼叫 */
+	if pg  set_return_value(regs, pg)
+
+/* 釋放側 vendor tracepoint —— atomic,持 zone->lock、IRQ off。 */
+free_one_page_cb(page, order, *bypass):
+	if order != PAGE_ORDER                return          /* 全系統快路徑閘門 */
+	if pool_served_count() == 0           return
+	*bypass = pool_from_served(page)       /* ← 唯一碰 pool 的呼叫;閘門與統計都在裡面 */
+
+/* VM 關機 kprobe —— 不碰 pool。 */
+vm_destroy_pre(regs):
+	vm_owner_note_gone(current->mm)
+	arm(release_worker,   0)
+	arm(reconcile_worker, RECONCILE_SETTLE_MS)
+
+/* runtime unshare kprobe(gunyah_rm_mem_reclaim)—— 不碰 pool。 */
+mem_reclaim_pre(regs):
+	if pool_served_count() == 0           return
+	arm(release_worker,   RELEASE_FIRST_MS)
+	arm(reconcile_worker, RECONCILE_SETTLE_MS)
+```
+
+### 6.2 sysfs write
+
+```c
+write pool_want = N:
+	old = want;  want = clamp(N, 0, size_max)
+	if N < old   arm(reconcile_worker, 0)      /* 還記憶體:即時 */
+	/* N > old:只記錄。要人按 acquire。 */
+
+write pool_want_with_cma = N:
+	old = want_all;  want_all = clamp(N)
+	if N < old   arm(reconcile_worker, 0)
+	/* 同上 */
+
+write acquire = m (1..3):
+	if !means_usable(m)                              return -ENOSYS
+	if pool_intake_room() <= 0
+	   && !reservoir_deficit() && !quality_deficit()  { stop_reason="already at target"; return 0 }
+	means = m;  gathering = true;  stop_reason = "acquiring"
+	arm(reconcile_worker, 0)
+	return 0            /* fire-and-return:重活在 worker */
+
+write acquire = 0:
+	gathering = false   /* reconcile 下一輪自己看到並停 */
+
+write reclaim_enable = 0/1:
+	attach/detach free hook  (release_worker 會據此決定能不能交接)
+```
+
+### 6.3 `release_worker` —— 要快
+
+```c
+release_worker():
+	if !free_hook_attached():
+		return              /* 沒人接手就不放手:放了會流進 buddy 而 entry 留著 */
+
+	released = pool_release_idle()      /* 排乾:一輪沒放掉任何頁才停 */
+
+	if released > 0:
+		tries = 0
+		return
+
+	/* 一頁都沒閒置:RM 往返與 unpin 可能還在路上。退避重看,有上限。 */
+	if ++tries < RELEASE_TRIES:
+		rearm_self(RELEASE_FIRST_MS << tries)
+	else:
+		tries = 0
+```
+
+### 6.4 `reconcile_worker` —— 可長跑、可取消
+
+```c
+static const step steps[] = {
+  /* name                 goal      needs_cma  can_target_only */
+  { "stage-in (total met)", POOL,     true,      false },
+  { "pair fill",            QUALITY,  true,      TRUE  },   /* means 0/1 跳過 */
+  { "drop slab",            POOL,     false,     false },
+  { "harvest free",         POOL,     false,     false },
+  { "stage-in",             POOL,     true,      false },
+  { "sweep",                POOL,     false,     false },   /* 唯一依 means 分歧的一步 */
+  { "reservoir fill",       TOTAL,    true,      false },
+  { "quality",              QUALITY,  true,      TRUE  },
+  { "refill (fallback)",    POOL,     false,     false },
+};
+
+reconcile_worker():
+	if release_pending():
+		rearm_self(SHORT_MS)        /* 讓歸還先做完,再決定要不要採集 */
+		return
+
+	progress = false
+	for s in steps:
+		if stop_requested()                     break
+		if s.needs_cma && !cma_capable          continue
+		if s.can_target_only && !means.can_target continue
+		if !deficit_for(s.goal)                 continue
+		progress |= s.run()
+
+	pool_sort_if_dirty()        /* 兩個鍵:!cma_able 到頂端,同塊 pfn 相鄰 */
+	pool_shed_excess()          /* 把鬆弛額度用剩的還掉;採集中不動 */
+	if debug                    pool_check()
+
+	if progress && gathering && !stop_requested():
+		rearm_self(0)           /* 只重排自己,永不排別人 */
+	else:
+		gathering = false
+		stop_reason = why_stopped()
+```
+
+### 6.5 每個 goal 的欠債判定(唯一來源)
+
+```c
+deficit_for(POOL)    = pool_intake_room() > 0
+deficit_for(TOTAL)   = held_all() < want_all
+deficit_for(QUALITY) = pool_cma_able_count() < pool_avail_count()
+```
+
+今天這三個判斷各有 2–4 份手寫副本,其中三份是「在自己該工作的狀態下停止」的死碼。
