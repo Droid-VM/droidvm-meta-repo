@@ -415,26 +415,48 @@ user_ctx(m) = { pool_want,  m,                 true  };
 ```
 
 ```c
-static const step steps[] = {
-  /* 排序原則:① 先把帳算清 ② 拿回自己的 ③ 才向系統要,最便宜的先。
-   * 每步先問自己的 goal 還有沒有欠債;means 多數是步驟自己的屬性,只有 gather 吃 ctx。 */
-  /* name                  goal      需要      means           */
-  { "release idle",         -,        always,   -               },  /* 與 release_worker 共用方法 */
-  { "purge expired",        -,        always,   -               },  /* released 逾時 → external */
-  { "shrink pool",          POOL,     always,   -               },  /* 目標調小:§2.2 的去向規則 */
-  { "shrink total",         TOTAL,    cma,      -               },  /* 先縮再採集,否則是白工 */
+enum step_goal  {
+	GOAL_NONE,      /* 無條件跑(記帳、收尾) */
+	GOAL_POOL,      /* 由 I1 的欠債驅動:pool_intake_room(ctx->ceiling) > 0 */
+	GOAL_TOTAL,     /* 由 I2 的欠債驅動 */
+	GOAL_QUALITY,   /* 由 Q 驅動:cma_able_count() < avail_count() */
+};
 
-  { "sweep released",       POOL,     always,   CONTIG_AT       },  /* 拿回自己的:去 released 原址搶 */
-  { "stage-in (total met)", POOL,     cma,      -               },  /* 拿回自己的:從儲備池 */
-  { "stage-in",             POOL,     cma,      -               },
+enum step_needs {
+	NEEDS_ALWAYS,
+	NEEDS_CMA,      /* 沒有 CMA 能力就跳過 */
+	NEEDS_TARGET,   /* ctx 的手段不能指定位置就跳過(acquire 0/1) */
+	NEEDS_USER,     /* 只有使用者觸發的 run 才做(ctx->may_promote) */
+};
 
-  { "light intake",         POOL,     always,   ALLOC_LIGHT     },  /* 向系統要:最便宜的一級 */
-  { "drop slab",            POOL,     user_run, -               },  /* 只有使用者觸發;不丟 page cache */
-  { "gather",               POOL,     always,   ctx.max_means   },  /* ★ 唯一吃 ctx 的一步 */
+struct step {
+	const char       *name;
+	enum step_goal    goal;
+	enum step_needs   needs;
+	enum means        means;   /* MEANS_NONE = 不向外取得;MEANS_CTX = 吃 ctx->max_means */
+	enum step_result (*run)(const struct gather_ctx *ctx);
+};
 
-  { "pair fill",            QUALITY,  target,   CONTIG_AT       },  /* 品質:湊完整塊 */
-  { "reservoir fill",       TOTAL,    cma,      -               },
-  { "quality",              QUALITY,  target,   CONTIG_AT       },
+/* 排序原則:① 先把帳算清 ② 拿回自己的 ③ 才向系統要,最便宜的先。
+ * static const —— 沒有任何人寫它。序列就是這張表的順序。 */
+static const struct step steps[] = {
+/*   name                   goal          needs         means              run                        */
+   { "release idle",        GOAL_NONE,    NEEDS_ALWAYS, MEANS_NONE,        step_release_idle        },
+   { "purge expired",       GOAL_NONE,    NEEDS_ALWAYS, MEANS_NONE,        step_purge_expired       },
+   { "shrink pool",         GOAL_POOL,    NEEDS_ALWAYS, MEANS_NONE,        step_shrink_pool         },
+   { "shrink total",        GOAL_TOTAL,   NEEDS_CMA,    MEANS_NONE,        step_shrink_total        },
+
+   { "sweep released",      GOAL_POOL,    NEEDS_ALWAYS, MEANS_CONTIG_AT,   step_sweep_released      },
+   { "stage-in total-met",  GOAL_POOL,    NEEDS_CMA,    MEANS_NONE,        step_stage_in_total_met  },
+   { "stage-in",            GOAL_POOL,    NEEDS_CMA,    MEANS_NONE,        step_stage_in            },
+
+   { "light intake",        GOAL_POOL,    NEEDS_ALWAYS, MEANS_ALLOC_LIGHT, step_light_intake        },
+   { "drop slab",           GOAL_POOL,    NEEDS_USER,   MEANS_NONE,        step_drop_slab           },
+   { "gather",              GOAL_POOL,    NEEDS_ALWAYS, MEANS_CTX,         step_gather              },
+
+   { "pair fill",           GOAL_QUALITY, NEEDS_TARGET, MEANS_CONTIG_AT,   step_pair_fill           },
+   { "reservoir fill",      GOAL_TOTAL,   NEEDS_CMA,    MEANS_NONE,        step_reservoir_fill      },
+   { "quality",             GOAL_QUALITY, NEEDS_TARGET, MEANS_CONTIG_AT,   step_quality             },
 };
 
 /* 一步可以回報「還太早」,而不是由誰去排它。 */
@@ -468,6 +490,19 @@ gather_worker():
 	else:
 		gathering = false;  stop_reason = why_stopped()
 ```
+
+每一欄的意義:
+
+| 欄 | 意義 | 誰決定 |
+|---|---|---|
+| `goal` | 這步在服務哪個不變式;`GOAL_NONE` 無條件跑 | 表(固定) |
+| `needs` | 前置的能力或授權 | 表(固定),對照執行期的 `cma_capable` / ctx |
+| `means` | 這步用什麼手段取得記憶體 | **多數固定**;只有 `gather` 是 `MEANS_CTX` |
+| `run` | 實作 | 表(固定) |
+
+`MEANS_NONE` 的步驟不向外取得記憶體——它們在搬自己的東西(收回、縮小、從儲備池拿回)
+或只是記帳。`sweep released` 雖然用 `CONTIG_AT`,拿的也是**自己放掉的頁**,
+所以排在向系統要的前面(§6.2c)。
 
 **兩件事靠「有進展就重排自己」自然發生,不需要在表裡重複列:**
 
