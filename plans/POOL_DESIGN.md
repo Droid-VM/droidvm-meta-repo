@@ -183,12 +183,14 @@ enum origin { ORIGIN_HOOK, ORIGIN_SWEEP, ORIGIN_CMA, ORIGIN_USER, ORIGIN_BACKGRO
 ### 4.3 手段(E6)
 
 ```c
+/* 現行的五級,原樣保留。不新增更弱的一級——保留現行行為。 */
 enum means {
-	MEANS_ALLOC_CHEAP,   /* alloc_pages(GFP_NOWAIT):撿現成,不回收不壓縮。背景唯一可用 */
-	MEANS_ALLOC,         /* alloc_pages(GFP_KERNEL|RETRY_MAYFAIL):會回收+壓縮 */
-	MEANS_CONTIG_ANY,    /* alloc_contig_pages:隨緣,拿不到指定位置 */
-	MEANS_CONTIG_AT,     /* alloc_contig_range:可指定 */
-	MEANS_CONTIG_EVICT,  /* 同上 + 逐塊 evict */
+	MEANS_ALLOC_LIGHT,   /* alloc_pages(GFP_KERNEL|__GFP_NORETRY):輕度;今天 grab_free(false) */
+	MEANS_ALLOC,         /* alloc_pages(GFP_KERNEL|__GFP_RETRY_MAYFAIL):會回收+壓縮;
+	                      * 今天 prefill / refill / grab_free(true) 都用這個 */
+	MEANS_CONTIG_ANY,    /* alloc_contig_pages:隨緣,拿不到指定位置;今天 acquire 1 */
+	MEANS_CONTIG_AT,     /* alloc_contig_range + 系統級 reclaim;今天 acquire 2 */
+	MEANS_CONTIG_EVICT,  /* 同上 + 逐塊 evict;今天 acquire 3 */
 };
 
 struct means_desc {
@@ -408,7 +410,7 @@ struct gather_ctx {
 	bool may_promote;  /* 成功後可否抬高 pool_total */
 };
 
-BACKGROUND = { pool_total, MEANS_ALLOC_CHEAP, false };
+BACKGROUND = { pool_total, MEANS_ALLOC,       false };  /* 現行行為 */
 user_ctx(m) = { pool_want,  m,                 true  };
 ```
 
@@ -430,19 +432,20 @@ static const step steps[] = {
   { "quality",              QUALITY,  target   },
 };
 
-gather_worker():
-	if pool_in_flight() > 0 && release_pending():
-		rearm_self(SHORT_MS)          /* 讓歸還先做完,再決定要不要採集 */
-		return
+/* 一步可以回報「還太早」,而不是由誰去排它。 */
+enum step_result { STEP_DONE, STEP_NOTHING, STEP_DEFER };   /* DEFER 帶 delay_ms */
 
-	progress = false
+gather_worker():
+	progress = false;  soonest_defer = NEVER
 	for s in steps:
 		if stop_requested()                        break
 		if s.needs == cma      && !cma_capable     continue
 		if s.needs == target   && !means_can_target(ctx.max_means) continue
 		if s.needs == user_run && !ctx.may_promote continue   /* 背景不丟 slab */
 		if !deficit_for(s.goal, ctx)               continue
-		progress |= s.run(ctx)
+		r = s.run(ctx)
+		if r == STEP_DEFER   soonest_defer = min(soonest_defer, r.delay)
+		if r == STEP_DONE    progress = true
 
 	pool_sort_if_dirty()
 	pool_shed_excess()
@@ -451,11 +454,14 @@ gather_worker():
 	if ctx.may_promote && held() > pool_total:
 		pool_total = held()           /* 使用者觸發的成功 = 已證明安全 */
 
-	if progress && gathering && !stop_requested():
-		rearm_self(0)                 /* 只重排自己 */
+	if stop_requested():
+		gathering = false;  stop_reason = why_stopped()
+	else if progress:
+		rearm_self(0)                 /* 還在推進 */
+	else if soonest_defer != NEVER:
+		rearm_self(soonest_defer)     /* 沒進展,但有步驟說「太早」 */
 	else:
-		gathering = false
-		stop_reason = why_stopped()
+		gathering = false;  stop_reason = why_stopped()
 ```
 
 **兩件事靠「有進展就重排自己」自然發生,不需要在表裡重複列:**
@@ -465,6 +471,38 @@ gather_worker():
    `drop slab` 自己記 `ctx.slab_dropped`,一輪 gather 只做一次。
 2. **昂貴的 `gather` 只在便宜的都用盡之後才輪到**,因為每步都先問欠債,
    而 cheap intake 會把欠債補掉一部分。
+
+### 6.2b 為什麼是 `STEP_DEFER` 而不是 `next_tasks`
+
+背景那兩階段(先把還回得來的撈回來,撈不滿再去買)之間需要的**不是「排下一個任務」,
+是「現在還太早」**。
+
+`refill` 該等的不是一段時間,是**等 `released` 排空**:頁還在回家路上時就去買替代品,
+等於白買。今天 `refill_delay_ms = 5000` 猜的就是這件事,而五狀態模型讓它可以直接問:
+
+```c
+step_refill(ctx):
+	if pool_in_flight() > 0        return STEP_DEFER(1s);   /* 還有頁在路上,別急著買 */
+	...買替代品...
+```
+
+**條件驅動,延遲只是輪詢間隔**,不是一個猜出來的數字。
+
+`next_tasks` 那種任務佇列更通用,但這裡用不到它多出來的能力:
+
+| | 需要佇列嗎 |
+|---|---|
+| 排序階段 | 不必——步驟表本來就是順序 |
+| 階段間的延遲 | 不必——`STEP_DEFER` 表達得更準(它說的是條件,不是時間) |
+| **後階段需要前階段算出的參數** | **會需要**——但目前沒有這種情況:
+`sweep` 要掃的 released pfn 清單是 pool 的狀態,步驟自己讀得到,不必有人傳給它 |
+
+而且佇列會讓「這個 worker 接下來要做什麼」變成**執行期狀態**,
+teardown 就得多考慮「佇列裡還有東西」;`STEP_DEFER` 只多一個重排延遲,
+仍然是一個 work item、一次取消。
+
+**真的出現「後階段需要前階段的參數」時再加佇列**,而且加的時候要限制
+只能排給自己,否則就是 worker 互相排程換了個寫法。
 
 **表是依成本排序,不是依種類。** 這讓「先撿現成、再解毒窗口、最後才遷移」
 成為結構,而不是每個呼叫者自己記得的順序。
