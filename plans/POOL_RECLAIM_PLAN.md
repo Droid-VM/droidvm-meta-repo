@@ -67,7 +67,69 @@ donate 需要的順序(先關 fd、再趁 mapping 還在把頁拿走)在非自�
 
 ---
 
-## 2. 被推翻的:借出時持有一個 refcount
+## 2b. 【2026-08-07 復活】借出時持有一個 refcount —— 這是「機制上 100%」的唯一走法
+
+下面 §2 在 2026-07-30 否決了這個設計。**那三條理由在今天的證據下全部反轉**,而且它是目前
+唯一能把回收從「偵測」變成「所有權」、因而可以**整個拆掉兜底**的做法。
+
+### 為什麼偵測永遠做不到 100%
+
+今天的回收靠「在 `__free_one_page` 看到那一頁回 buddy」。它會漏,而且漏得有結構性:
+
+- **folio 被拆**:遷移失敗會退回去 `split_folio`,512 個 order-0 free 對 order-9 的 hook
+  完全隱形。模組自己的 scavenger 註解就寫著 *e.g. a split THP freed as order-0s*。
+- served entry 在 free 抵達前被 purge(grace 邊界)。
+- 頁面走了 hook 沒涵蓋的釋放路徑。
+
+所以才需要 `drain_all_pages` + `alloc_contig_range` 的兜底,而兜底**依定義**是 best-effort:
+`alloc_contig_range` 只有在整個 2MB 窗口都還空著時才成功。
+
+### 機制:借出時 `folio_get()`,收回時看 refcount
+
+一個額外的參照讓那一頁同時變成**拆不開、搬不走、別人放不掉**:
+
+| 想擋的事 | 核心怎麼擋 | 位置 |
+|---|---|---|
+| 拆分 | `if (!can_split_folio(folio, &extra_pins)) ret = -EAGAIN;` | `mm/huge_memory.c` |
+| 遷移 | `folio_ref_freeze(folio, expected_count)` 失敗即中止 | `mm/migrate.c:439/458` |
+| 被別人釋放 | `shmem_evict_inode` → `shmem_truncate_range` 只把 folio 移出 page cache 並放掉快取的 ref,**不要求 refcount 歸零** | `mm/shmem.c` |
+
+於是回收不再是「偵測一個可能錯過的釋放」,而是「它一直是我們的,只要知道別人何時放手」:
+**`folio_ref_count(folio) == 1 && folio->mapping == NULL`**。
+
+### §2 的三條否決理由為什麼反轉
+
+| 原否決理由 | 今天 |
+|---|---|
+| 破壞 folio split(punch-hole 需要) | **split 正是損失來源,擋掉它才是目的**。crosvm 上了 `F_SEAL_SHRINK` 且 `--no-balloon`,沒有路徑會 punch-hole |
+| 破壞遷移,連自己的 `alloc_contig_range` scavenger 一起關掉 | **scavenger 就是要拿掉的兜底** |
+| 移除模組唯一的回收事件 | **不再需要事件**——頁面沒離開過我們手上 |
+
+### 附帶好處:釋放側的全系統 tracepoint 可以整個拆掉
+
+頁面永遠不進 buddy,所以 `android_vh_free_one_page_bypass`(全系統每頁回 buddy 都打一次)
+不再需要。**兩個全系統攔截點去掉一個**,只剩配置側的 kretprobe——那是發頁的必要手段。
+
+### 要付的代價(動手前先接受)
+
+- **借出期間的 punch-hole 會靜默失效**:`shmem_undo_range` 對部分範圍會 `split_folio`,
+  失敗就跳過,那段範圍不會被釋放。今天沒有路徑會做,但這**限制未來的 balloon 支援**。
+- **`rmmod` 必須放掉所有持有的 ref**,否則就從「池子漏頁」升級成「真的洩漏」。
+  拆卸序列本來就有註解寫明順序,這一步要進清單。
+- **時機仍是非同步的**:需要一個有界的 sweep(destroy → 行程退出 → 掃 served 表)。
+  但那是**時機不確定,不是結果不確定**——頁面跑不掉,只會晚到。這正是機制與 best-effort 的差別。
+- 客體 RAM 的 swap/reclaim 會失敗——今天已經如此(被 gunyah pin 住)。
+
+### 驗收
+
+- `served == refilled`,且**把 `drain_all_pages` 與 `served_reacquire_free_orphans` 拿掉之後仍然成立**。
+  今天的 0 損失是「有兜底」的 0;這個設計要的是「沒有兜底」的 0。
+- `dbg_take_fail`、`orphan_inuse` 恆為 0。
+- 用 `deploy/gfxstream/poolprobe/ghhr_probe` 確認殘留 entry 為空。
+
+---
+
+## 2. 被推翻的:借出時持有一個 refcount(**已於 §2b 復活,先讀那節**)
 
 提案是模組借出時自己留一個 ref,mapping 消失時 refcount 掉到 1 而不是 0,頁面永不進 buddy,
 連 SIGKILL 都 100% 涵蓋。
