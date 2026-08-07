@@ -417,19 +417,21 @@ user_ctx(m) = { pool_want,  m,                 true  };
 ```c
 static const step steps[] = {
   /* 依「成本」排序,不依「種類」。每步先問自己的 goal 還有沒有欠債。 */
-  /* name                  goal      需要        備註 */
-  { "release idle",         -,        always   },  /* 與 release_worker 共用方法,不是排它 */
-  { "purge expired",        -,        always   },  /* released 逾時 → external */
-  { "shrink pool",          POOL,     always   },  /* §2.2 的去向規則 */
-  { "shrink total",         TOTAL,    cma      },
-  { "cheap intake",         POOL,     always   },  /* ★ 不論 means 都先跑;失敗即停 */
-  { "drop slab",            POOL,     user_run },  /* ★ 只有使用者觸發;每輪一次;不丟 page cache */
-  { "stage-in (total met)", POOL,     cma      },
-  { "stage-in",             POOL,     cma      },
-  { "gather",               POOL,     always   },  /* ★ 真正的 means,唯一分歧的一步 */
-  { "pair fill",            QUALITY,  target   },
-  { "reservoir fill",       TOTAL,    cma      },
-  { "quality",              QUALITY,  target   },
+  /* name                  goal      需要      means(多數是步驟自己的屬性) */
+  { "release idle",         -,        always,   -               },  /* 與 release_worker 共用方法 */
+  { "purge expired",        -,        always,   -               },  /* released 逾時 → external */
+  { "shrink pool",          POOL,     always,   -               },  /* §2.2 的去向規則 */
+  { "shrink total",         TOTAL,    cma,      -               },
+  { "light intake",         POOL,     always,   ALLOC_LIGHT     },  /* 不論 ctx 都先跑;失敗即停 */
+  { "drop slab",            POOL,     user_run, -               },  /* 只有使用者觸發;不丟 page cache */
+  { "stage-in (total met)", POOL,     cma,      -               },
+  { "stage-in",             POOL,     cma,      -               },
+  { "sweep released",       POOL,     always,   CONTIG_AT       },  /* 去 released 的原址搶回來 */
+  { "refill",               POOL,     always,   ALLOC           },  /* in_flight>0 時 DEFER */
+  { "gather",               POOL,     always,   ctx.max_means   },  /* ★ 唯一吃 ctx 的一步 */
+  { "pair fill",            QUALITY,  target,   CONTIG_AT       },
+  { "reservoir fill",       TOTAL,    cma,      -               },
+  { "quality",              QUALITY,  target,   CONTIG_AT       },
 };
 
 /* 一步可以回報「還太早」,而不是由誰去排它。 */
@@ -471,6 +473,49 @@ gather_worker():
    `drop slab` 自己記 `ctx.slab_dropped`,一輪 gather 只做一次。
 2. **昂貴的 `gather` 只在便宜的都用盡之後才輪到**,因為每步都先問欠債,
    而 cheap intake 會把欠債補掉一部分。
+
+### 6.2a hook 怎麼「叫起」worker:一個 ctx + 一條優先權規則
+
+序列**不必傳進去**,因為序列就是步驟表。而且大部分步驟的 means 是**它自己的屬性**,
+不是 ctx 給的:
+
+- `sweep released` 一定是 `CONTIG_AT` —— 它結構上就需要指定位置(去 released 的原址搶)
+- `refill` 一定是 `alloc` 系列 —— 它本來就不指定位置
+- **只有 `gather` 那一步吃 `ctx.max_means`** —— 那才是使用者選的東西
+
+所以 hook 不說「先 A 再 B」,只說「發生了 VM 事件,用背景 ctx 跑你的表」。
+「先掃再買」是自然發生的:`refill` 在 `pool_in_flight() > 0` 時回 `DEFER`,
+還有頁在路上就輪不到它。
+
+**「ctx 變數只能寫一個」不需要 list,需要的是優先權規則:**
+
+```c
+static struct gather_ctx gather_ctx;          /* 只有一個 */
+static bool              gather_active;
+static DEFINE_SPINLOCK(gather_req_lock);
+
+void gather_request(struct gather_ctx req)
+{
+	spin_lock(&gather_req_lock);
+	/* 使用者的請求涵蓋背景的:ceiling 較高(pool_total <= pool_want)、
+	 * means 較強。所以背景請求撞上進行中的使用者請求時,什麼都不必做。 */
+	if (gather_active && gather_ctx.may_promote && !req.may_promote) {
+		spin_unlock(&gather_req_lock);
+		return;
+	}
+	gather_ctx = req;  gather_active = true;
+	spin_unlock(&gather_req_lock);
+	mod_delayed_work(system_wq, &gather_work, 0);
+}
+```
+
+反方向也對:背景正在跑時使用者按 acquire,ctx 直接升級,
+而 worker 每一輪都重讀 ctx,所以進行中的那一輪下次迭代就換成使用者的參數。
+
+`pool_total <= pool_want` 這個前提由 resize 維持(縮小時 `pool_total = newt`),
+所以「使用者請求涵蓋背景請求」不是假設,是不變式。
+
+---
 
 ### 6.2b 為什麼是 `STEP_DEFER` 而不是 `next_tasks`
 
