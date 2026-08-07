@@ -292,21 +292,8 @@ write pool_want_with_cma = N:
 write acquire = m (1..N):
 	if !means_usable(m)                                return -ENOSYS
 	if !any_deficit(user_ctx(m))                       { stop="already at target"; return 0 }
-
-	/* 便宜的一趟,同步做完:先撿現成的。
-	 *
-	 * MEANS_ALLOC_CHEAP 的失敗就是終止條件——不回收不壓縮的配置拿不到,
-	 * 代表現在沒有現成的 order-9 躺著,再試也變不出來。所以這個迴圈
-	 * 「試到第一次失敗為止」,自我限制,通常很短,而且常見情況
-	 * (剛關掉一個 VM、記憶體很乾淨)會在這裡就滿足,連 worker 都不必排。 */
-	while (pool_intake_room(pool_want) > 0)
-		if (!pool_from_ext(MEANS_ALLOC_CHEAP, ORIGIN_USER, 0))
-			break;                                 /* 沒有現成的了 */
-
-	if (!any_deficit(user_ctx(m)))                     { stop="filled cheaply"; return 0 }
-
 	gather_ctx = user_ctx(m);  gathering = true
-	arm(gather_worker, 0);     return 0                /* 剩下的交給 worker */
+	arm(gather_worker, 0);     return 0                /* 一個迴圈都不跑,立刻返回 */
 
 write acquire = 0:
 	gathering = false                                  /* gather 下一輪自己停 */
@@ -340,13 +327,16 @@ gather_sync(&(struct gather_ctx){ pool_want, MEANS_ALLOC, .may_promote = true })
 而且 insmod 參數本身就是使用者授權。`may_promote = true` 讓拿到多少就成為背景的天花板
 ——這正是 `pool_total = i` 那一行今天在做的事,只是換成參數表達。
 
-### 5.4 `drop_slab` 放哪:留在 worker
+### 5.4 清 cache:只綁在使用者觸發的 acquire,而且在 worker 裡
 
-「清 cache」若指 `drop_slab()`,**不要放進 sysfs 寫入路徑**:
-它會丟掉使用者整個 dentry/inode cache,是全系統可感的代價,
-而 §5.2 那趟便宜取得的重點是「快、常常就夠了」。
-先撿現成的;真的不夠再進 worker,由步驟表在確認仍有欠債之後才付那個代價
-(今天也是這樣 gate 的)。
+「清 cache」指 `echo 3 > drop_caches` 的等價物(page cache + dentry + inode),
+比今天只有的 `drop_slab()` 更廣。它的定位是**使用者主動的決定**:
+
+- **背景永遠不做。** 丟掉使用者的整個 page cache 是全系統可感的代價,
+  背景採集的整個存在前提就是「不自作主張動使用者的東西」。
+- **只在使用者按 acquire 時可用**,因為那一下就是授權;而且它確實會顯著提高成功率
+  (order-9 常常是被 page cache 佔住而不是真的沒空間)。
+- **在 worker 裡,不在寫入路徑。** 觸發點只記錄意圖然後返回。
 
 ---
 
@@ -399,18 +389,19 @@ user_ctx(m) = { pool_want,  m,                 true  };
 
 ```c
 static const step steps[] = {
-  /* name                  goal      needs_cma  can_target_only */
-  { "purge expired",        -,        false,     false },  /* released 逾時 → external */
-  { "shrink pool",          POOL,     false,     false },  /* §2.2 的去向規則 */
-  { "shrink total",         TOTAL,    true,      false },
-  { "stage-in (total met)", POOL,     true,      false },
-  { "pair fill",            QUALITY,  true,      TRUE  },
-  { "drop slab",            POOL,     false,     false },
-  { "harvest free",         POOL,     false,     false },
-  { "stage-in",             POOL,     true,      false },
-  { "gather",               POOL,     false,     false },  /* 唯一依 means 分歧的一步 */
-  { "reservoir fill",       TOTAL,    true,      false },
-  { "quality",              QUALITY,  true,      TRUE  },
+  /* 依「成本」排序,不依「種類」。每步先問自己的 goal 還有沒有欠債。 */
+  /* name                  goal      需要        備註 */
+  { "purge expired",        -,        always   },  /* released 逾時 → external */
+  { "shrink pool",          POOL,     always   },  /* §2.2 的去向規則 */
+  { "shrink total",         TOTAL,    cma      },
+  { "cheap intake",         POOL,     always   },  /* ★ 不論 means 都先跑;失敗即停 */
+  { "drop caches",          POOL,     user_run },  /* ★ 只有使用者觸發;每輪一次 */
+  { "stage-in (total met)", POOL,     cma      },
+  { "stage-in",             POOL,     cma      },
+  { "gather",               POOL,     always   },  /* ★ 真正的 means,唯一分歧的一步 */
+  { "pair fill",            QUALITY,  target   },
+  { "reservoir fill",       TOTAL,    cma      },
+  { "quality",              QUALITY,  target   },
 };
 
 gather_worker():
@@ -421,24 +412,36 @@ gather_worker():
 	progress = false
 	for s in steps:
 		if stop_requested()                        break
-		if s.needs_cma && !cma_capable             continue
-		if s.can_target_only && !means[ctx.max_means].can_target  continue
+		if s.needs == cma      && !cma_capable     continue
+		if s.needs == target   && !means_can_target(ctx.max_means) continue
+		if s.needs == user_run && !ctx.may_promote continue   /* 背景不清 cache */
 		if !deficit_for(s.goal, ctx)               continue
 		progress |= s.run(ctx)
 
-	pool_sort_if_dirty()      /* 兩個鍵:!cma_able 到頂端,同塊 pfn 相鄰 */
-	pool_shed_excess()        /* 鬆弛額度用剩的還掉;採集中不動 */
+	pool_sort_if_dirty()
+	pool_shed_excess()
 	if debug                  pool_check()
 
 	if ctx.may_promote && held() > pool_total:
-		pool_total = held()   /* 使用者觸發的成功 = 已證明安全 */
+		pool_total = held()           /* 使用者觸發的成功 = 已證明安全 */
 
 	if progress && gathering && !stop_requested():
-		rearm_self(0)         /* 只重排自己 */
+		rearm_self(0)                 /* 只重排自己 */
 	else:
 		gathering = false
 		stop_reason = why_stopped()
 ```
+
+**兩件事靠「有進展就重排自己」自然發生,不需要在表裡重複列:**
+
+1. **清 cache 之後那批剛釋放的記憶體,由下一輪的 `cheap intake` 撿走。**
+   不必把 cheap intake 列兩次——清 cache 算「有進展」,worker 重排,下一輪從頭跑。
+   `drop caches` 自己記 `ctx.caches_dropped`,一輪 gather 只做一次。
+2. **昂貴的 `gather` 只在便宜的都用盡之後才輪到**,因為每步都先問欠債,
+   而 cheap intake 會把欠債補掉一部分。
+
+**表是依成本排序,不是依種類。** 這讓「先撿現成、再考慮動使用者的東西、最後才遷移」
+成為結構,而不是每個呼叫者自己記得的順序。
 
 ### 6.3 欠債判定 —— 每個 goal 唯一來源
 
