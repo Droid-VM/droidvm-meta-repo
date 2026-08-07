@@ -186,6 +186,24 @@ fallback_sweep=0:  cycle 1  deficit 9->9   del_hit=+2112  released_idle=+2112  a
 驗收:`grow +128MB` → served +64(另加 `v_gpu` 的零頭),`shrink −128MB` → **served 當場 −64、
 `avail` +64、`released_idle` +64**;連續四輪皆收在 `deficit=0 / avail=3072/3072`,兜底 0 次。
 
+### 【量測陷阱,2026-08-08】`deficit` 被 refill 污染,不可用來量回收
+
+`refill_worker` 用 `alloc_pages()` 買**全新的頁**,再 `atomic_inc(&total_refilled)`
+——與 hook 回收共用同一個計數器。所以 `deficit = total_served - total_refilled`
+**分不出「我們的頁回來了」與「我們買了替代品」**。
+
+**受影響**:所有 `refill_enable=1` 下的「deficit 回到 0」皆為模糊,含上面那組 A/B 四輪。
+先前寫的「殘留 9 頁下一輪自己回來」**是錯的**——是 refill 買了 9 頁新的。
+
+**乾淨的指標是 `del_hit` vs `released_idle`**(refill 不走 hook),
+每一輪都精確相等,含純機制那輪的 10454 = 10454。**機制的結論不受影響。**
+
+純機制(`refill_enable=0` + `fallback_sweep=0`)三輪:兩個兜底出手皆 0、`take_fail=0`,
+但 deficit 9→18 累積 9 頁——那是**被 purge 註銷**(從未釋放,故不進 `released_idle`)且無人補買。
+**持有參照消滅的是碎片化損失,不是 purge 損失;refill 仍是機制不是兜底。**
+
+**規則:回收量測一律 `refill_enable=0`,或只看 `del_hit`/`released_idle`。**
+
 ### hook 關閉時不放手(2026-08-07 驗證通過)
 
 釋放參照是一次**交接**:我們放掉最後一份,由 free hook 接住那個 order-9 free、`served_del`、入池。
