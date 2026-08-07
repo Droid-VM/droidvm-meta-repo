@@ -198,6 +198,46 @@ static void reconcile_worker(struct work_struct *w)
 卸掉 hook  →  取消兩個 worker  →  交還所有參照
 ```
 
+### 觸發表:誰在什麼時候動什麼
+
+**hook**(全部只做一件事):
+
+| hook | 動作 |
+|---|---|
+| 配置 kretprobe | `pool_to_served()` — **唯一**碰 pool 的 atomic 方法 |
+| free tracepoint | `pool_from_served()` — 同上 |
+| runtime unshare(`gunyah_rm_mem_reclaim`) | 排 `release_worker` + 排 `reconcile_worker`,**不碰 pool** |
+| VM 關機(`gunyah_vm_release`) | 同上 |
+
+今天 VM 關機的 hook 排了**三樣**東西(pcp drain、refill、開寬限窗)。新版只排 worker,
+`refill` 變成 reconcile 步驟表裡的一步——它本來就是兜底,不該有自己的計時器。
+
+**sysfs 寫入**:
+
+| 寫入 | 方向 | 動作 | 為什麼 |
+|---|---|---|---|
+| `pool_want` | **調小** | 記錄 + 排 reconcile | 還記憶體,無風險,該即時 |
+| `pool_want` | **調大** | **只記錄,不排任何 worker** | 要記憶體有風險,由使用者按 acquire 承擔 |
+| `pool_want_with_cma` | **調小** | 記錄 + 排 reconcile | 同上(reconcile 走 cma→avail→ext) |
+| `pool_want_with_cma` | **調大** | **只記錄,不排** | 同上 |
+| `acquire` | — | 排 reconcile,**開啟採集** | 這就是使用者承擔風險的那一下 |
+
+這張表把先前只存在於程式碼行為裡的風險歸屬**變成明文**:
+背景永遠只維持 `pool_total`(已證明安全的量),擴張一律要人按。
+調大目標值不會讓模組自己去要記憶體——它只是把門檻放在那裡等使用者。
+
+**另一個好處**:今天 `pool_do_resize()` 在 **sysfs 寫入路徑裡同步排掉幾千頁**。
+搬進 worker 之後,寫入立刻返回,長操作不再卡在參數寫入上。
+
+### 為什麼是「hook 排兩個 worker」而不是「release 排 reconcile」
+
+歸還會改變 reconcile 該做的事,所以直覺是 `release_worker` 做完排 `reconcile_worker`。
+**不要**——那就是「worker 排別人」,卸載順序的隱性依賴會長回來。
+
+改成 **hook 一次排兩個**。`reconcile_worker` 先跑時會發現放參照還沒完成、無事可做,
+然後**自我重排**;等 release 做完,下一次 reconcile 就看得到。代價是最多一個 tick 的延遲,
+換到的是「worker 永不互相排程」這條可以絕對執行的規則。
+
 ### 兩個 worker,分野是延遲要求
 
 | worker | 職責 | 觸發 | 特性 |
