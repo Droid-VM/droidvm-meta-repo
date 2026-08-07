@@ -7,6 +7,62 @@
 
 ---
 
+## 0b. 【2026-08-08 修正】四狀態不夠:少了「已放手,尚未定案」
+
+**Linux 沒有 served→avail 這條路。** 歸還的實作是「放掉 → 撈回」:
+`pool_release_idle()` 放掉最後一份參照,頁進入**完整的一般 free 路徑**,
+`free_pages_prepare` 跑完(拆 compound、清 flags、memcg 結算),
+然後在 `__free_one_page` 併入 buddy **之前**,我們的 tracepoint 才有機會攔截。
+
+所以 served 與 avail 之間有一個真實狀態:**我們已經放手,系統還沒決定要不要還我們。**
+四狀態模型沒有名字給它,於是它的存在被誤讀成不變式被破壞。
+
+### 這解釋了「`released_idle` 比 `del_hit` 多 2」
+
+`released_idle` 數的是**離開 served**;`del_hit`/`in_hook` 數的是**經由 hook 回到 avail**。
+四狀態模型假設兩者相等,但中間那個狀態的居民不會出現在任一邊:
+
+```
+released_idle − (in_hook + in_sweep) = 進了中間狀態、沒回來的頁
+SUBBLKS=2 那輪:4226 − (4224 + 0) = 2      ← 一直沒追的那個「差 2」
+```
+
+**不是 bug,是模型缺一個狀態。** 追了半天沒找到,因為它不存在於程式碼裡,存在於模型裡。
+
+### 五狀態
+
+| 狀態 | 意義 |
+|---|---|
+| `served` | 借給 VM |
+| **`released`** | **已放手,去向未定**(命名見下) |
+| `avail` | 在池子裡 |
+| `cma` | 在 CMA 儲備池 |
+| `external` | 系統的,我們已放棄 |
+
+轉換:
+
+```
+served    → released    pool_release_idle():放掉最後一份參照
+released  → avail       reclaim_hook  (依身分精確認領)
+released  → avail       reclaim_sweep (依位址重搶,best-effort,可能拿到別人的)
+released  → external    沒人接到;entry 最終被 purge 註銷
+external  → avail       refill_alloc(買替代品)/ acquire
+```
+
+**兩條 released→avail 的可靠度不同**,這也是為什麼 `in_hook` 與 `in_sweep` 該分開計
+——它們是同一個狀態的兩個出口,一個按身分、一個按位址。
+
+`released → external` 就是 purge 在承認的事,而 `refill_alloc` 是**唯一**能從那個結果復原的路徑
+(買一份新的)。這也回答了「持有參照是否達成 100% 回收」:
+**它消滅的是碎片化造成的 released→external,不是 pin 活得比 VM 久造成的。**
+
+### 命名
+
+`released` 與現有的 `limbo`(CMA 湊塊用的暫存桶)是**完全不同的東西**,不要混用那個詞。
+建議 `released` 或 `handover`;`ext_served_before` 描述準確但拗口。
+
+---
+
 ## 1. 模型
 
 一個 2MB 頁在任一時刻恰好處於四個狀態之一:
