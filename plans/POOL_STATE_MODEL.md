@@ -93,15 +93,29 @@ hook 先 `served_del`(回到 avail 的語意),`pool_want` 的閘門立刻把它�
 `pb_*` 雜湊是一個**導出索引**:它的內容完全由 `page_pool[]` + served 表 + limbo 決定。
 但它同時有兩套維護方式:
 
-- **增量**:`pb_track()` 有 **22 個呼叫點**,散在四個檔案。每條轉換都要手動同步,
-  漏一個就是索引與真相不一致(`gh_sysfs.c.inc:356` 那句註解 `/* stale bit */` 就是在補這種洞)。
-  代價還包括 `pb_lock`、「pool_lock → pb_lock 巢狀」的鎖紀律、`pb_overflow` 溢位處理。
-- **整份重建**:`pb_rebuild()` 已經存在(51 行),從 `page_pool[]` 掃一遍就重建完整索引。
+- **增量**:`pb_track()` 有 **22 個呼叫點**,散在四個檔案,每條狀態轉換都要手動同步。
+  代價還包括 `pb_lock` 與「pool_lock → pb_lock」的巢狀鎖紀律。
+- **整份重建**:`pb_rebuild()` 已經存在(51 行),從 `page_pool[]` 掃一遍就重建完整索引,
+  而且**只有 1 個呼叫者**——它已經被當成偶發修補在用。
 
-**建議:只留重建。** 這個索引只在「決定要不要翻 CMA」時被讀,
-不是每次轉換都要準確;掃 3072 個 slot 是微秒級的事。
-拿掉之後消失的是:22 個同步點、`pb_lock`、巢狀鎖紀律、`pb_overflow`、`/* stale bit */` 這類補丁。
-**能力完全保留**,SUBBLKS>1 的機器照樣算得出完整 pageblock。
+**讀寫比是反的**:22 個寫入點服務 **5 個讀取點**
+(`refill_stat`、`pool_avail_cma_able` 兩個 sysfs、`cma_limbo_intake_cap` 的上限計算、
+limbo 處理的條件、acquire sweep 的一個決策)——**沒有一個在熱路徑上**。
+
+**分歧會發生,而且已經在讀取端被補**:`gh_sysfs.c.inc:356` 的 `/* stale bit */` 實情是
+`pb_find_class_c_avail()` 交回一個 pfn、`pool_extract_pfn()` 卻在池子裡找不到它,
+於是就地清掉位元繼續——索引與真相對不上的現場補丁。
+
+**不是溢位的問題**(先前這裡把 `pb_overflow` 列為代價,查過容量後收回):
+`PB_HASH_MAX = 16384` 個節點,而 `pool_size_max = 4483` 個 2MB 頁在 SUBBLKS=2 時只需
+≤2242 個 pageblock,約 7 倍餘裕,實務上不會觸發。**論據是分歧與同步點,不是溢位。**
+
+**建議:只留重建。** 索引只在「決定要不要翻 CMA」時被讀,不需要每次轉換都準確;
+掃 3072 個 slot 是微秒級的事。拿掉之後消失的是 22 個同步點、`pb_lock`、巢狀鎖紀律,
+以及 `/* stale bit */` 這類補丁。**能力完全保留**,SUBBLKS>1 的機器照樣算得出完整 pageblock。
+
+順帶:SUBBLKS==1 的路徑**本來就是純推導**(`return atomic_read(&pool_count)`,零狀態)。
+所以這項建議實際上是**讓複雜的那個情況追上簡單情況已經在做的事**,不是發明新做法。
 
 ### 3.2 `pool_total` 是導出量,卻被當成儲存量
 
