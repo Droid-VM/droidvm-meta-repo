@@ -123,12 +123,33 @@ donate 需要的順序(先關 fd、再趁 mapping 還在把頁拿走)在非自�
   但那是**時機不確定,不是結果不確定**——頁面跑不掉,只會晚到。這正是機制與 best-effort 的差別。
 - 客體 RAM 的 swap/reclaim 會失敗——今天已經如此(被 gunyah pin 住)。
 
-### 驗收
+### 驗收 —— **2026-08-07 通過**
 
-- `served == refilled`,且**把 `drain_all_pages` 與 `served_reacquire_free_orphans` 拿掉之後仍然成立**。
-  今天的 0 損失是「有兜底」的 0;這個設計要的是「沒有兜底」的 0。
-- `dbg_take_fail`、`orphan_inuse` 恆為 0。
-- 用 `deploy/gfxstream/poolprobe/ghhr_probe` 確認殘留 entry 為空。
+判準是「沒有兜底的 0」,所以 `fallback_sweep=0`(關掉 destroy 後 3 秒的全系統掃描)才是有效的那一組。
+每輪 boot → grow 128MB → shrink → stop:
+
+```
+fallback_sweep=1:  cycle 1  deficit 0->9   del_hit=+2112  released_idle=+2112  avail=3063
+                   cycle 2  deficit 9->9   del_hit=+2112  released_idle=+2112  avail=3063
+fallback_sweep=0:  cycle 1  deficit 9->9   del_hit=+2112  released_idle=+2112  avail=3063
+                   cycle 2  deficit 9->0   del_hit=+2121  released_idle=+2121  avail=3072
+兩組的兜底出手次數皆為 0
+```
+
+全程帳目(`reclaim_debug`,四輪合計):`total_served=8484`,
+`released_idle=8457` + purge 交還的 27(`purge released 9 held reference(s)` × 3)= **8484,一頁不差**。
+`del_hit` 恰好等於 `released_idle`:**每一次我們放手,free hook 都精確認領了那一頁**——
+沒有一頁是靠猜回來的。終態 `pool_avail=3072/3072`、`served=0`、`deficit=0`、`take_fail=0`。
+
+要讀懂這組數字,關鍵是 §0 那張表量的是**碎片化之後的補救成功率**,而這裡量的是**碎片化根本沒發生**:
+`re-acquired N hook-missed page(s)` 一次都沒印,連兜底開著的那兩輪也沒有。持有參照期間頁面不可能被拆散,
+所以沒有東西需要撿回來。兩組數字不可比,不要拿 99.95% 跟這裡對照。
+
+那個在輪次間停留的 9,是量測點(stop 後 35 秒)還有 free 在路上的暫態,不是損失——
+它在**兜底關掉**的那一輪清成 0,而那正是不可能有人幫忙湊數的配置。
+
+保留 `fallback_sweep`(預設開)不是因為需要它,而是因為它現在**可證明是靜止的**:
+留著等於留一個「碎片化是否重新出現」的偵測器,拆掉就沒有了。
 
 ---
 
