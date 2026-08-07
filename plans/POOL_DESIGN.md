@@ -420,14 +420,14 @@ static const step steps[] = {
   /* name                  goal      需要      means(多數是步驟自己的屬性) */
   { "release idle",         -,        always,   -               },  /* 與 release_worker 共用方法 */
   { "purge expired",        -,        always,   -               },  /* released 逾時 → external */
+  { "sweep released",       POOL,     always,   CONTIG_AT       },  /* 拿回自己的:去 released 原址搶 */
+  { "light intake",         POOL,     always,   ALLOC_LIGHT     },  /* 向系統要:最便宜的一級,失敗即停 */
   { "shrink pool",          POOL,     always,   -               },  /* §2.2 的去向規則 */
   { "shrink total",         TOTAL,    cma,      -               },
-  { "light intake",         POOL,     always,   ALLOC_LIGHT     },  /* 不論 ctx 都先跑;失敗即停 */
+
   { "drop slab",            POOL,     user_run, -               },  /* 只有使用者觸發;不丟 page cache */
   { "stage-in (total met)", POOL,     cma,      -               },
   { "stage-in",             POOL,     cma,      -               },
-  { "sweep released",       POOL,     always,   CONTIG_AT       },  /* 去 released 的原址搶回來 */
-  { "refill",               POOL,     always,   ALLOC           },  /* in_flight>0 時 DEFER */
   { "gather",               POOL,     always,   ctx.max_means   },  /* ★ 唯一吃 ctx 的一步 */
   { "pair fill",            QUALITY,  target,   CONTIG_AT       },
   { "reservoir fill",       TOTAL,    cma,      -               },
@@ -549,7 +549,30 @@ teardown 就得多考慮「佇列裡還有東西」;`STEP_DEFER` 只多一個重
 **真的出現「後階段需要前階段的參數」時再加佇列**,而且加的時候要限制
 只能排給自己,否則就是 worker 互相排程換了個寫法。
 
-**表是依成本排序,不是依種類。** 這讓「先撿現成、再解毒窗口、最後才遷移」
+### 6.2c 排序原則:先拿回自己的,再向系統要
+
+不是「配置成本由低到高」。`sweep released` 的機制較貴(`CONTIG_AT` 要指定位置),
+但它**不從系統拿任何東西**——它去把我們自己放掉的頁從原址搶回來;
+而 `light intake` 再便宜,都是向系統要新的。
+
+排好之後,兩個序列**自動從表裡長出來,不必傳、也不必新增 means 等級**:
+
+| ctx | 實際跑的順序 |
+|---|---|
+| 背景 `{pool_total, ALLOC, false}` | `sweep released`(CONTIG_AT)→ `light intake` → `gather`(ALLOC) |
+| 使用者 `{pool_want, m, true}` | `sweep released` → `light intake` → `drop slab` → `gather`(m) |
+
+**「一律先試 light」是一個恆常執行的步驟,不是一個 means 等級。**
+
+這也是為什麼不需要 `light2`:讓 light 排在 `CONTIG_EVICT` 之上,
+會把**「最多可以多兇」(上限)** 和 **「按什麼順序試」(序列)** 塞進同一個序數。
+enum 一旦不再依強度排序,`can_target`、能力檢查、`means <= ctx.max_means`
+全部失去意義。上限歸 ctx,序列歸表,兩者不要混。
+
+`ctx.max_means == ALLOC_LIGHT` 時 `gather` 會與 `light intake` 重複——
+它找不到東西、回 `STEP_NOTHING`,無害。
+
+**表是依「先自己再系統」排序,不是依種類。** 這讓「先撿現成、再解毒窗口、最後才遷移」
 成為結構,而不是每個呼叫者自己記得的順序。
 
 ### 6.3 欠債判定 —— 每個 goal 唯一來源
