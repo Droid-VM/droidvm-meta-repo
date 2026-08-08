@@ -150,6 +150,7 @@ pool_want_with_cma 調小
 int  pool_avail_count(void);
 int  pool_served_count(void);
 int  pool_in_flight(void);       /* released 狀態的居民:放手了、還沒定案 */
+int  pool_served_of_dead_owners(void);  /* 還在 served,但擁有的 VM 已經沒了 */
 int  pool_held(void);            /* I1 左邊 */
 int  pool_held_all(void);        /* I2 左邊 */
 int  pool_cma_able_count(void);  /* Q 的分子;SUBBLKS==1 時 == avail_count */
@@ -594,8 +595,20 @@ void gather_request(struct gather_ctx req)
 
 ```c
 step_refill(ctx):
-	if pool_in_flight() > 0        return STEP_DEFER(1s);   /* 還有頁在路上,別急著買 */
+	/* 「還可能回來的」有兩種,少算任何一種都會買到不該買的:
+	 *   released       已放手,正在 free 路徑上或等 sweep —— 幾微秒到逾時
+	 *   served 但主人已死  pin 還沒放掉,但那個 VM 已經沒了,馬上就要變成 released
+	 * VM 剛關機時大多數頁還在第二種,in_flight 可能是 0 —— 只看它就會立刻去買
+	 * 那些正要回家的頁的替代品。現行 refill_worker 等 mm_users==0 就是在等這個。 */
+	if pool_in_flight() > 0                 return STEP_DEFER(1s);
+	if pool_served_of_dead_owners() > 0     return STEP_DEFER(1s);
 	...買替代品...
+```
+
+所以查詢方法要多一個:
+
+```c
+int pool_served_of_dead_owners(void);   /* 主人已退出、pin 還沒放掉的 served 頁 */
 ```
 
 **條件驅動,延遲只是輪詢間隔**,不是一個猜出來的數字。
