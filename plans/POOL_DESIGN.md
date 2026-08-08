@@ -437,8 +437,13 @@ struct step {
 	enum step_result (*run)(const struct gather_ctx *ctx);
 };
 
-/* 排序原則:① 先把帳算清 ② 拿回自己的 ③ 才向系統要,最便宜的先。
- * static const —— 沒有任何人寫它。序列就是這張表的順序。 */
+/* 排序原則:依「代價落在誰身上」——
+ *   ① 誰都不痛(收回自己放掉的、記帳)
+ *   ② 系統,便宜   ③ 系統,昂貴   ④ 我們的借用者(從儲備池拿回 = 逐出使用中的 app)
+ * 例外:I2 已達標時再向外拿會衝破它,所以那種情況下 ④ 必須排第一(stage-in total-met)。
+ *
+ * static const —— 沒有任何人寫它。序列就是這張表的順序。
+ * 每步的 means 若在此核心上不可用,該步自動停用(見 §6.2d),不必寫進 needs。 */
 static const struct step steps[] = {
 /*   name                   goal          needs         means              run                        */
    { "release idle",        GOAL_NONE,    NEEDS_ALWAYS, MEANS_NONE,        step_release_idle        },
@@ -446,13 +451,17 @@ static const struct step steps[] = {
    { "shrink pool",         GOAL_POOL,    NEEDS_ALWAYS, MEANS_NONE,        step_shrink_pool         },
    { "shrink total",        GOAL_TOTAL,   NEEDS_CMA,    MEANS_NONE,        step_shrink_total        },
 
+   /* ①誰都不痛 + I2 已達標時唯一合法的補法 */
    { "sweep released",      GOAL_POOL,    NEEDS_ALWAYS, MEANS_CONTIG_AT,   step_sweep_released      },
    { "stage-in total-met",  GOAL_POOL,    NEEDS_CMA,    MEANS_NONE,        step_stage_in_total_met  },
-   { "stage-in",            GOAL_POOL,    NEEDS_CMA,    MEANS_NONE,        step_stage_in            },
 
+   /* ②系統便宜 → ③系統昂貴 */
    { "light intake",        GOAL_POOL,    NEEDS_ALWAYS, MEANS_ALLOC_LIGHT, step_light_intake        },
    { "drop slab",           GOAL_POOL,    NEEDS_USER,   MEANS_NONE,        step_drop_slab           },
    { "gather",              GOAL_POOL,    NEEDS_ALWAYS, MEANS_CTX,         step_gather              },
+
+   /* ④最後才逐出自己的借用者 */
+   { "stage-in",            GOAL_POOL,    NEEDS_CMA,    MEANS_NONE,        step_stage_in            },
 
    { "pair fill",           GOAL_QUALITY, NEEDS_TARGET, MEANS_CONTIG_AT,   step_pair_fill           },
    { "reservoir fill",      GOAL_TOTAL,   NEEDS_CMA,    MEANS_NONE,        step_reservoir_fill      },
@@ -511,6 +520,26 @@ gather_worker():
    `drop slab` 自己記 `ctx.slab_dropped`,一輪 gather 只做一次。
 2. **昂貴的 `gather` 只在便宜的都用盡之後才輪到**,因為每步都先問欠債,
    而前面那些會把欠債補掉一部分。
+
+### 6.2d 步驟自己的 means 也要能力檢查
+
+`needs` 管的是 cma / target / user,**唯獨沒管「這步自己的手段在這個核心上存不存在」**。
+`sweep released` 是 `NEEDS_ALWAYS` 但用 `CONTIG_AT`——沒有 `alloc_contig_range` 的裝置上
+它每次都會失敗。
+
+修法不是往 `needs` 塞更多列舉,而是**自動檢查**:
+
+```c
+if (s->means != MEANS_NONE && !means_usable(effective_means(s, ctx)))
+	continue;      /* 這步的手段在這台機器上不存在 */
+```
+
+`effective_means(s, ctx)` = `s->means == MEANS_CTX ? ctx->max_means : s->means`。
+能力矩陣載入時算一次,所以這是一次比較。
+
+**這樣「缺能力 = 那一步停用」是結構性的**,不必每加一步就想起來要不要補一列 `needs`。
+
+---
 
 ### 6.2a hook 怎麼「叫起」worker:一個 ctx + 一條優先權規則
 
@@ -587,11 +616,21 @@ teardown 就得多考慮「佇列裡還有東西」;`STEP_DEFER` 只多一個重
 **真的出現「後階段需要前階段的參數」時再加佇列**,而且加的時候要限制
 只能排給自己,否則就是 worker 互相排程換了個寫法。
 
-### 6.2c 排序原則:先拿回自己的,再向系統要
+### 6.2c 排序原則:依「代價落在誰身上」
 
-不是「配置成本由低到高」。`sweep released` 的機制較貴(`CONTIG_AT` 要指定位置),
-但它**不從系統拿任何東西**——它去把我們自己放掉的頁從原址搶回來;
-而 `light intake` 再便宜,都是向系統要新的。
+不是「配置成本由低到高」,也不是單純「先自己再系統」——**`stage-in` 拿回的雖然是自己的頁,
+但那些頁正在被其他 app 使用,拿回來是逐出他們。** 所以軸是代價的歸屬:
+
+| | 代價落在 | 步驟 |
+|---|---|---|
+| ① | **誰都不痛** | `release idle`、`purge`、`sweep released`(收回自己放掉、沒人在用的) |
+| ② | 系統,便宜 | `light intake` |
+| ③ | 系統,昂貴 | `gather`(遷移/回收/evict) |
+| ④ | **我們的借用者** | `stage-in`(從儲備池拿回 = 逐出使用中的 app) |
+
+**例外:I2 已達標時,再向外拿會衝破它**,那種情況下 ④ 是唯一合法的補法,必須排第一
+——這就是 `stage-in total-met` 與 `stage-in` 是**兩步而不是一步**的原因。
+我一度把它們並排在一起,等於把現行 Phase S 與 S2 的差別抹掉了。
 
 排好之後,兩個序列**自動從表裡長出來,不必傳、也不必新增 means 等級**:
 
