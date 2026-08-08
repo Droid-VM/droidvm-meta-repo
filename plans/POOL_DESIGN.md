@@ -243,6 +243,56 @@ bool pool_check(void);   /* debug=1:驗 G 與 I1;破了就印 */
 
 ## 5. 觸發
 
+### 5.0 狀態變數與入口點(先把名字定死)
+
+worker 側的**全部**可寫狀態,沒有別的:
+
+```c
+/* ── gather ─────────────────────────────────────────────── */
+static struct gather_ctx  g_ctx;           /* 這一輪的請求參數 */
+static bool               g_active;        /* 有請求進行中 */
+static bool               g_stop;          /* 使用者寫了 acquire=0 */
+static bool               g_slab_dropped;  /* 本輪已丟過 slab(每輪一次) */
+static const char        *g_stop_reason;   /* 給 sysfs 讀 */
+static DEFINE_SPINLOCK(g_lock);            /* 保護以上 */
+static struct delayed_work g_work;
+
+/* ── release ────────────────────────────────────────────── */
+static int                 rel_tries;      /* 退避計數 */
+static struct delayed_work rel_work;
+```
+
+**兩個入口點,不是四個。** `arm` 這個詞在前幾版被我用得含糊,定死如下:
+
+```c
+/* release_worker 不帶參數,所以只需要排程 */
+void release_arm(int delay_ms)
+{
+	mod_delayed_work(system_wq, &rel_work, msecs_to_jiffies(delay_ms));
+}
+
+/* gather 一定要帶 ctx,所以「設參數」與「排程」是同一個動作,沒有只做一半的版本 */
+void gather_request(struct gather_ctx req, int delay_ms)
+{
+	spin_lock(&g_lock);
+	/* 使用者的請求涵蓋背景的(ceiling 較高、means 較強),
+	 * 所以背景請求撞上進行中的使用者請求時,什麼都不必做。 */
+	if (g_active && g_ctx.may_promote && !req.may_promote) {
+		spin_unlock(&g_lock);
+		return;
+	}
+	g_ctx = req;  g_active = true;  g_stop = false;  g_slab_dropped = false;
+	spin_unlock(&g_lock);
+	mod_delayed_work(system_wq, &g_work, msecs_to_jiffies(delay_ms));
+}
+```
+
+worker 內部要再跑一輪時用 `mod_delayed_work(&g_work, ...)` **不動 ctx**——
+這就是前面說的「只重排自己」。
+
+`g_slab_dropped` 屬於**這一輪**而不是請求本身,所以放在 worker 狀態裡、
+由 `gather_request()` 清掉,不是 `gather_ctx` 的欄位。
+
 ### 5.1 hook —— 一條或零條
 
 ```c
@@ -267,13 +317,13 @@ free_one_page_cb(page, order, *bypass):
 /* 這兩個不碰 pool */
 vm_destroy_pre(regs):
 	vm_owner_note_gone(current->mm)
-	arm(release_worker, 0)
-	arm(gather_worker,  SETTLE_MS)
+	release_arm(0)
+	gather_request(BACKGROUND, SETTLE_MS)
 
 mem_reclaim_pre(regs):                                  /* runtime unshare */
 	if pool_served_count() == 0         return
-	arm(release_worker, RELEASE_FIRST_MS)
-	arm(gather_worker,  SETTLE_MS)
+	release_arm(RELEASE_FIRST_MS)
+	gather_request(BACKGROUND, SETTLE_MS)
 ```
 
 **hook 不排 hook,不做政策判斷。** 今天的 free hook 在 IRQ 關閉下做了
@@ -284,22 +334,21 @@ mem_reclaim_pre(regs):                                  /* runtime unshare */
 ```c
 write pool_want = N:
 	old = want;  want = clamp(N, 0, size_max)
-	if N < old   arm(gather_worker, 0)        /* 還記憶體:即時 */
+	if N < old   gather_request(BACKGROUND, 0)     /* 還記憶體:即時 */
 	/* N > old:只記錄。要人按 acquire。 */
 
 write pool_want_with_cma = N:
 	old = want_all;  want_all = clamp(N)
-	if N < old   arm(gather_worker, 0)
+	if N < old   gather_request(BACKGROUND, 0)
 	/* 同上 */
 
 write acquire = m (1..N):
 	if !means_usable(m)                                return -ENOSYS
 	if !any_deficit(user_ctx(m))                       { stop="already at target"; return 0 }
-	gather_ctx = user_ctx(m);  gathering = true
-	arm(gather_worker, 0);     return 0                /* 一個迴圈都不跑,立刻返回 */
+	gather_request(user_ctx(m), 0);  return 0          /* 一個迴圈都不跑,立刻返回 */
 
 write acquire = 0:
-	gathering = false                                  /* gather 下一輪自己停 */
+	spin_lock(&g_lock);  g_stop = true;  spin_unlock(&g_lock)   /* gather 下一輪自己停 */
 
 write reclaim_enable = 0/1:
 	attach/detach free hook                            /* E2 據此決定能不能交接 */
@@ -383,21 +432,21 @@ release_worker 回應 VM 的動作,gather_worker 回應目標值的改變。
 ### 6.1 `release_worker` —— 要快
 
 ```c
-release_worker():
+release_worker(work):
 	if !free_hook_attached():
-		return         /* 沒人接手就不放手:放了會進 buddy 而 entry 留著,
-		                * 重新啟用後還可能把別人的頁匹配進池子 */
+		return          /* 沒人接手就不放手:放了會進 buddy 而 entry 留著,
+		                 * 重新啟用後還可能把別人的頁匹配進池子 */
 
-	released = pool_release_idle()     /* 排乾:一輪沒放掉任何頁才停 */
+	released = pool_release_idle()      /* 排乾:一輪沒放掉任何頁才停 */
 	if released > 0:
-		tries = 0
+		rel_tries = 0
 		return
 
-	/* 一頁都沒閒置:RM 往返與 unpin 可能還在路上。退避重看,有上限 */
-	if ++tries < RELEASE_TRIES:
-		rearm_self(RELEASE_FIRST_MS << tries)
+	/* 一頁都沒閒置:VM 的 pin 還沒放掉。退避重看,有上限 */
+	if ++rel_tries < RELEASE_TRIES:
+		release_arm(RELEASE_FIRST_MS << rel_tries)
 	else:
-		tries = 0
+		rel_tries = 0                /* 放棄這一串;下次事件再從頭 */
 ```
 
 ### 6.2 `gather_worker` —— 可長跑、可取消
@@ -472,33 +521,39 @@ static const struct step steps[] = {
 /* 一步可以回報「還太早」,而不是由誰去排它。 */
 enum step_result { STEP_DONE, STEP_NOTHING, STEP_DEFER };   /* DEFER 帶 delay_ms */
 
-gather_worker():
+gather_worker(work):
+	spin_lock(&g_lock);  ctx = g_ctx;  stop = g_stop;  spin_unlock(&g_lock)
 	progress = false;  soonest_defer = NEVER
+
 	for s in steps:
-		if stop_requested()                        break
-		if s.needs == cma      && !cma_capable     continue
-		if s.needs == target   && !means_can_target(ctx.max_means) continue
-		if s.needs == user_run && !ctx.may_promote continue   /* 背景不丟 slab */
-		if !deficit_for(s.goal, ctx)               continue
-		r = s.run(ctx)
-		if r == STEP_DEFER   soonest_defer = min(soonest_defer, r.delay)
-		if r == STEP_DONE    progress = true
+		if stop                                          break
+		if s.needs == NEEDS_CMA    && !cma_capable       continue
+		if s.needs == NEEDS_TARGET && !means_can_target(ctx.max_means)  continue
+		if s.needs == NEEDS_USER   && !ctx.may_promote   continue   /* 背景不丟 slab */
+		if s.means != MEANS_NONE   && !means_usable(effective_means(s, ctx))  continue
+		if s.goal  != GOAL_NONE    && !deficit_for(s.goal, ctx)      continue
+
+		r = s.run(&ctx)
+		if r.result == STEP_DEFER   soonest_defer = min(soonest_defer, r.delay_ms)
+		if r.result == STEP_DONE    progress = true
 
 	pool_sort_if_dirty()
 	pool_shed_excess()
-	if debug                  pool_check()
+	if debug  pool_check()
 
-	if ctx.may_promote && held() > pool_total:
-		pool_total = held()           /* 使用者觸發的成功 = 已證明安全 */
+	if ctx.may_promote && pool_held() > pool_total:
+		pool_total = pool_held()      /* 使用者觸發的成功 = 已證明安全 */
 
-	if stop_requested():
-		gathering = false;  stop_reason = why_stopped()
+	spin_lock(&g_lock)
+	if g_stop:
+		g_active = false;  g_stop_reason = "stopped by user"
 	else if progress:
-		rearm_self(0)                 /* 還在推進 */
+		mod_delayed_work(system_wq, &g_work, 0)              /* 還在推進 */
 	else if soonest_defer != NEVER:
-		rearm_self(soonest_defer)     /* 沒進展,但有步驟說「太早」 */
+		mod_delayed_work(system_wq, &g_work, soonest_defer)  /* 有步驟說「太早」 */
 	else:
-		gathering = false;  stop_reason = why_stopped()
+		g_active = false;  g_stop_reason = describe_why()    /* 真的沒事可做了 */
+	spin_unlock(&g_lock)
 ```
 
 每一欄的意義:
@@ -555,27 +610,9 @@ if (s->means != MEANS_NONE && !means_usable(effective_means(s, ctx)))
 「先掃再買」是自然發生的:`refill` 在 `pool_in_flight() > 0` 時回 `DEFER`,
 還有頁在路上就輪不到它。
 
-**「ctx 變數只能寫一個」不需要 list,需要的是優先權規則:**
-
-```c
-static struct gather_ctx gather_ctx;          /* 只有一個 */
-static bool              gather_active;
-static DEFINE_SPINLOCK(gather_req_lock);
-
-void gather_request(struct gather_ctx req)
-{
-	spin_lock(&gather_req_lock);
-	/* 使用者的請求涵蓋背景的:ceiling 較高(pool_total <= pool_want)、
-	 * means 較強。所以背景請求撞上進行中的使用者請求時,什麼都不必做。 */
-	if (gather_active && gather_ctx.may_promote && !req.may_promote) {
-		spin_unlock(&gather_req_lock);
-		return;
-	}
-	gather_ctx = req;  gather_active = true;
-	spin_unlock(&gather_req_lock);
-	mod_delayed_work(system_wq, &gather_work, 0);
-}
-```
+**「ctx 變數只能寫一個」不需要 list,需要的是優先權規則**——見 §5.0 的 `gather_request()`:
+使用者的請求涵蓋背景的(ceiling 較高、means 較強),所以背景請求撞上進行中的使用者請求時,
+什麼都不必做。
 
 反方向也對:背景正在跑時使用者按 acquire,ctx 直接升級,
 而 worker 每一輪都重讀 ctx,所以進行中的那一輪下次迭代就換成使用者的參數。
