@@ -30,6 +30,35 @@
 `released_idle`(離開 served)與 `in_hook`(到達 avail)的差就會被誤讀成不變式被破壞
 ——那個誤讀在 2026-08-08 之前耗掉一整天。
 
+### 1.1b `released` 的頁在哪裡:仍在 served 表,只是多一個時間戳
+
+`pool_release_idle()` 只放掉參照,**entry 是 hook 抓到時才移除**(或逾時被 purge)。
+所以今天的 `served_count` 混了兩種狀態:
+
+```
+served_count(今天) = 真正 served(VM 還抓著) + released(已放手、未定案)
+```
+
+而 `released_idle − (in_hook + in_sweep)` 那個手算式,算的正是後半。
+
+實作:entry 加一個時間戳,一次解決三件事——
+
+```c
+struct served_node {
+	unsigned long pfn;
+	pid_t         tgid;
+	u32           released_at;   /* 0 = 還在 served;否則 = 放手當下的 jiffies */
+	u16           next;
+};
+
+pool_served_count() = released_at == 0 的 entry 數
+pool_in_flight()    = released_at != 0 的 entry 數
+purge expired       = released_at != 0 && now - released_at > GRACE
+```
+
+**`GRACE` 因此有了正當名字:它是 `released` 狀態的存活上限**,
+不是一個看起來像啟發式的數字(今天叫 `RECONCILE_GRACE_MS`)。
+
 ### 1.2 `cma_able` 是 `avail` 的屬性,不是狀態
 
 一頁能否翻進 CMA 取決於**鄰居**:CMA pageblock 可能大於 2MB
@@ -743,6 +772,7 @@ deficit_for(QUALITY, ctx) = pool_cma_able_count() < pool_avail_count()
   所以降到 cheap 是把實作拉回設計意圖。但它**會讓背景補得比較慢**、碎片化時補不滿。這是刻意的,
   但**要先量**:現在背景每輪補幾頁,換成不回收之後補幾頁。
   差多少決定使用者多久要按一次按鈕——這是唯一會被直接感受到的取捨。
-- **`pool_in_flight()` 要能分辨「還在路上」與「已經丟了」**。前者會自己消失,
-  後者要等逾時。可能需要進入該狀態的時間戳,而不是只有計數。
+- ~~`pool_in_flight()` 要能分辨「還在路上」與「已經丟了」~~ **已定案**:
+  served entry 加 `released_at` 時間戳(§1.1b)。分辨方式是時間戳,不是另一個計數器;
+  同一個欄位也讓 `purge expired` 有定義。
 - **`released` 的命名**:`released` / `handover` / `ext_served_before` 未定。
