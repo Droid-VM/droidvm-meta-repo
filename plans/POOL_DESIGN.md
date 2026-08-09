@@ -6,6 +6,67 @@
 
 ---
 
+## 0. 兩張圖
+
+### 0.1 一個 2MB page 的狀態轉移
+
+```mermaid
+stateDiagram-v2
+    [*] --> external
+    external --> avail: E6 from_ext(acquire/refill/prefill)\n遷移/回收/撿現成
+    avail --> served: E1 serve\n(hook,atomic)
+    served --> released: E2 release\n放掉保護參照(release_worker)
+    released --> avail: E3a catch(hook,依 pfn 精確)\nE3b sweep(依位址,best-effort)
+    released --> external: purge\nGRACE 逾時,參照早已放掉
+    avail --> cma: E4a flip / to_cma\navail(cma_able)→儲備池
+    cma --> avail: E4b from_cma / stage_in\n遷移借用者出去(會失敗)
+    cma --> external: drop_reservoir / rmmod\n翻標籤+刪簿記,不逐出(保證成功)
+    avail --> external: E5 shed\n從頂端丟(先丟 !cma_able)
+    served --> external: rmmod\n殘餘 served(逾時放棄/pin 隨 VM)
+```
+
+`cma_able` 是 `avail` 的屬性(整個 CMA pageblock 的每個 2MB 子塊都在 avail 才算),不是狀態。
+
+### 0.2 整體架構(誰用誰)
+
+```mermaid
+flowchart TD
+    subgraph consumer[consumer 層]
+        hooks["hooks<br/>serve · free · vm_boot/shutdown/unshare"]
+        sysfs["sysfs write<br/>pool_want(_with_cma) · acquire"]
+    end
+    subgraph worker[worker 層]
+        relw[release_worker]
+        adjw[adjust_worker]
+    end
+    poolapi["pool api<br/>to_served · catch · release_idle · from/to_cma<br/>cma_to_ext · from_ext · to_ext · purge_* · 查詢"]
+    kapi["kapi<br/>alloc_pages · alloc_contig_range · set_pageblock_migratetype<br/>kretprobe/tracepoint · reclaim/migrate · drop_slab"]
+    unlockcma["unlock_cma(獨立)<br/>放寬 ALLOC_CMA,讓一般 movable 配置能落進 CMA<br/>= 讓儲備池真的被別的 app 借用"]
+
+    hooks -->|serve/free 直呼(atomic)| poolapi
+    hooks -->|vm 事件:只 arm| worker
+    sysfs -->|acquire/縮小:adjust_try| worker
+    sysfs -->|讀查詢| poolapi
+    worker --> poolapi
+    poolapi --> kapi
+    unlockcma -->|只用| kapi
+
+    classDef indep fill:#fff3cd,stroke:#c90;
+    class unlockcma indep;
+```
+
+**四層 + 一個旁路**:
+- **kapi**:核心符號封裝(載入時解析,缺就降級)。誰都不直接碰核心,只碰 kapi。
+- **pool api**:狀態機的**唯一**改動點,持三把鎖(§2),把 §0.1 每條邊做成一個方法。只用 kapi。
+- **worker**:release / adjust,只用 pool api,彼此不互相排程(§6)。
+- **consumer**:hook 與 sysfs。**serve/free hook 在 atomic 上下文直呼兩個 atomic-safe 的 pool 方法**;
+  vm 事件與 sysfs 的 acquire/縮小只「arm」worker;sysfs 讀直接查 pool。
+- **unlock_cma(旁路,只用 kapi)**:放寬廠商核心的「一般 movable 配置不進 CMA」限制,
+  否則儲備池是「監護著、但沒 app 借得到」的兩頭空。**它不碰 pool、不碰 worker、不參與狀態機**——
+  純粹讓 `cma` 狀態有存在價值。best-effort、無回報通道,做成獨立開關,細節見 §11。
+
+---
+
 ## 1. 狀態與不變式(不變,壓縮重述)
 
 | 狀態 | 意義 | 在哪個結構 |
@@ -486,7 +547,33 @@ rmmod:                        /* 全同步。worker 停掉之後就沒有 worker
 | 17 | **調小 want_cma 先 clamp pool_total** | 否則 `ctx.want_cma=max(pool_total,真值)` 用回舊高值,SHRINK 縮不動 |
 | 18 | **執行期 cma→ext = stage_in+shed 組合**,無直達邊(直達只在 rmmod) | 執行期意圖=拿回記憶體(逐出借用者);rmmod 意圖=停止監護(不逐出)。回答「cma→ext 如何引入 adjust」 |
 | 19 | **want_cma 縮走 cma→ext(drop_reservoir),不走 cma→avail→ext** | 前兩輪用「逐塊 reclaim+shed 攤平逐出」解 avail 暴脹,是為不必要的逐出想辦法。縮儲備池不需頁回池子:翻標籤回 MOVABLE+刪簿記即可,借用者留著頁,零遷移零逐出零壓力。cma→avail(會失敗)只剩「pool 短、total 已足」補池子一個用途 |
-| 20 | **cma→avail 會在 kapi 層失敗**(遷移借用者:短期 pin/writeback/無去處),stage_in 有 hp 給上限、內部輪替避免撞同一塊 | 舊碼 cma_block_demolish 已回 -errno,v2 設計原本當它必成:會永遠空轉同一個 stuck 塊、且縮不動時無聲。stuck 塊留在 cma 仍是「我們的」,只是這輪無法變現;shrink 因此可能 partial,要回報 |## 10. 明確不做 / 待決
+| 20 | **cma→avail 會在 kapi 層失敗**(遷移借用者:短期 pin/writeback/無去處),stage_in 有 hp 給上限、內部輪替避免撞同一塊 | 舊碼 cma_block_demolish 已回 -errno,v2 設計原本當它必成:會永遠空轉同一個 stuck 塊、且縮不動時無聲。stuck 塊留在 cma 仍是「我們的」,只是這輪無法變現;shrink 因此可能 partial,要回報 |
+
+---
+
+## 10. unlock_cma(旁路元件)
+
+E4a 把 avail 翻進 `cma`,但**廠商核心不會把一般 movable 配置放進 CMA**——只有明確帶
+`__GFP_CMA` 的請求(實務上是廠商自家驅動)進得去。少了這塊,儲備池是「監護著、沒人借得到」,
+`pool_want_with_cma` 那部分兩頭空。
+
+作法:在配置路徑的 flags 調整點掛 vendor hook,對**單純 MOVABLE 請求**(page cache、mTHP anon)
+放寬 `ALLOC_CMA`。判定用公開 `__GFP_*` 巨集組合,不讀未匯出的 `page_group_by_mobility_disabled`。
+
+**為什麼獨立**:它只用 kapi、不碰 pool/worker、不是狀態機的任何一條邊。它的作用是讓 `cma` 狀態
+「真的會被借用」,而不是搬動任何 page。所以放在旁路,能單獨開關、單獨失效。
+
+**它是賭注不是功能**:沒有 API 能問「這核心吃不吃」或「掛上去有沒有生效」——`ALLOC_CMA` 是
+`mm/internal.h` 的 `#define`,不帶 BTF、preflight 驗不到,放寬後也無回傳值。所以:
+- 獨立開關,與狀態機解耦;關掉其餘照常。
+- 綁核心版本區間,超出不啟用。
+- **驗證由使用者做**:開功能→建 CMA 塊→跑壓測→看 lent 有沒有上升。模組不印「已啟用」假裝知道結果,
+  只能報「我掛上去了」。
+- 前置:儲備池已建好且採集靜止才放行(建池/acquire 期間放行會與採集搶同一批空閒頁)。
+
+---
+
+## 11. 明確不做 / 待決
 
 - 不做 tree/雙池(atomic 插入點);不宣稱物件化防競態(它買到的是維護點收斂)。
 - 排序照舊在 adjust_worker 輪尾,不是獨立 worker。
