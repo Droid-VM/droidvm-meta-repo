@@ -99,6 +99,17 @@ void pool_cand_flush(void);              /* 候選清空:全部 free 回 buddy *
 void pool_sort_if_dirty(void);
 bool pool_check(void);                   /* debug=1:驗 G/I1,破了就印 */
 
+/* ── rmmod 專用(同步,不經 worker)─────────────────────── */
+int  pool_served_to_ext_all(void);  /* 每個 entry:
+                                     *   released_at != 0 → 只刪 entry。參照早已放掉,
+                                     *     對 Linux 而言那頁已經是 ext,不需要任何路徑。
+                                     *   released_at == 0 → put_page + 刪 entry
+                                     *     (SERVED_PURGED,記 purge_log)。頁若仍被 VM pin,
+                                     *     它跟著 VM 活,VM 退出後自然回 buddy——不逐出誰。 */
+int  pool_cma_to_ext_all(void);     /* 放棄監護:block 標籤翻回 MOVABLE 即完成。
+                                     * 借用中的頁留給借用者(本來就是 movable),
+                                     * 空閒的隨標籤回一般 freelist。不逐出、不遷移。 */
+
 /* ── 查詢 ─────────────────────────────────────────────── */
 int pool_avail(void); pool_served(void); pool_in_flight(void);
 int pool_held(void);                     /* avail + served 表全部(含 in_flight) */
@@ -114,8 +125,7 @@ int pool_cma(void); pool_noncma_able(void);
 ```
 action:
   insmod   → 初始化 pool → 掛 hook → adjust_trigger(approach=alloc_pages)   /* prefill 非同步 */
-  rmmod    → pool_want=0, pool_want_with_cma=0 → adjust_trigger → 等 drain(有上限)
-             → 卸 hook → 停兩個 worker → 殘餘 served 逐一 SERVED_PURGED → free avail
+  rmmod    → 卸 hook → 停兩個 worker → 同步 *→ext(§8),不經 worker
 
 hook(全部「一個 pool 方法或只碰 run」,不做政策):
   vm_boot      → pid_register(current)                       /* 只動 pid_lock */
@@ -336,17 +346,24 @@ insmod:
 	adjust_trigger(BACKGROUND)            /* prefill 非同步:cheap 一輪 64 頁,
 	                                       * 開機記憶體乾淨,幾秒內到位 */
 
-rmmod:
-	pool_want = 0;  pool_want_with_cma = 0
-	adjust_trigger(BACKGROUND)            /* 同一套機器做 drain:
-	                                       * stage_in 拆光儲備池 → shed 還光 avail */
-	等 run 歸 0(有上限,例如 30s)
-	卸全部 hook → release_run(0)、adjust_run(0)、cancel_work_sync ×2
-	served 表殘餘(還被 pin 的)逐一 SERVED_PURGED   /* 交還參照,絕不能帶走 */
-	free 殘餘 avail(drain 沒做完的部分)+ 候選 FIFO
+rmmod:                        /* 全同步。worker 停掉之後就沒有 worker 可用了 */
+	卸全部 hook                 /* 不再有新 serve/catch/VM 事件 */
+	release_run(0);  adjust_run(0);  cancel_work_sync ×2
+
+	pool_served_to_ext_all()   /* served→ext;released 只清 entry(頁對 Linux 早已是 ext) */
+	pool_cma_to_ext_all()      /* cma→ext:放棄監護,不逐出任何人 */
+	pool_cand_flush()          /* 候選 FIFO → buddy */
+	for each avail: __free_pages()      /* avail→ext,分批 + cond_resched */
+	釋放結構
 ```
 
 卸載順序仍是鐵律:**先卸 hook,再停 worker,最後交還參照**。
+
+**served→ext 與 cma→ext 是 rmmod 專用的直達邊**,不違反「avail 是樞紐」:
+執行期的縮小走 `cma→avail→ext`,因為那是**要把記憶體拿回來**(逐出借用者、收回、再釋放);
+rmmod 走直達,因為意圖相反——**停止監護**,借用者留著他們正在用的頁,誰都不被逐出。
+兩種意圖、兩條路,同名不同事。也因此 rmmod 的 `*→ext` 全部同步完成:
+它不需要逐出、不需要遷移,每一步都是 O(entries) 的簿記加 free,沒有慢的部分。
 
 ---
 
