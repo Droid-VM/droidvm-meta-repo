@@ -185,11 +185,9 @@ init_ctx(profile):
 	if (profile == USER || profile == INSMOD):
 		want     = pool_want                 /* 真值 */
 		want_cma = pool_want_with_cma
-		is_user  = true
 	else:                                    /* BACKGROUND */
 		want     = pool_want                 /* I1 份額用真值(見下方【詮釋】) */
 		want_cma = max(pool_total, pool_want_with_cma)   /* 至少維持已證明過的高水位 */
-		is_user  = false
 	/* pool_total = 曾成功過的最大總監護頁數(held_cma 高水位),
 	 * 由 USER run 結束時更新(見 §7 輪尾),使用者縮小目標時 clamp 下降(既有行為)。
 	 * 【詮釋】使用者原話「背景代入 max(pool_total,真值)」對 want / want_cma 皆可讀,
@@ -233,7 +231,6 @@ struct adjust_ctx {
 	int   run;
 	int   want;          /* 這一輪瞄準的 I1 目標(pool 份額),快照,輪內不變 */
 	int   want_cma;      /* 這一輪瞄準的 I2 目標(總監護),快照,輪內不變 */
-	bool  is_user;       /* USER run:結束成功時抬 pool_total 高水位 */
 	struct { bool precise, stage_in, cheap_acquire,
 	              main_acquire, cma_complete, flip, shed; } stage;
 	list  precise_target_pages;     /* nil = 尚未初始化 */
@@ -246,8 +243,8 @@ struct adjust_ctx {
 
 adjust_round():                            /* 每 10ms */
 	lock; stop = (run == 0); if (!stop) run--; last = (run == 0); unlock
-	if (stop) return                       /* 已被 acquire=0 歸 0:g_stop 那條已處理 */
-	if (last) { adjust_finish(); return }  /* run 倒數耗盡也算自然結束 → 記實際水位 */
+	if (stop) { adjust_finish(); return }  /* 被 acquire=0 歸 0:同一條收尾 */
+	if (last) { adjust_finish(); return }  /* run 倒數耗盡:同一條收尾 */
 
 	pool_purge_expired()                   /* 記帳:released 逾時 → 放棄(每輪,O(in_flight)) */
 
@@ -350,19 +347,17 @@ adjust_round():                            /* 每 10ms */
 ```
 
 ```c
-adjust_finish():                        /* worker 自然停止(不變量達成、或 run 倒數耗盡) */
-	if (ctx.is_user):                   /* USER / INSMOD run,非背景、非 acquire=0 中斷 */
-		pool_total = pool_held() + pool_cma()   /* = 這次結束時的實際總水位 */
-		/* 「結束時實際水位」,不是高水位:8G 目標只拿到 6G,pool_total 就是 6G。
-		 * 下降也算——下次同樣條件下背景不該假裝能維持到拿不到的量。
-		 * 縮小目標時另有 clamp(既有 resize),此處只管 run 結束的實測值。
-		 * 背景 run 不寫 pool_total:它只讀,且 want_cma=max(pool_total,真值) 已框住上限
-		 * (使用者原話「背景參數已被限制、沒辦法超過」)。 */
-	lock; run = 0; g_active = false; g_stop_reason = describe(); unlock
+adjust_finish():                 /* 每個 run=0 路徑都走這裡,一條公式,無分支 */
+	lock
+	if (!g_active) { unlock; return }        /* 幂等:一次 campaign 只執行一次 */
+	g_active = false;  run = 0
+	pool_total = min(ctx.want_cma, max(pool_total, pool_held() + pool_cma()))
+	/*  max → 結束在低點(背景小跑、中斷)不會拉低天花板
+	 *  min → 使用者調小 want_cma 時自動 clamp 下來,不需另外的 resize clamp
+	 *  例:total=1G,user 要 8G 只拿到 6G → min(8G, max(1G,6G)) = 6G      */
+	g_stop_reason = describe()
+	unlock
 ```
-
-**中斷(acquire=0 / g_stop)不算結束**:那是被打斷,實測水位不代表可維持的量,
-不更新 pool_total。只有走到「沒有 stage 可跑」或 run 倒數耗盡才叫 `adjust_finish()`。
 
 ### 7.1 stage 順序的理由(一句話版)
 
@@ -421,7 +416,7 @@ rmmod 走直達,因為意圖相反——**停止監護**,借用者留著他們�
 | 10 | **cma_complete 需要 contig_range 能力**,沒有就整段跳過 | acquire 0/1 的裝置(不能指定位置)本來就做不到湊塊 |
 | 11 | **目標值快照進 ctx**(want/want_cma),輪內只讀快照 | sysfs 中途改值不會讓進行中的一輪自相矛盾;下次 trigger 才帶新值。取代原本輪內直讀全域 pool_want |
 | 12 | **背景 want_cma = `max(pool_total, 真值)`,但 want(I1 分割)用真值** | 使用者原話對兩者皆可讀;pool_total 是總監護量,拿去當 pool 份額下限會把儲備池抽乾。若原意是兩者都套,改 init_ctx 一行——**這是我替你做的詮釋,請確認** |
-| 13 | **pool_total = USER/INSMOD run 結束時的實際總水位**(actual,非 max);縮小目標另有 clamp | 使用者本輪定案:8G 只拿到 6G → total=6G,下降也算。取代上一輪「已成功過的最大」的說法。中斷(acquire=0)不更新。背景 run 不寫 pool_total,只讀(其參數已框住上限,不會超過) |
+| 13 | **pool_total 更新 = 一條公式,每個 run=0 都執行**:`min(ctx.want_cma, max(pool_total, held_cma))` | 使用者定案,取代前兩輪的 is_user 分支與「中斷不算」特例。max 保住天花板不被低點結束拉低;min 讓調小 want_cma 自動 clamp。8G 拿到 6G → 6G ✓;背景與中斷自然無害,不需分支 |
 
 ## 10. 明確不做 / 待決
 
