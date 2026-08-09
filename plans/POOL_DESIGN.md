@@ -17,7 +17,7 @@
 | `external` | 系統的 | 不追蹤 |
 
 ```
-held      = avail + served 表全部 entry 數(含 released ← 關鍵,見下)
+held      = avail + served + released
 held_cma  = held + cma
 
 I1  held     == pool_want
@@ -123,22 +123,27 @@ int pool_cma(void); pool_noncma_able(void);
 ## 4. 觸發總表
 
 ```
+profile = 一組「允許哪些採集 stage」的旗標(§5.1)。維護 stage(stage_in/flip/shed/purge)
+不受 profile 管,永遠依條件跑;profile 只決定「向外拿」拿到什麼力度。
+
 action:
-  insmod   → 初始化 pool → 掛 hook → adjust_trigger(approach=alloc_pages)   /* prefill 非同步 */
+  insmod   → 初始化 pool → 掛 hook → adjust_try(INSMOD)      /* = PRECISE|CHEAP|MAIN,prefill */
   rmmod    → 卸 hook → 停兩個 worker → 同步 *→ext(§8),不經 worker
 
 hook(全部「一個 pool 方法或只碰 run」,不做政策):
   vm_boot      → pid_register(current)                       /* 只動 pid_lock */
-  vm_shutdown  → release_run(10);  adjust_trigger(BACKGROUND) /* 補 purge 造成的缺口 */
+  vm_shutdown  → release_run(10)                             /* adjust 由 release worker 自己觸發 */
   vm_unshare   → release_run(10)
   serve(kretprobe ret) → pg = pool_to_served(pid);  NULL → 不覆寫,回歸原始 alloc
   free(tracepoint)     → bypass = pool_catch(page)
 
 sysfs write:
-  pool_want / pool_want_with_cma → 記下新值 → adjust_trigger(BACKGROUND)
-  acquire = 0                    → adjust_run(0)              /* 中斷,見 §5 */
-  acquire = {approach, evict}    → run!=0 → -EBUSY
-                                    否則寫 ctx(approach/evict) → adjust_trigger(USER)
+  pool_want_with_cma 調小 → 新值 + pool_total = min(pool_total, 新值) → adjust_try(SHRINK)
+  pool_want          調小 → 新值(不動 pool_total,總量沒變,只是 pool↔cma 重分配) → adjust_try(SHRINK)
+  pool_want / pool_want_with_cma 調大 → 只記錄,不觸發                    /* 要人按 acquire */
+  acquire = 0                         → adjust_run(0)                    /* 中斷 */
+  acquire = {approach, evict}         → run!=0 → -EBUSY
+                                        否則寫 ctx(approach/evict) → adjust_try(USER)  /* CHEAP|MAIN */
 ```
 
 `serve` 的快路徑:先 `read_lock(pid_lock)` 查 pid,不對就返回——**不碰 pool_lock**。
@@ -166,26 +171,53 @@ adjust_worker:  間隔 10ms, run 初值 ADJUST_RUN_MAX(夠跑完一次大採集,
 實作:`{run, ctx}` 用一把小 spinlock 保護狀態轉換;
 worker 輪內工作在鎖外,輪首/輪尾短暫取鎖讀寫 run 與存 ctx。
 
+### 5.1 profile:允許哪些採集 stage
+
 ```c
-adjust_trigger(profile):        /* profile = BACKGROUND 或 USER(帶 approach/evict) */
+enum { P_PRECISE = 1,   /* precise:把自己 released 的頁 sweep 回來(不向系統要) */
+       P_CHEAP   = 2,   /* cheap_acquire:向系統要,最輕的一級(NORETRY) */
+       P_MAIN    = 4 }; /* main_acquire + cma_complete:重度,使用者授權 */
+
+SHRINK        = 0                          /* 只跑維護 stage;不向外拿一頁 */
+RELEASE       = P_PRECISE                  /* release worker 每輪:先只撿自己的 */
+RELEASE_FINAL = P_PRECISE | P_CHEAP        /* release 放棄等待:補上輕度外部 */
+USER          = P_CHEAP | P_MAIN           /* 使用者按 acquire */
+INSMOD        = P_PRECISE | P_CHEAP | P_MAIN
+```
+
+維護 stage(stage_in / flip / shed / purge)**不在 profile 裡**,永遠依 §7 的條件跑。
+profile 只框「向外拿」的力度,對應 §1 的風險歸屬:precise 誰都不痛、cheap 輕壓、main 重壓。
+
+**為什麼調小 `want_cma` 要先 clamp `pool_total`**:非 P_MAIN 的 run 其 `ctx.want_cma =
+max(pool_total, 真值)`(§5,維持高水位)。若不先把 pool_total 壓到新值,`max` 會用回舊的高值,
+SHRINK 就縮不動。clamp 之後 `max(新值, 新值) = 新值`,stage_in/shed 才會真的動。
+這就是「縮小 = clamp pool_total 下降」的原因,放在寫入點做,不靠 adjust_finish 的 min。
+
+```c
+adjust_try(profile):            /* 每個觸發者都用這個:能起就起,起不了就算了 */
 	lock;
 	if (run == 0) { ctx = init_ctx(profile); run = ADJUST_RUN_MAX; schedule(); }
-	else          { run = ADJUST_RUN_MAX; }   /* 進行中:只續命。
-	                                           * USER 撞上進行中 → -EBUSY(§4),
-	                                           * 使用者要先 acquire=0 再重新設定。 */
+	/* run != 0:已經在跑,放棄——不續命、不覆寫 ctx(ctx 只在 run==0 可寫)。
+	 * acquire 撞上進行中因此是 -EBUSY;release worker 撞上則靜默放棄,
+	 * 反正 adjust 已經在做採集,它的下一輪會重試。 */
 	unlock;
 
 init_ctx(profile):
-	stage    = 全部 true
+	/* 採集 stage 由 profile 開關;維護 stage 一律開,靠條件自己決定跑不跑 */
+	stage.precise      = profile & P_PRECISE
+	stage.cheap_acquire= profile & P_CHEAP
+	stage.main_acquire = stage.cma_complete = (profile & P_MAIN)
+	/* 「建儲備池」不是獨立 stage:main/cheap 填 avail 到 want_cma,flip 把超過 want 的挪進 cma */
+	stage.stage_in = stage.flip = stage.shed = true
 	precise_target_pages = main_target_pages = nil
 	non_ranged_acquire_retry_hp = 8
-	approach/evict = profile 給的(BACKGROUND: alloc_pages / 無 evict)
+	approach/evict = profile 帶的(SHRINK/RELEASE: 用不到;USER: 使用者給;INSMOD: alloc_pages/無)
 
 	/* 目標值在觸發當下快照進 ctx,輪內不再讀全域(全域可能被 sysfs 改)。 */
-	if (profile == USER || profile == INSMOD):
-		want     = pool_want                 /* 真值 */
+	if (profile & P_MAIN):                   /* USER / INSMOD:使用者授權,用真值 */
+		want     = pool_want
 		want_cma = pool_want_with_cma
-	else:                                    /* BACKGROUND */
+	else:                                    /* SHRINK / RELEASE:背景性質 */
 		want     = pool_want                 /* I1 份額用真值(見下方【詮釋】) */
 		want_cma = max(pool_total, pool_want_with_cma)   /* 至少維持已證明過的高水位 */
 	/* pool_total = 曾成功過的最大總監護頁數(held_cma 高水位),
@@ -204,20 +236,29 @@ init_ctx(profile):
 
 ```c
 release_round():                          /* 每 1000ms */
-	lock; if (run == 0) return; run--; last = (run == 0); unlock
+	lock; if (run == 0) return; run--; unlock
 
 	pool_release_idle()
 	/* served 且 refcount==1 && !mapping → put_page + 蓋 released_at。
 	 * put_page 觸發完整 free 路徑,free hook 幾微秒內 pool_catch 接回 avail。
 	 * refcount>1 = VM/gunyah 的 pin 還沒放 → 這輪不動它,下輪再看。
-	 * 這就是為什麼 run=10、間隔 1s:給 unpin 十秒,取代舊的加倍退避。 */
+	 * run=10、間隔 1s:給 unpin 十秒,取代舊的加倍退避。 */
 
-	if (last):
-		pool_purge_dead()      /* 十秒過了還抓著、且主人已死:放棄。
-		                        * 移除 entry + 交還參照,記 purge_log。
-		                        * 這會讓 held 下降 → adjust(還在跑)看到缺口 → 補。 */
+	/* 兩種「不必再等」:倒數到 0,或該回的都回來了但池子還沒滿(再等也沒用)。 */
+	drained = (pool_in_flight() == 0 && pool_held() < pool_want)
+	final   = (run == 0) || drained
+	if (drained) { lock; run = 0; unlock }
+
+	if (final):
+		pool_purge_dead()              /* 十秒還被 pin 且主人已死:放棄,交還參照(記 purge_log) */
+		adjust_try(RELEASE_FINAL)      /* 放棄等待 → 允許輕度外部補缺口(precise+cheap) */
 	else:
+		adjust_try(RELEASE)            /* 還在等 → 只 sweep 自己的(precise);起不了就算了 */
 		schedule(+1000ms)
+
+	/* 為什麼 final 的 RELEASE_FINAL 幾乎不會撞上進行中的 adjust:
+	 * 每輪的 RELEASE(precise-only)採集很短(掃一個有界的 released 清單,10ms 幾輪就完),
+	 * 而 release 輪距 1000ms,所以到 final 那輪 adjust 早已 run==0,cheap 這一級起得來。 */
 ```
 
 ## 7. adjust_worker
@@ -305,7 +346,7 @@ adjust_round():                            /* 每 10ms */
 			pool_from_ext_contig_at(pfn)
 			if (empty(main_target_pages))  stage.main_acquire = false
 
-	/* ── ext→avail(湊齊 CMA):Q 目標,取代 limbo ──────────── */
+	/* ── ext→avail(湊齊 CMA):Q 目標,取代 limbo。P_MAIN 才開(向外拿) ── */
 	case cma_complete:
 		if (!cma_capable || !cap(contig_range) ||
 		    pool_noncma_able() == 0)       { stage.cma_complete = false; break }
@@ -376,7 +417,7 @@ flip / shed  分配結果:先換形式,再還多餘
 insmod:
 	解析 kapi 符號 → 建 pool 結構 → pid/pool 鎖初始化
 	掛 serve kretprobe + free tracepoint + vm_boot/shutdown/unshare kprobe
-	adjust_trigger(BACKGROUND)            /* prefill 非同步:cheap 一輪 64 頁,
+	adjust_try(INSMOD)                    /* prefill 非同步:precise 無事、cheap+main 填到 want_cma,
 	                                       * 開機記憶體乾淨,幾秒內到位 */
 
 rmmod:                        /* 全同步。worker 停掉之後就沒有 worker 可用了 */
@@ -417,6 +458,11 @@ rmmod 走直達,因為意圖相反——**停止監護**,借用者留著他們�
 | 11 | **目標值快照進 ctx**(want/want_cma),輪內只讀快照 | sysfs 中途改值不會讓進行中的一輪自相矛盾;下次 trigger 才帶新值。取代原本輪內直讀全域 pool_want |
 | 12 | **背景 want_cma = `max(pool_total, 真值)`,但 want(I1 分割)用真值** | 使用者原話對兩者皆可讀;pool_total 是總監護量,拿去當 pool 份額下限會把儲備池抽乾。若原意是兩者都套,改 init_ctx 一行——**這是我替你做的詮釋,請確認** |
 | 13 | **pool_total 更新 = 一條公式,每個 run=0 都執行**:`min(ctx.want_cma, max(pool_total, held_cma))` | 使用者定案,取代前兩輪的 is_user 分支與「中斷不算」特例。max 保住天花板不被低點結束拉低;min 讓調小 want_cma 自動 clamp。8G 拿到 6G → 6G ✓;背景與中斷自然無害,不需分支 |
+| 14 | **profile = 允許哪些採集 stage**(P_PRECISE/P_CHEAP/P_MAIN);維護 stage 不受管 | 使用者本輪:release=precise、release 放棄=precise+cheap、user=cheap+main。取代舊的 BACKGROUND/USER 二分 |
+| 15 | **release worker 自己觸發 adjust**,每輪 try(RELEASE),放棄那輪 try(RELEASE_FINAL) | vm_shutdown 不再直接觸發 adjust。「放棄」= 倒數到 0,或 released 清空但池未滿。輪距 1s ≫ precise campaign,所以 final 那輪必然搶得到 cheap |
+| 16 | **adjust_trigger → adjust_try**:run!=0 就放棄,不續命不覆寫 | 所有觸發者統一語意;acquire 撞上=EBUSY,release 撞上=靜默重試。ctx 只在 run==0 可寫,自然成立 |
+| 17 | **調小 want_cma 先 clamp pool_total** | 否則 `ctx.want_cma=max(pool_total,真值)` 用回舊高值,SHRINK 縮不動 |
+| 18 | **執行期 cma→ext = stage_in+shed 組合**,無直達邊(直達只在 rmmod) | 執行期意圖=拿回記憶體(逐出借用者);rmmod 意圖=停止監護(不逐出)。回答「cma→ext 如何引入 adjust」 |
 
 ## 10. 明確不做 / 待決
 
