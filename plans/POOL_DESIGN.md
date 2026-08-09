@@ -1,778 +1,373 @@
-# 大頁池:設計
+# 大頁池:設計 v2(worker 骨架由使用者重寫,本版補完)
 
-2026-08-08。**這是現行設計的單一來源。** 取代散在
-`POOL_STATE_MODEL.md` / `POOL_ARCH_V2.md` / `POOL_OBJECT_API.md` / `POOL_PROPOSAL_V3.md`
-的片段(那幾份保留為推導過程與被推翻的方案紀錄)。
-
-一句話:**從系統取得 2MB 連續頁的監護權,在「借給 VM」「留著待命」「借給其他 app」
-「還給系統」之間搬移,並且每一步都要能說出這一頁現在算誰的。**
+2026-08-09。**單一來源。** 前一版的分層/步驟表/DEFER 模型全部作廢——它前後矛盾且無法在腦中模擬。
+本版骨架:兩個**週期性** worker + `run` 倒數 + ctx 交棒。
+使用者寫了骨架與 ext→avail 的三個 stage;§9 列出我補完的部分,review 時先看那節。
 
 ---
 
-## 1. 狀態
+## 1. 狀態與不變式(不變,壓縮重述)
 
-| 狀態 | 意義 | 誰持有 |
+| 狀態 | 意義 | 在哪個結構 |
 |---|---|---|
-| `served` | 借給 VM | VM 的 GUP pin + 我們一份保護參照 |
-| **`released`** | **已放手,去向未定** | 沒有人;正走在 free 路徑上或已落入 buddy |
-| `avail` | 池中待命 | 只有我們 |
-| `cma` | CMA 儲備池,借給其他 app | 其他 app(可逐出) |
-| `external` | 系統的,我們已放棄 | 系統 |
-
-### 1.1 為什麼需要 `released`
-
-**Linux 沒有 served→avail 這條路。** 歸還的實作是「放掉 → 撈回」:
-放掉最後一份參照後,頁走**完整的一般 free 路徑**(`free_pages_prepare` 拆 compound、
-清 flags、memcg 結算),我們的 tracepoint 只在 `__free_one_page` 併入 buddy **之前**
-有一次機會攔截。攔不到就真的進 buddy 了。
-
-所以中間必然存在一個「已放手、還沒定案」的狀態。少了它,
-`released_idle`(離開 served)與 `in_hook`(到達 avail)的差就會被誤讀成不變式被破壞
-——那個誤讀在 2026-08-08 之前耗掉一整天。
-
-### 1.1b `released` 的頁在哪裡:仍在 served 表,只是多一個時間戳
-
-`pool_release_idle()` 只放掉參照,**entry 是 hook 抓到時才移除**(或逾時被 purge)。
-所以今天的 `served_count` 混了兩種狀態:
+| `served` | 借給 VM(GUP pin + 我們一份保護參照) | served 表,`released_at == 0` |
+| `released` | 已放手,去向未定 | served 表,`released_at != 0` |
+| `avail` | 池中待命 | `page_pool[]` |
+| `cma` | 儲備池,借給其他 app | `cma_blocks[]` |
+| `external` | 系統的 | 不追蹤 |
 
 ```
-served_count(今天) = 真正 served(VM 還抓著) + released(已放手、未定案)
-```
+held      = avail + served 表全部 entry 數(含 released ← 關鍵,見下)
+held_cma  = held + cma
 
-而 `released_idle − (in_hook + in_sweep)` 那個手算式,算的正是後半。
-
-實作:entry 加一個時間戳,一次解決三件事——
-
-```c
-struct served_node {
-	unsigned long pfn;
-	pid_t         tgid;
-	u32           released_at;   /* 0 = 還在 served;否則 = 放手當下的 jiffies */
-	u16           next;
-};
-
-pool_served_count() = released_at == 0 的 entry 數
-pool_in_flight()    = released_at != 0 的 entry 數
-purge expired       = released_at != 0 && now - released_at > GRACE
-```
-
-**`GRACE` 因此有了正當名字:它是 `released` 狀態的存活上限**,
-不是一個看起來像啟發式的數字(今天叫 `RECONCILE_GRACE_MS`)。
-
-### 1.2 `cma_able` 是 `avail` 的屬性,不是狀態
-
-一頁能否翻進 CMA 取決於**鄰居**:CMA pageblock 可能大於 2MB
-(`CMA_SUBBLKS = 1 << (pageblock_order - 9)`),整塊的每個子塊都在 `avail` 才算數。
-`SUBBLKS == 1` 時恆真,整條相關路徑退化成不存在。
-
-### 1.3 不變式
-
-```
-I1  held()      == pool_want              held()     = avail + served
-I2  held_all()  == pool_want_with_cma     held_all() = held() + cma
+I1  held     == pool_want
+I2  held_cma == pool_want_with_cma
 Q   最小化 avail 之中 !cma_able
-G   任一 pfn 恰好處於五狀態之一
 ```
 
-**全部導出,不設對應的儲存變數。** 同一個事實存兩份遲早分歧
-——今天唯一的例外 `pool_total` 不是 I1 的快取,是另一個量(見 §2.3)。
+**held 把 released 也算進去**:released 的頁大概率會回來(hook 幾微秒內接到,
+或 precise stage 撿回)。不算它,VM 關機瞬間 diff 會暴增,worker 就去買
+一堆「正要回家的頁」的替代品。**放棄 = purge(entry 移除)那一刻,deficit 才真的打開。**
+
+`released` 的頁**仍在 served 表**,只是 `released_at != 0`;
+`GRACE` = released 狀態的存活上限,逾時 → purge(→external,由後續採集買替代品)。
 
 ---
 
-## 2. 轉換
+## 2. pool 物件:內部狀態與鎖
 
-```
-                  ┌────────────┐
-      E1 serve    │   served   │
-   ┌─────────────▶│            │
-   │              └──────┬─────┘
-   │                     │ E2 release        放掉最後一份參照
-   │                     ▼
-   │             ┌──────────────┐
-   │             │   released   │  已放手,去向未定
-   │             └──┬────┬───┬──┘
-   │      E3a hook  │    │   │ 沒人接到 → 逾時後 purge
-   │      (依身分)   │    │   └──────────────────────┐
-   │  ┌─────────────┘    │ E3b sweep                │
-   │  │                  │ (依位址,best-effort)      ▼
-   │  ▼                  ▼                      ┌──────────┐
-   │ ┌──────────────────────┐   E5 to_ext       │ external │
-   └─┤        avail         ├──────────────────▶│          │
-     │  屬性 cma_able        │◀──────────────────┤          │
-     └────┬─────────────▲───┘   E6 from_ext     └──────────┘
-   E4a to_cma │         │ E4b from_cma
-              ▼         │
-          ┌───────────────┐
-          │      cma      │
-          └───────────────┘
-```
+```c
+/* ── 鎖分三把,依「誰在什麼上下文碰」──────────────────────── */
 
-| 邊 | 前置條件 | 失效時 |
-|---|---|---|
-| E1 serve | 有 avail;能記錄歸屬 | 記不下 → **拒絕服務**(寧可池子短,不可有追蹤不到的借出) |
-| E2 release | refcount 只剩我們 且 `!mapping` 且 **free hook 掛著** | 否 → 保持 served,下輪再看 |
-| E3a hook | 攔到的 order-9 free 的 pfn 在 served 表中 | 沒攔到 → 留在 released |
-| E3b sweep | 該窗口整塊讀為 free | 失敗 → 留在 released |
-| E4a to_cma | `cma_able` | 否 → 跳過該頁 |
-| E4b from_cma | 逐出借用者成功 | 失敗 → 留在 cma |
-| E5 to_ext | — | — |
-| E6 from_ext | 依 means;整塊無 unmovable + 逐出成功 | 失敗 → 換一塊;連續失敗達門檻 → 本輪放棄 |
-| released→external | `released` 逾時(即 purge) | — |
+/* (a) pid 註冊表 —— rwlock,與 pool 鎖完全獨立。
+ *     serve 熱路徑先查這個,pid 不對就提早返回,不動 pool 的鎖。 */
+static DECLARE_RWLOCK(pid_lock);
+static struct vm_owner  owners[VM_OWNER_MAX];   /* pid/mm、served 計數 */
 
-**貫穿原則:失效一律是「停在來源狀態」。**
-「離開來源但沒到達目標」是唯一會真正遺失頁的形狀,今天踩過一次,代價是重開機。
+/* (b) pool 核心 —— raw spinlock(serve/catch 在 atomic 上下文)。 */
+static DEFINE_RAW_SPINLOCK(pool_lock);
+static struct page *page_pool[POOL_SIZE_MAX];   /* avail:LIFO 堆疊 */
+static int          pool_count;
+static unsigned int pool_gen;                    /* 每次變動 ++;排序寫回前驗證 */
+static bool         avail_sorted;                /* 變動時清 false */
+static struct served_node { pfn, tgid, released_at, next } served[];  /* pfn 雜湊 */
 
-### 2.1 E1 的挑選、E4a/E5 的挑選
+/* (c) CMA / 候選 —— 只有 adjust_worker 碰,mutex 即可。 */
+static DEFINE_MUTEX(cma_lock);
+static unsigned long cma_blocks[];               /* 已翻進儲備池的 block 基址 */
+static unsigned long cma_cand[CMA_SUBBLKS];      /* 候選 FIFO,見 §7 cma_complete */
+static int           cma_cand_n;
 
-排序後 `!cma_able` 在**頂端**,同塊 pfn **相鄰**:
-
-- **E1 serve / E5 to_ext 從頂端取** —— 先用掉/丟掉本來就不能翻的
-- **E4a to_cma 從底端取** —— 那裡才是 `cma_able`
-
-同塊相鄰讓 serve 一次吃掉整塊,而不是每塊咬一口把全部弄殘
-(實測:借出 2049 頁,殘缺塊始終只有 1–2 個)。
-
-### 2.2 縮小的去向由不變式決定
-
-```
-pool_want 調小,pool_want_with_cma 不變
-    I1 必須降、I2 必須不變  ⇒  avail → cma        (監護權換形式,不放走)
-    CMA 未啟用/無處可去      ⇒  avail → ext
-
-pool_want_with_cma 調小
-    I2 必須降               ⇒  cma → avail 後 avail → ext
-                               (不走 cma→ext 直達:avail 是樞紐)
+/* pb 索引(SUBBLKS>1 才存在):block → avail/served 遮罩,cma_able 由此導出 */
 ```
 
-### 2.3 三個量,不要混
-
-| 量 | 意義 | 誰瞄準它 |
-|---|---|---|
-| `pool_want` | 使用者要的量 | 使用者按 acquire 時 |
-| `pool_total` | **已證明安全的天花板**(帶遲滯) | **背景**採集 |
-| `held()` | 實際持有 | — |
-
-`pool_total` **不可導出**:背景停在 `held() >= pool_total`,導出化會讓它恆真、
-背景永不執行且無錯誤訊息。它由**使用者觸發的成功**抬高——那就是「已證明安全」的意思。
+排序不變:`!cma_able` 在頂端、同塊 pfn 相鄰;serve/shed 從頂端拿,flip 從底端拿。
+排序本身:快照 → 鎖外排 → `pool_gen` 沒變才寫回(ABA 防護),由 adjust_worker 每輪尾巴做。
 
 ---
 
-## 3. 分層
+## 3. pool 方法表
 
-**六條邊只有兩條踩 atomic 上下文**,這條線決定架構:
+```c
+/* ── hook 用(atomic-safe)────────────────────────────────── */
+struct page *pool_to_served(pid_t pid);   /* avail→served。pid 沒註冊/池空 → NULL */
+bool         pool_catch(struct page *pg); /* released→avail。pfn 不在表中 → false */
 
+/* ── release_worker 用 ──────────────────────────────────── */
+int  pool_release_idle(void);      /* served 且 refcount==1 && !mapping → put_page,
+                                    * 蓋 released_at 時間戳。回傳放掉幾頁。
+                                    * free hook 沒掛就整個拒跑(放了沒人接)。 */
+int  pool_purge_dead(void);        /* owner 已死 && refcount>1 && 已過寬限 → 放棄:
+                                    * 移除 entry + 交還參照(SERVED_PURGED,記 purge_log) */
+int  pool_purge_expired(void);     /* released_at 逾時 GRACE → 移除 entry(頁早已在 buddy) */
+
+/* ── adjust_worker 用(可睡)──────────────────────────────── */
+list pool_released_pfns(void);           /* precise 的目標清單 */
+list pool_gap_pfns_sorted(void);         /* main(ranged)/cma_complete 的目標:
+                                          * avail/served 部分持有的 block 的缺口位址,
+                                          * 同塊相鄰、依址排序(456 89 11 13) */
+bool pool_from_ext_alloc(gfp_flavor f);  /* alloc_pages;f = LIGHT(NORETRY) 或 FULL(RETRY_MAYFAIL) */
+bool pool_from_ext_contig_any(void);     /* alloc_contig_pages,拿不到指定位置 */
+bool pool_from_ext_contig_at(pfn);       /* alloc_contig_range 指定 2MB 窗 → avail */
+bool pool_sweep_catch(pfn);              /* 同上,但目標是自己 released 的頁:
+                                          * 成功記 ORIGIN_SWEEP 而非 ORIGIN_USER */
+int  pool_from_cma(int nblocks);         /* cma→avail:逐出借用者、拆一個 block 回池 */
+int  pool_to_cma(int nblocks);           /* avail→cma:從底端取 cma_able 的整塊翻入 */
+int  pool_to_ext(int npages);            /* avail→ext:從頂端 free(先丟 !cma_able) */
+bool pool_cand_push(pfn);                /* cma_complete 專用,見 §7:候選 FIFO */
+void pool_cand_flush(void);              /* 候選清空:全部 free 回 buddy */
+void pool_sort_if_dirty(void);
+bool pool_check(void);                   /* debug=1:驗 G/I1,破了就印 */
+
+/* ── 查詢 ─────────────────────────────────────────────── */
+int pool_avail(void); pool_served(void); pool_in_flight(void);
+int pool_held(void);                     /* avail + served 表全部(含 in_flight) */
+int pool_cma(void); pool_noncma_able(void);
 ```
-第 1 層  兩個反射動作      O(1)、不配置、不睡
-第 2 層  邊原語            每個負責「這條邊要更新的一切」
-第 3 層  gather 步驟表     從 deficit 驅動,決定走哪條邊
-```
 
-政策全在第 3 層,機制全在第 2 層,第 1 層只有反射。
+`origin`(in_hook/in_sweep/in_cma/in_user/in_refill)計數照舊,由各方法內部記。
 
 ---
 
-## 4. pool 物件的方法
+## 4. 觸發總表
 
-### 4.1 查詢
+```
+action:
+  insmod   → 初始化 pool → 掛 hook → adjust_trigger(approach=alloc_pages)   /* prefill 非同步 */
+  rmmod    → pool_want=0, pool_want_with_cma=0 → adjust_trigger → 等 drain(有上限)
+             → 卸 hook → 停兩個 worker → 殘餘 served 逐一 SERVED_PURGED → free avail
 
-```c
-int  pool_avail_count(void);
-int  pool_served_count(void);
-int  pool_in_flight(void);       /* released 狀態的居民:放手了、還沒定案 */
-int  pool_served_of_dead_owners(void);  /* 還在 served,但擁有的 VM 已經沒了 */
-int  pool_held(void);            /* I1 左邊 */
-int  pool_held_all(void);        /* I2 左邊 */
-int  pool_cma_able_count(void);  /* Q 的分子;SUBBLKS==1 時 == avail_count */
-int  pool_intake_room(int ceiling); /* ceiling + slack() - held(),可為負 */
-bool pool_is_sorted(void);
+hook(全部「一個 pool 方法或只碰 run」,不做政策):
+  vm_boot      → pid_register(current)                       /* 只動 pid_lock */
+  vm_shutdown  → release_run(10);  adjust_trigger(BACKGROUND) /* 補 purge 造成的缺口 */
+  vm_unshare   → release_run(10)
+  serve(kretprobe ret) → pg = pool_to_served(pid);  NULL → 不覆寫,回歸原始 alloc
+  free(tracepoint)     → bypass = pool_catch(page)
+
+sysfs write:
+  pool_want / pool_want_with_cma → 記下新值 → adjust_trigger(BACKGROUND)
+  acquire = 0                    → adjust_run(0)              /* 中斷,見 §5 */
+  acquire = {approach, evict}    → run!=0 → -EBUSY
+                                    否則寫 ctx(approach/evict) → adjust_trigger(USER)
 ```
 
-`pool_in_flight()` 取代今天要對三個計數器做減法才看得出來的量。
-`pool_intake_room()` 取代今天四份各自演化的 `held() >= want`(其中三份是死碼)。
-
-### 4.2 邊
-
-```c
-struct page *pool_to_served(pid_t tgid);            /* E1  atomic-safe */
-bool         pool_release(struct page *pg);          /* E2  可睡(put_page) */
-bool         pool_catch(struct page *pg, origin_t o);/* E3a/E3b  atomic-safe */
-int          pool_to_cma(int nr);                    /* E4a */
-int          pool_from_cma(int nr);                  /* E4b */
-int          pool_to_ext(int nr);                    /* E5 */
-int          pool_from_ext(means_t m, origin_t o, unsigned long at); /* E6 */
-void         pool_purge_expired(void);               /* released → external,逾時承認 */
-```
-
-**`origin` 是參數而不是多個函式**:今天五種來源各自 `atomic_inc`,
-結果 `total_refilled` 混成一個分不出東西的數,並且讓一次讀數被誤判。
-
-```c
-enum origin { ORIGIN_HOOK, ORIGIN_SWEEP, ORIGIN_CMA, ORIGIN_USER, ORIGIN_BACKGROUND };
-```
-
-### 4.3 手段(E6)
-
-```c
-/* 現行的五級,原樣保留。不新增更弱的一級——保留現行行為。 */
-enum means {
-	MEANS_ALLOC_LIGHT,   /* alloc_pages(GFP_KERNEL|__GFP_NORETRY):輕度;今天 grab_free(false) */
-	MEANS_ALLOC,         /* alloc_pages(GFP_KERNEL|__GFP_RETRY_MAYFAIL):會回收+壓縮;
-	                      * 今天 prefill / refill / grab_free(true) 都用這個 */
-	MEANS_CONTIG_ANY,    /* alloc_contig_pages:隨緣,拿不到指定位置;今天 acquire 1 */
-	MEANS_CONTIG_AT,     /* alloc_contig_range + 系統級 reclaim;今天 acquire 2 */
-	MEANS_CONTIG_EVICT,  /* 同上 + 逐塊 evict;今天 acquire 3 */
-};
-
-struct means_desc {
-	const char        *name;
-	bool               can_target;   /* 前三個為 false */
-	const struct kcap *caps;         /* 載入時解析;缺 → 此手段停用 */
-};
-```
-
-`can_target` 是**手段宣告的屬性**,不是獨立程式碼路徑
-——「優先掃描不完整塊附近」的那兩步靠它自動跳過。
-今天 acquire 1 走獨立函式,於是順手漏掉了整條 reservoir fill。
-
-### 4.4 批次(ABA 的結構性修法)
-
-```c
-struct pool_snapshot { unsigned int gen; int n; struct page **pages; };
-
-bool pool_snapshot_take(struct pool_snapshot *s);    /* 發憑證,含世代 */
-bool pool_snapshot_commit(struct pool_snapshot *s);  /* 只吃自己發的憑證 */
-int  pool_for_each_chunk(int (*fn)(struct page **, int, void *), void *arg);
-```
-
-世代驗證在物件裡。今天的 ABA 就是呼叫者自己想了一個「比較 `pool_count`」的驗證
-——而那正是最容易回到自己的值。
-
-### 4.5 除錯
-
-```c
-bool pool_check(void);   /* debug=1:驗 G 與 I1;破了就印 */
-```
-
-驗:走訪計數與 `avail_count + served_count` 相符、沒有 pfn 同時在兩個狀態、
-`cma_able_count <= avail_count`、`pool_gen` 單調。
-**方法表管已知的邊,`pool_check()` 抓想不到的。**
-
-### 4.6 上下文契約
-
-| 方法 | 上下文 |
-|---|---|
-| `pool_to_served` | **atomic**(配置 kretprobe) |
-| `pool_catch` | **atomic**(`__free_one_page`,持 zone lock、IRQ off) |
-| 其餘 | 可睡(worker) |
-
-物件內部持 `pool_lock`;**任何可能睡的事(`put_page`/`alloc`/`__free_pages`)
-一律在鎖外**,由方法自己安排,不是呼叫者。
+`serve` 的快路徑:先 `read_lock(pid_lock)` 查 pid,不對就返回——**不碰 pool_lock**。
 
 ---
 
-## 5. 觸發
+## 5. worker 模型(兩個都遵守)
 
-### 5.0 狀態變數與入口點(先把名字定死)
-
-worker 側的**全部**可寫狀態,沒有別的:
-
-```c
-/* ── gather ─────────────────────────────────────────────── */
-static struct gather_ctx  g_ctx;           /* 這一輪的請求參數 */
-static bool               g_active;        /* 有請求進行中 */
-static bool               g_stop;          /* 使用者寫了 acquire=0 */
-static bool               g_slab_dropped;  /* 本輪已丟過 slab(每輪一次) */
-static const char        *g_stop_reason;   /* 給 sysfs 讀 */
-static DEFINE_SPINLOCK(g_lock);            /* 保護以上 */
-static struct delayed_work g_work;
-
-/* ── release ────────────────────────────────────────────── */
-static int                 rel_tries;      /* 退避計數 */
-static struct delayed_work rel_work;
+```
+ctx 裡有一個特殊變數 run:
+  - 任何人任何時刻可寫(寫 0 = 中斷;寫 N = 啟動/續命)
+  - 其他 ctx 變數:只有 run==0 時外部可寫;run>0 期間只有 worker 自己更新
+每輪:
+  讀 run,==0 就停;否則 run-- 、做一小片工作、存 ctx、排下一輪(間隔 N ms)
 ```
 
-**兩個入口點,不是四個。** `arm` 這個詞在前幾版被我用得含糊,定死如下:
+`run` 同時是**開關**和**看門狗**:寫 0 立即中斷(最多再跑完當輪一小片),
+而 run 有限保證 worker 不可能永遠跑(不變量達不成時,倒數耗盡自然停)。
 
 ```c
-/* release_worker 不帶參數,所以只需要排程 */
-void release_arm(int delay_ms)
-{
-	mod_delayed_work(system_wq, &rel_work, msecs_to_jiffies(delay_ms));
-}
-
-/* gather 一定要帶 ctx,所以「設參數」與「排程」是同一個動作,沒有只做一半的版本 */
-void gather_request(struct gather_ctx req, int delay_ms)
-{
-	spin_lock(&g_lock);
-	/* 使用者的請求涵蓋背景的(ceiling 較高、means 較強),
-	 * 所以背景請求撞上進行中的使用者請求時,什麼都不必做。 */
-	if (g_active && g_ctx.may_promote && !req.may_promote) {
-		spin_unlock(&g_lock);
-		return;
-	}
-	g_ctx = req;  g_active = true;  g_stop = false;  g_slab_dropped = false;
-	spin_unlock(&g_lock);
-	mod_delayed_work(system_wq, &g_work, msecs_to_jiffies(delay_ms));
-}
+release_worker: 間隔 1000ms,run 初值 10(觸發時寫入,重複觸發=重新寫 10)
+adjust_worker:  間隔 10ms, run 初值 ADJUST_RUN_MAX(夠跑完一次大採集,例如 60000)
 ```
 
-worker 內部要再跑一輪時用 `mod_delayed_work(&g_work, ...)` **不動 ctx**——
-這就是前面說的「只重排自己」。
-
-`g_slab_dropped` 屬於**這一輪**而不是請求本身,所以放在 worker 狀態裡、
-由 `gather_request()` 清掉,不是 `gather_ctx` 的欄位。
-
-### 5.1 hook —— 一條或零條
+實作:`{run, ctx}` 用一把小 spinlock 保護狀態轉換;
+worker 輪內工作在鎖外,輪首/輪尾短暫取鎖讀寫 run 與存 ctx。
 
 ```c
-/* 配置側 kretprobe:entry 只過濾,ret 才動 pool */
-entry_handler(regs):
-	if arg_order != PAGE_ORDER          return SKIP
-	if pool_avail_count() == 0          return SKIP
-	if !vm_owner_contains(current->mm)  return SKIP
-	if !(arg_gfp & __GFP_MOVABLE)       return SKIP   /* 只服務會還回來的配置路線 */
-	return TAKE
+adjust_trigger(profile):        /* profile = BACKGROUND 或 USER(帶 approach/evict) */
+	lock;
+	if (run == 0) { ctx = init_ctx(profile); run = ADJUST_RUN_MAX; schedule(); }
+	else          { run = ADJUST_RUN_MAX; }   /* 進行中:只續命。
+	                                           * USER 撞上進行中 → -EBUSY(§4),
+	                                           * 使用者要先 acquire=0 再重新設定。 */
+	unlock;
 
-ret_handler(regs):
-	pg = pool_to_served(current->tgid)                 /* 唯一碰 pool 的呼叫 */
-	if pg  set_return_value(regs, pg)
-
-/* 釋放側 vendor tracepoint:atomic,持 zone->lock、IRQ off */
-free_one_page_cb(page, order, *bypass):
-	if order != PAGE_ORDER              return         /* 全系統快路徑閘門 */
-	if pool_in_flight() == 0            return
-	*bypass = pool_catch(page, ORIGIN_HOOK)            /* 閘門與統計都在裡面 */
-
-/* 這兩個不碰 pool */
-vm_destroy_pre(regs):
-	vm_owner_note_gone(current->mm)
-	release_arm(0)
-	gather_request(BACKGROUND, SETTLE_MS)
-
-mem_reclaim_pre(regs):                                  /* runtime unshare */
-	if pool_served_count() == 0         return
-	release_arm(RELEASE_FIRST_MS)
-	gather_request(BACKGROUND, SETTLE_MS)
+init_ctx(profile):
+	stage    = 全部 true
+	precise_target_pages = main_target_pages = nil
+	non_ranged_acquire_retry_hp = 8
+	approach/evict = profile 給的(BACKGROUND: alloc_pages / 無 evict)
 ```
-
-**hook 不排 hook,不做政策判斷。** 今天的 free hook 在 IRQ 關閉下做了
-`pool_want` 閘門與統計歸類,那些搬進 `pool_catch()`。
-
-### 5.2 sysfs write —— 縮小即動,放大等使用者
-
-```c
-write pool_want = N:
-	old = want;  want = clamp(N, 0, size_max)
-	if N < old   gather_request(BACKGROUND, 0)     /* 還記憶體:即時 */
-	/* N > old:只記錄。要人按 acquire。 */
-
-write pool_want_with_cma = N:
-	old = want_all;  want_all = clamp(N)
-	if N < old   gather_request(BACKGROUND, 0)
-	/* 同上 */
-
-write acquire = m (1..N):
-	if !means_usable(m)                                return -ENOSYS
-	if !any_deficit(user_ctx(m))                       { stop="already at target"; return 0 }
-	gather_request(user_ctx(m), 0);  return 0          /* 一個迴圈都不跑,立刻返回 */
-
-write acquire = 0:
-	spin_lock(&g_lock);  g_stop = true;  spin_unlock(&g_lock)   /* gather 下一輪自己停 */
-
-write reclaim_enable = 0/1:
-	attach/detach free hook                            /* E2 據此決定能不能交接 */
-```
-
-### 5.3 insmod 的首次取得是同一條邊
-
-今天 `module_init` 裡是這樣:
-
-```c
-for (i = 0; i < pool_want; i++) {
-	page_pool[i] = alloc_pages(GFP_KERNEL|__GFP_COMP|__GFP_NOWARN|__GFP_RETRY_MAYFAIL, 9);
-	if (!page_pool[i]) break;
-	if ((i + 1) % 50 == 0) cond_resched();
-}
-```
-
-**同步、沒有 worker、有 loop、用的是 `MEANS_ALLOC`(會回收+壓縮)。**
-也就是說 prefill / refill / acquire 是同一條邊的三個呼叫者,各寫一份。
-
-v3 之後它就是:
-
-```c
-gather_sync(&(struct gather_ctx){ pool_want, MEANS_ALLOC, .may_promote = true });
-```
-
-開機用 `MEANS_ALLOC` 而不是 cheap 版是**對的**:那是這台機器一輩子記憶體最乾淨的時刻,
-而且 insmod 參數本身就是使用者授權。`may_promote = true` 讓拿到多少就成為背景的天花板
-——這正是 `pool_total = i` 那一行今天在做的事,只是換成參數表達。
-
-### 5.4 清 cache:只丟 slab,不丟 page cache
-
-現行 acquire 的 Phase 0 已經在做這件事,而它的理由比「清 cache 提高成功率」精確:
-
-> drop reclaimable slab (dentry/inode) once. **That slab is not on the LRU so no acquire
-> path can reclaim it**, yet a single dentry page poisons a whole window.
-
-**只丟 slab 是刻意的,不是做不到別的:**
-
-| | 在 LRU 上? | acquire 碰得到嗎 | 該不該先丟 |
-|---|---|---|---|
-| dentry/inode slab | **否** | **碰不到**——遷移與回收都走 LRU | **要**,否則一個 dentry 頁永久毒化整個 2MB 窗口 |
-| page cache | 是 | 碰得到,可以**搬走**而不是丟掉 | **不要**——先丟等於把遷移能保住的東西白扔 |
-
-所以 `echo 3 > drop_caches` 的兩半裡,模組只需要 slab 那一半。
-我先前寫成「清整個 cache」是錯的,已改。
-
-定位仍照使用者的決定:
-
-- **背景永遠不做**。丟掉使用者的 dentry/inode cache 是全系統可感的代價,
-  背景採集的存在前提就是不自作主張。
-- **只在使用者按 acquire 時**——那一下就是授權。
-- **在 worker 裡,不在寫入路徑**;觸發點只記錄意圖然後返回。
-- **仍有欠債才做**(今天也是這樣 gate 的:「Skipped when Phase S already met the target」)。
 
 ---
 
-**縮小即動、放大不動**把風險歸屬變成明文:背景永遠只維持 `pool_total`,
-擴張一律要人按。調大目標值不會讓模組自己去要記憶體。
+## 6. release_worker
 
----
-
-## 6. worker
-
-**只有兩個,分野是延遲要求。永不互相排程,只能重排自己。**
-
-**兩個 worker 共用方法,但不互相排程。** `pool_release_idle()` 是 pool 的方法,
-兩邊都能呼叫,靠方法內的 mutex 互斥:
-
-- `release_worker` 存在的理由是**延遲**——unshare/關機要快回應,不能排在長跑的採集後面。
-- `gather_worker` 把它當**第一步**,因為縮小目標值時應該先收回「VM 已用完、我們還沒掃到」
-  的頁,再決定要丟什麼;否則會先排掉 avail、那些頁稍後才回來、可能又超過新目標再排一次。
-
-這也是為什麼縮小 `pool_want` / `pool_want_with_cma` **只排 gather 就夠了**:
-它自己會先做 release 那一步。分派原則是**按成因**——
-release_worker 回應 VM 的動作,gather_worker 回應目標值的改變。
-
-今天 `refill_worker` 尾巴排 `vm_owner_sweep_work`,那正是卸載路徑需要一整段註解
-交代取消順序的原因——**寫在註解裡的順序就是遲早會被違反的順序**。
-
-### 6.1 `release_worker` —— 要快
+職責:**served → released**(全部它管,adjust 不碰這條邊),外加放棄處理。
 
 ```c
-release_worker(work):
-	if !free_hook_attached():
-		return          /* 沒人接手就不放手:放了會進 buddy 而 entry 留著,
-		                 * 重新啟用後還可能把別人的頁匹配進池子 */
+release_round():                          /* 每 1000ms */
+	lock; if (run == 0) return; run--; last = (run == 0); unlock
 
-	released = pool_release_idle()      /* 排乾:一輪沒放掉任何頁才停 */
-	if released > 0:
-		rel_tries = 0
-		return
+	pool_release_idle()
+	/* served 且 refcount==1 && !mapping → put_page + 蓋 released_at。
+	 * put_page 觸發完整 free 路徑,free hook 幾微秒內 pool_catch 接回 avail。
+	 * refcount>1 = VM/gunyah 的 pin 還沒放 → 這輪不動它,下輪再看。
+	 * 這就是為什麼 run=10、間隔 1s:給 unpin 十秒,取代舊的加倍退避。 */
 
-	/* 一頁都沒閒置:VM 的 pin 還沒放掉。退避重看,有上限 */
-	if ++rel_tries < RELEASE_TRIES:
-		release_arm(RELEASE_FIRST_MS << rel_tries)
+	if (last):
+		pool_purge_dead()      /* 十秒過了還抓著、且主人已死:放棄。
+		                        * 移除 entry + 交還參照,記 purge_log。
+		                        * 這會讓 held 下降 → adjust(還在跑)看到缺口 → 補。 */
 	else:
-		rel_tries = 0                /* 放棄這一串;下次事件再從頭 */
+		schedule(+1000ms)
 ```
 
-### 6.2 `gather_worker` —— 可長跑、可取消
+## 7. adjust_worker
 
-風險由 ctx 的兩個參數界定,而不是一個數字加一句註解:
-
-```c
-struct gather_ctx {
-	int  ceiling;      /* 拿到多少為止 */
-	int  max_means;    /* 拿多兇 */
-	bool may_promote;  /* 成功後可否抬高 pool_total */
-};
-
-BACKGROUND = { pool_total, MEANS_ALLOC,       false };  /* 現行行為 */
-user_ctx(m) = { pool_want,  m,                 true  };
-```
+職責:盡力達成不變量。**除 avail→served(hook)與 served→released(release)外,
+所有轉換都是它做。**
 
 ```c
-enum step_goal  {
-	GOAL_NONE,      /* 無條件跑(記帳、收尾) */
-	GOAL_POOL,      /* 由 I1 的欠債驅動:pool_intake_room(ctx->ceiling) > 0 */
-	GOAL_TOTAL,     /* 由 I2 的欠債驅動 */
-	GOAL_QUALITY,   /* 由 Q 驅動:cma_able_count() < avail_count() */
+/* ctx ─────────────────────────────────────────────────── */
+struct adjust_ctx {
+	int   run;
+	struct { bool precise, stage_in, cheap_acquire,
+	              main_acquire, cma_complete, flip, shed; } stage;
+	list  precise_target_pages;     /* nil = 尚未初始化 */
+	list  main_target_pages;
+	enum  { ALLOC_PAGES, ALLOC_CONTIG_PAGES, ALLOC_CONTIG_RANGE } approach;
+	enum  { EVICT_MEMCG,           /* try_to_free_mem_cgroup_pages */
+	        EVICT_ISOLATE }        /* folio_isolate_lru + reclaim_pages */  evict;
+	int   non_ranged_acquire_retry_hp;   /* 初值 8 */
 };
 
-enum step_needs {
-	NEEDS_ALWAYS,
-	NEEDS_CMA,      /* 沒有 CMA 能力就跳過 */
-	NEEDS_TARGET,   /* ctx 的手段不能指定位置就跳過(acquire 0/1) */
-	NEEDS_USER,     /* 只有使用者觸發的 run 才做(ctx->may_promote) */
-};
+adjust_round():                            /* 每 10ms */
+	lock; if (run == 0) return; run--; unlock
 
-struct step {
-	const char       *name;
-	enum step_goal    goal;
-	enum step_needs   needs;
-	enum means        means;   /* MEANS_NONE = 不向外取得;MEANS_CTX = 吃 ctx->max_means */
-	enum step_result (*run)(const struct gather_ctx *ctx);
-};
+	pool_purge_expired()                   /* 記帳:released 逾時 → 放棄(每輪,O(in_flight)) */
 
-/* 排序原則:依「代價落在誰身上」——
- *   ① 誰都不痛(收回自己放掉的、記帳)
- *   ② 系統,便宜   ③ 系統,昂貴   ④ 我們的借用者(從儲備池拿回 = 逐出使用中的 app)
- * 例外:I2 已達標時再向外拿會衝破它,所以那種情況下 ④ 必須排第一(stage-in total-met)。
- *
- * static const —— 沒有任何人寫它。序列就是這張表的順序。
- * 每步的 means 若在此核心上不可用,該步自動停用(見 §6.2d),不必寫進 needs。 */
-static const struct step steps[] = {
-/*   name                   goal          needs         means              run                        */
-   { "release idle",        GOAL_NONE,    NEEDS_ALWAYS, MEANS_NONE,        step_release_idle        },
-   { "purge expired",       GOAL_NONE,    NEEDS_ALWAYS, MEANS_NONE,        step_purge_expired       },
-   { "shrink pool",         GOAL_POOL,    NEEDS_ALWAYS, MEANS_NONE,        step_shrink_pool         },
-   { "shrink total",        GOAL_TOTAL,   NEEDS_CMA,    MEANS_NONE,        step_shrink_total        },
+	/* 每輪重算,絕不快取 —— 目標值與池況隨時在變 */
+	held           = pool_held()           /* 含 in_flight,見 §1 */
+	diff_want      = pool_want          - held
+	diff_want_cma  = want_cma_eff       - (held + pool_cma())
+	                 /* want_cma_eff = cma_capable ? max(want_cma, want) : want */
+	new_page_need  = diff_want_cma
+	reserve_target = want_cma_eff - pool_want
+	cma_excess     = pool_cma() - max(reserve_target, 0)
 
-   /* ①誰都不痛 + I2 已達標時唯一合法的補法 */
-   { "sweep released",      GOAL_POOL,    NEEDS_ALWAYS, MEANS_CONTIG_AT,   step_sweep_released      },
-   { "stage-in total-met",  GOAL_POOL,    NEEDS_CMA,    MEANS_NONE,        step_stage_in_total_met  },
+	st = 第一個仍為 true 的 stage 旗標
+	if (沒有):
+		if (所有不變量已達成 || run 即將耗盡) { run = 0; stop_reason = ...; return }
+		stage = 全部 true                   /* 還有缺口:再跑一個 campaign。
+		                                     * run 倒數是總上限,不會無窮迴圈 */
 
-   /* ②系統便宜 → ③系統昂貴 */
-   { "light intake",        GOAL_POOL,    NEEDS_ALWAYS, MEANS_ALLOC_LIGHT, step_light_intake        },
-   { "drop slab",           GOAL_POOL,    NEEDS_USER,   MEANS_NONE,        step_drop_slab           },
-   { "gather",              GOAL_POOL,    NEEDS_ALWAYS, MEANS_CTX,         step_gather              },
+	switch (st):
 
-   /* ④最後才逐出自己的借用者 */
-   { "stage-in",            GOAL_POOL,    NEEDS_CMA,    MEANS_NONE,        step_stage_in            },
+	/* ── ext→avail ──────────────────────────────────────── */
+	case precise:        /* 撿回自己 released 的頁:免費,誰都不痛,永遠第一 */
+		if (!cap(contig_range) || pool_in_flight() == 0) { stage.precise = false; break }
+		if (precise_target_pages == nil)
+			precise_target_pages = pool_released_pfns()
+		pfn = pop(precise_target_pages)
+		pool_sweep_catch(pfn)              /* 失敗:留在 released,等逾時 purge */
+		if (empty(precise_target_pages))   stage.precise = false
 
-   { "pair fill",           GOAL_QUALITY, NEEDS_TARGET, MEANS_CONTIG_AT,   step_pair_fill           },
-   { "reservoir fill",      GOAL_TOTAL,   NEEDS_CMA,    MEANS_NONE,        step_reservoir_fill      },
-   { "quality",             GOAL_QUALITY, NEEDS_TARGET, MEANS_CONTIG_AT,   step_quality             },
-};
+	case stage_in:       /* cma→avail:儲備池超過應有大小時,先拿自己的回來 */
+		/* 兩種情況走到這:pool 短而總量已足(再向外拿會衝破 I2,這是唯一合法來源);
+		 * 或 want_cma 被調小(儲備池要拆)。統一條件就是 cma_excess>0。 */
+		if (!cma_capable || cma_excess <= 0) { stage.stage_in = false; break }
+		pool_from_cma(1)                   /* 一輪一塊:拆塊要逐出借用者,慢 */
 
-/* 一步可以回報「還太早」,而不是由誰去排它。 */
-enum step_result { STEP_DONE, STEP_NOTHING, STEP_DEFER };   /* DEFER 帶 delay_ms */
+	case cheap_acquire:  /* 向系統要,最便宜的一級:撿現成,失敗即停 */
+		if (new_page_need <= 0)            { stage.cheap_acquire = false; break }
+		repeat 至多 CHEAP_BATCH(=64) 次:
+			if (!pool_from_ext_alloc(LIGHT)) { stage.cheap_acquire = false; break }
+			if (--new_page_need <= 0)        { stage.cheap_acquire = false; break }
 
-gather_worker(work):
-	spin_lock(&g_lock);  ctx = g_ctx;  stop = g_stop;  spin_unlock(&g_lock)
-	progress = false;  soonest_defer = NEVER
+	case main_acquire:   /* 使用者授權的等級 */
+		if (new_page_need <= 0)            { stage.main_acquire = false; break }
+		if (approach == ALLOC_PAGES || approach == ALLOC_CONTIG_PAGES):
+			ok = (approach == ALLOC_PAGES) ? pool_from_ext_alloc(FULL)
+			                               : pool_from_ext_contig_any()
+			if (ok)  hp = min(hp + 3, 8)
+			else if (--hp == 0)            { stage.main_acquire = false; break }
+			/* hp:連續失敗的忍耐值,成功回血。取代舊 fail_score,語意相同 */
+		else:            /* ALLOC_CONTIG_RANGE:可指定位置,配 evict */
+			if (main_target_pages == nil)
+				main_target_pages = pool_gap_pfns_sorted()
+			pfn = pop(main_target_pages)
+			run_evict(evict)               /* EVICT_MEMCG: try_to_free_mem_cgroup_pages
+			                                * EVICT_ISOLATE: folio_isolate_lru+reclaim_pages */
+			pool_from_ext_contig_at(pfn)
+			if (empty(main_target_pages))  stage.main_acquire = false
 
-	for s in steps:
-		if stop                                          break
-		if s.needs == NEEDS_CMA    && !cma_capable       continue
-		if s.needs == NEEDS_TARGET && !means_can_target(ctx.max_means)  continue
-		if s.needs == NEEDS_USER   && !ctx.may_promote   continue   /* 背景不丟 slab */
-		if s.means != MEANS_NONE   && !means_usable(effective_means(s, ctx))  continue
-		if s.goal  != GOAL_NONE    && !deficit_for(s.goal, ctx)      continue
+	/* ── ext→avail(湊齊 CMA):Q 目標,取代 limbo ──────────── */
+	case cma_complete:
+		if (!cma_capable || !cap(contig_range) ||
+		    pool_noncma_able() == 0)       { stage.cma_complete = false; break }
+		if (main_target_pages == nil)      /* 復用同一種清單:缺口位址,同塊相鄰 */
+			main_target_pages = pool_gap_pfns_sorted()
+		if (empty(main_target_pages))      { pool_cand_flush(); stage.cma_complete = false; break }
+		pfn = pop(main_target_pages)
+		run_evict(evict)
+		if (pool_from_ext_contig_at_raw(pfn))   /* 先不入池 */
+			pool_cand_push(pfn)
+		/* pool_cand_push:FIFO 長度 = CMA_SUBBLKS。
+		 *   推入後檢查:此頁的 block 是否已由 served/avail/候選 湊滿?
+		 *   湊滿 → 候選成員轉入 avail,同時 pool_to_ext(k) 從頂端 free 掉
+		 *          k 個 !cma_able 頁(k = 剛轉入的候選數)→ held 不變,Q 改善。
+		 *          頂端優先正是 !cma_able,所以「丟最爛的」自動成立。
+		 *   FIFO 滿 → 擠掉最舊的候選,直接 free 回 buddy。
+		 *          清單同塊相鄰,湊得齊的塊其候選必然連續入隊,
+		 *          所以被擠掉的 = 它的塊湊不齊(中間有一格 grab 失敗)。自清。 */
 
-		r = s.run(&ctx)
-		if r.result == STEP_DEFER   soonest_defer = min(soonest_defer, r.delay_ms)
-		if r.result == STEP_DONE    progress = true
+	/* ── avail→cma ──────────────────────────────────────── */
+	case flip:
+		/* 條件:avail 超過 I1 份額(diff_want<0)且儲備池未達應有大小。
+		 * 對應「pool_want 調小而 want_cma 不變」:監護權換形式,不放走。 */
+		if (!cma_capable || diff_want >= 0 ||
+		    pool_cma() >= reserve_target)  { stage.flip = false; break }
+		b = 池底端整塊;  if (!cma_able(b)) { stage.flip = false; break }
+		pool_to_cma(1)
 
+	/* ── avail→ext ──────────────────────────────────────── */
+	case shed:
+		/* 最後一步:此時該翻的已翻、該留的已留,還多的才是真正要還系統的 */
+		if (diff_want >= 0)                { stage.shed = false; break }
+		pool_to_ext(min(-diff_want, SHED_BATCH=32))
+
+	/* ── 輪尾 ───────────────────────────────────────────── */
 	pool_sort_if_dirty()
-	pool_shed_excess()
-	if debug  pool_check()
-
-	if ctx.may_promote && pool_held() > pool_total:
-		pool_total = pool_held()      /* 使用者觸發的成功 = 已證明安全 */
-
-	spin_lock(&g_lock)
-	if g_stop:
-		g_active = false;  g_stop_reason = "stopped by user"
-	else if progress:
-		mod_delayed_work(system_wq, &g_work, 0)              /* 還在推進 */
-	else if soonest_defer != NEVER:
-		mod_delayed_work(system_wq, &g_work, soonest_defer)  /* 有步驟說「太早」 */
-	else:
-		g_active = false;  g_stop_reason = describe_why()    /* 真的沒事可做了 */
-	spin_unlock(&g_lock)
+	if (debug) pool_check()
+	存 ctx;  schedule(+10ms)
 ```
 
-每一欄的意義:
+### 7.1 stage 順序的理由(一句話版)
 
-| 欄 | 意義 | 誰決定 |
+```
+precise      免費且是自己的 → 永遠第一
+stage_in     總量已足時唯一合法的來源;want_cma 調小時的必經路
+cheap        向系統要之中最便宜的
+main         使用者授權的力度
+cma_complete Q 目標,只在 I1/I2 滿足後有意義(new_page_need 已 <=0)
+flip / shed  分配結果:先換形式,再還多餘
+```
+
+## 8. insmod / rmmod 序列
+
+```c
+insmod:
+	解析 kapi 符號 → 建 pool 結構 → pid/pool 鎖初始化
+	掛 serve kretprobe + free tracepoint + vm_boot/shutdown/unshare kprobe
+	adjust_trigger(BACKGROUND)            /* prefill 非同步:cheap 一輪 64 頁,
+	                                       * 開機記憶體乾淨,幾秒內到位 */
+
+rmmod:
+	pool_want = 0;  pool_want_with_cma = 0
+	adjust_trigger(BACKGROUND)            /* 同一套機器做 drain:
+	                                       * stage_in 拆光儲備池 → shed 還光 avail */
+	等 run 歸 0(有上限,例如 30s)
+	卸全部 hook → release_run(0)、adjust_run(0)、cancel_work_sync ×2
+	served 表殘餘(還被 pin 的)逐一 SERVED_PURGED   /* 交還參照,絕不能帶走 */
+	free 殘餘 avail(drain 沒做完的部分)+ 候選 FIFO
+```
+
+卸載順序仍是鐵律:**先卸 hook,再停 worker,最後交還參照**。
+
+---
+
+## 9. 我補完/新增的部分(review 先看這裡)
+
+| # | 內容 | 為什麼 |
 |---|---|---|
-| `goal` | 這步在服務哪個不變式;`GOAL_NONE` 無條件跑 | 表(固定) |
-| `needs` | 前置的能力或授權 | 表(固定),對照執行期的 `cma_capable` / ctx |
-| `means` | 這步用什麼手段取得記憶體 | **多數固定**;只有 `gather` 是 `MEANS_CTX` |
-| `run` | 實作 | 表(固定) |
+| 1 | **`stage_in`(cma→avail)整個 stage** | 原稿缺這條邊。沒有它:(a) pool 短而總量已足時,唯一合法來源(向外拿會衝破 I2)不存在;(b) `want_cma` 調小時儲備池拆不掉。統一條件 `cma_excess > 0` 蓋住兩者 |
+| 2 | **`held` 含 in_flight(released 仍在 served 表)** | 不含的話 VM 關機瞬間 diff 暴增,worker 買一堆正要回家的頁的替代品。放棄=purge 那刻 deficit 才打開 |
+| 3 | **purge 的歸屬**:`purge_dead` 在 release 最後一輪;`purge_expired` 在 adjust 每輪記帳 | release 十輪 = 十秒寬限;逾時的 released 隨時可能出現,放 adjust 輪首 |
+| 4 | **vm_shutdown 也觸發 adjust** | 原稿只啟動 release。但 purge 造成的缺口要有人補(舊 refill 的職責),adjust 的 cheap/main 就是補的人 |
+| 5 | **候選 FIFO 溢出 = free 最舊** | 原稿只說長度 SUBBLKS 與結束時 flush。溢出規則讓「湊不齊的塊」自清:清單同塊相鄰,湊得齊的候選必然連續入隊,被擠掉的就是湊不齊的 |
+| 6 | **湊滿時 free k 個 !cma_able(k=轉入的候選數)** | 原稿說「free 掉 non cma_able 的塊」沒說幾個。k 個才守恆;不足 k 個就少 free,多的由 shed 收(diff_want<0 會出現) |
+| 7 | **`run` 統一為倒數看門狗 + campaign 重啟規則** | 原稿 release 有倒數、adjust 只說 exit 時 run=0。統一:stage 全消耗完但不變量未達 → 重設全部 stage 再跑,run 倒數保證有界 |
+| 8 | **USER 撞上進行中 → -EBUSY** | ctx 規則(run>0 時外部不可寫)的直接推論:要改 approach 得先 acquire=0 |
+| 9 | **cheap/shed 的每輪批次**(64/32) | 一輪一頁的話 prefill 3072 頁要 30 秒;cheap 很便宜,批次不傷中斷延遲(run=0 最多等一輪) |
+| 10 | **cma_complete 需要 contig_range 能力**,沒有就整段跳過 | acquire 0/1 的裝置(不能指定位置)本來就做不到湊塊 |
 
-`MEANS_NONE` 的步驟不向外取得記憶體——它們在搬自己的東西(收回、縮小、從儲備池拿回)
-或只是記帳。`sweep released` 雖然用 `CONTIG_AT`,拿的也是**自己放掉的頁**,
-所以排在向系統要的前面(§6.2c)。
+## 10. 明確不做 / 待決
 
-**兩件事靠「有進展就重排自己」自然發生,不需要在表裡重複列:**
-
-1. **丟掉 slab 之後那批剛解毒的窗口,由下一輪的 `light intake` 撿走。**
-   不必把它列兩次——丟 slab 算「有進展」,worker 重排,下一輪從頭跑。
-   `drop slab` 自己記 `ctx.slab_dropped`,一輪 gather 只做一次。
-2. **昂貴的 `gather` 只在便宜的都用盡之後才輪到**,因為每步都先問欠債,
-   而前面那些會把欠債補掉一部分。
-
-### 6.2d 步驟自己的 means 也要能力檢查
-
-`needs` 管的是 cma / target / user,**唯獨沒管「這步自己的手段在這個核心上存不存在」**。
-`sweep released` 是 `NEEDS_ALWAYS` 但用 `CONTIG_AT`——沒有 `alloc_contig_range` 的裝置上
-它每次都會失敗。
-
-修法不是往 `needs` 塞更多列舉,而是**自動檢查**:
-
-```c
-if (s->means != MEANS_NONE && !means_usable(effective_means(s, ctx)))
-	continue;      /* 這步的手段在這台機器上不存在 */
-```
-
-`effective_means(s, ctx)` = `s->means == MEANS_CTX ? ctx->max_means : s->means`。
-能力矩陣載入時算一次,所以這是一次比較。
-
-**這樣「缺能力 = 那一步停用」是結構性的**,不必每加一步就想起來要不要補一列 `needs`。
-
----
-
-### 6.2a hook 怎麼「叫起」worker:一個 ctx + 一條優先權規則
-
-序列**不必傳進去**,因為序列就是步驟表。而且大部分步驟的 means 是**它自己的屬性**,
-不是 ctx 給的:
-
-- `sweep released` 一定是 `CONTIG_AT` —— 它結構上就需要指定位置(去 released 的原址搶)
-- `refill` 一定是 `alloc` 系列 —— 它本來就不指定位置
-- **只有 `gather` 那一步吃 `ctx.max_means`** —— 那才是使用者選的東西
-
-所以 hook 不說「先 A 再 B」,只說「發生了 VM 事件,用背景 ctx 跑你的表」。
-「先掃再買」是自然發生的:`refill` 在 `pool_in_flight() > 0` 時回 `DEFER`,
-還有頁在路上就輪不到它。
-
-**「ctx 變數只能寫一個」不需要 list,需要的是優先權規則**——見 §5.0 的 `gather_request()`:
-使用者的請求涵蓋背景的(ceiling 較高、means 較強),所以背景請求撞上進行中的使用者請求時,
-什麼都不必做。
-
-反方向也對:背景正在跑時使用者按 acquire,ctx 直接升級,
-而 worker 每一輪都重讀 ctx,所以進行中的那一輪下次迭代就換成使用者的參數。
-
-`pool_total <= pool_want` 這個前提由 resize 維持(縮小時 `pool_total = newt`),
-所以「使用者請求涵蓋背景請求」不是假設,是不變式。
-
----
-
-### 6.2b 為什麼是 `STEP_DEFER` 而不是 `next_tasks`
-
-背景那兩階段(先把還回得來的撈回來,撈不滿再去買)之間需要的**不是「排下一個任務」,
-是「現在還太早」**。
-
-`refill` 該等的不是一段時間,是**等 `released` 排空**:頁還在回家路上時就去買替代品,
-等於白買。今天 `refill_delay_ms = 5000` 猜的就是這件事,而五狀態模型讓它可以直接問:
-
-```c
-step_refill(ctx):
-	/* 「還可能回來的」有兩種,少算任何一種都會買到不該買的:
-	 *   released       已放手,正在 free 路徑上或等 sweep —— 幾微秒到逾時
-	 *   served 但主人已死  pin 還沒放掉,但那個 VM 已經沒了,馬上就要變成 released
-	 * VM 剛關機時大多數頁還在第二種,in_flight 可能是 0 —— 只看它就會立刻去買
-	 * 那些正要回家的頁的替代品。現行 refill_worker 等 mm_users==0 就是在等這個。 */
-	if pool_in_flight() > 0                 return STEP_DEFER(1s);
-	if pool_served_of_dead_owners() > 0     return STEP_DEFER(1s);
-	...買替代品...
-```
-
-所以查詢方法要多一個:
-
-```c
-int pool_served_of_dead_owners(void);   /* 主人已退出、pin 還沒放掉的 served 頁 */
-```
-
-**條件驅動,延遲只是輪詢間隔**,不是一個猜出來的數字。
-
-`next_tasks` 那種任務佇列更通用,但這裡用不到它多出來的能力:
-
-| | 需要佇列嗎 |
-|---|---|
-| 排序階段 | 不必——步驟表本來就是順序 |
-| 階段間的延遲 | 不必——`STEP_DEFER` 表達得更準(它說的是條件,不是時間) |
-| **後階段需要前階段算出的參數** | **會需要**——但目前沒有這種情況:
-`sweep` 要掃的 released pfn 清單是 pool 的狀態,步驟自己讀得到,不必有人傳給它 |
-
-而且佇列會讓「這個 worker 接下來要做什麼」變成**執行期狀態**,
-teardown 就得多考慮「佇列裡還有東西」;`STEP_DEFER` 只多一個重排延遲,
-仍然是一個 work item、一次取消。
-
-**真的出現「後階段需要前階段的參數」時再加佇列**,而且加的時候要限制
-只能排給自己,否則就是 worker 互相排程換了個寫法。
-
-### 6.2c 排序原則:依「代價落在誰身上」
-
-不是「配置成本由低到高」,也不是單純「先自己再系統」——**`stage-in` 拿回的雖然是自己的頁,
-但那些頁正在被其他 app 使用,拿回來是逐出他們。** 所以軸是代價的歸屬:
-
-| | 代價落在 | 步驟 |
-|---|---|---|
-| ① | **誰都不痛** | `release idle`、`purge`、`sweep released`(收回自己放掉、沒人在用的) |
-| ② | 系統,便宜 | `light intake` |
-| ③ | 系統,昂貴 | `gather`(遷移/回收/evict) |
-| ④ | **我們的借用者** | `stage-in`(從儲備池拿回 = 逐出使用中的 app) |
-
-**例外:I2 已達標時,再向外拿會衝破它**,那種情況下 ④ 是唯一合法的補法,必須排第一
-——這就是 `stage-in total-met` 與 `stage-in` 是**兩步而不是一步**的原因。
-我一度把它們並排在一起,等於把現行 Phase S 與 S2 的差別抹掉了。
-
-排好之後,兩個序列**自動從表裡長出來,不必傳、也不必新增 means 等級**:
-
-| ctx | 實際跑的順序 |
-|---|---|
-| 背景 `{pool_total, ALLOC, false}` | `sweep released`(CONTIG_AT)→ `light intake` → `gather`(ALLOC) |
-| 使用者 `{pool_want, m, true}` | `sweep released` → `light intake` → `drop slab` → `gather`(m) |
-
-**「一律先試 light」是一個恆常執行的步驟,不是一個 means 等級。**
-
-這也是為什麼不需要 `light2`:讓 light 排在 `CONTIG_EVICT` 之上,
-會把**「最多可以多兇」(上限)** 和 **「按什麼順序試」(序列)** 塞進同一個序數。
-enum 一旦不再依強度排序,`can_target`、能力檢查、`means <= ctx.max_means`
-全部失去意義。上限歸 ctx,序列歸表,兩者不要混。
-
-`ctx.max_means == ALLOC_LIGHT` 時 `gather` 會與 `light intake` 重複——
-它找不到東西、回 `STEP_NOTHING`,無害。
-
-**表是依「先自己再系統」排序,不是依種類。** 這讓「先撿現成、再解毒窗口、最後才遷移」
-成為結構,而不是每個呼叫者自己記得的順序。
-
-### 6.3 欠債判定 —— 每個 goal 唯一來源
-
-```c
-deficit_for(POOL,    ctx) = pool_intake_room(ctx.ceiling) > 0
-deficit_for(TOTAL,   ctx) = pool_held_all() < pool_want_with_cma
-deficit_for(QUALITY, ctx) = pool_cma_able_count() < pool_avail_count()
-```
-
-今天這三個各有 2–4 份手寫副本,其中三份是「在自己該工作的狀態下停止」的死碼
-(入口守衛、Phase Q、pair_fill)。
-
-### 6.4 卸載
-
-```
-卸掉 hook  →  取消兩個 worker  →  交還所有參照
-```
-
-不需要註解解釋順序。
-
----
-
-## 7. 明確不做
-
-- **不把 `pool_lock` 換成 mutex**:E1/E3a 在 atomic 上下文,只能 raw spinlock。
-- **不改 tree / 雙池**:插入點在 atomic 上下文;`SUBBLKS == 1` 上是純負優化。
-- **排序不做成獨立 worker**:它需要的是「有東西變了之後」,不是自己的節奏。
-- **不宣稱物件化能防止競態**:C 裡沒有這種保證。它買到的是**衍生狀態的維護點收斂**,
-  那才是已發生的四類 bug 的共同成因。
-
----
-
-## 8. 待決
-
-- **背景改用 `MEANS_ALLOC_CHEAP` 是這份設計裡唯一使用者會直接感受到的行為變更。**
-  今天背景用的是 `alloc_pages(GFP_KERNEL|__GFP_COMP|__GFP_NOWARN|__GFP_RETRY_MAYFAIL, 9)`
-  ——`GFP_KERNEL` 允許 direct reclaim,`__GFP_RETRY_MAYFAIL` 在 order-9 上拉起 compaction,
-  也就是**背景會回收使用者的 page cache、會做記憶體壓縮**。
-  這與 `pool_total` 的存在理由(模組不准自作主張把系統推到記憶體不足)直接矛盾,
-  所以降到 cheap 是把實作拉回設計意圖。但它**會讓背景補得比較慢**、碎片化時補不滿。這是刻意的,
-  但**要先量**:現在背景每輪補幾頁,換成不回收之後補幾頁。
-  差多少決定使用者多久要按一次按鈕——這是唯一會被直接感受到的取捨。
-- ~~`pool_in_flight()` 要能分辨「還在路上」與「已經丟了」~~ **已定案**:
-  served entry 加 `released_at` 時間戳(§1.1b)。分辨方式是時間戳,不是另一個計數器;
-  同一個欄位也讓 `purge expired` 有定義。
-- **`released` 的命名**:`released` / `handover` / `ext_served_before` 未定。
+- 不做 tree/雙池(atomic 插入點);不宣稱物件化防競態(它買到的是維護點收斂)。
+- 排序照舊在 adjust_worker 輪尾,不是獨立 worker。
+- **待決**:`released` 命名(released/handover);`GRACE` 具體值(現 3s 級);
+  `ADJUST_RUN_MAX` 與各批次常數要在真機上調。
