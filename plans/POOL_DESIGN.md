@@ -92,9 +92,14 @@ bool pool_from_ext_contig_at(pfn);       /* alloc_contig_range 指定 2MB 窗 �
 bool pool_sweep_catch(pfn);              /* 同上,但目標是自己 released 的頁:
                                           * 成功記 ORIGIN_SWEEP 而非 ORIGIN_USER */
 int  pool_from_cma(int nblocks);         /* cma→avail:遷移借用者出去(alloc_contig_range)後拆塊回池。
+                                          * 只給「pool 短、total 已足」用——要把頁變成池內可服務的。
                                           * 回傳實際拿回幾塊,**可能 < nblocks 甚至 0**:
                                           * 遷移會因短期 pin / writeback / 無遷移目的地而失敗。
                                           * 內部輪替 cma_blocks[],連呼叫不會一直撞同一個 stuck 塊。 */
+int  pool_cma_to_ext(int nblocks);       /* cma→ext:放棄監護。標籤翻回 MOVABLE + 刪 cma_blocks 簿記。
+                                          * **不遷移、不逐出、保證成功**:借用者留著他們的頁(變普通 movable),
+                                          * 空閒的隨標籤回一般 freelist。回傳實際放掉幾塊(<=庫存)。
+                                          * 縮儲備池與 rmmod 都用它——不需要把頁弄回自己池子的場合。 */
 int  pool_to_cma(int nblocks);           /* avail→cma:從底端取 cma_able 的整塊翻入 */
 int  pool_to_ext(int npages);            /* avail→ext:從頂端 free(先丟 !cma_able) */
 bool pool_cand_push(pfn);                /* cma_complete 專用,見 §7:候選 FIFO */
@@ -109,9 +114,7 @@ int  pool_served_to_ext_all(void);  /* 每個 entry:
                                      *   released_at == 0 → put_page + 刪 entry
                                      *     (SERVED_PURGED,記 purge_log)。頁若仍被 VM pin,
                                      *     它跟著 VM 活,VM 退出後自然回 buddy——不逐出誰。 */
-int  pool_cma_to_ext_all(void);     /* 放棄監護:block 標籤翻回 MOVABLE 即完成。
-                                     * 借用中的頁留給借用者(本來就是 movable),
-                                     * 空閒的隨標籤回一般 freelist。不逐出、不遷移。 */
+int  pool_cma_to_ext_all(void);     /* = pool_cma_to_ext(全部):rmmod 專用薄包裝 */
 
 /* ── 查詢 ─────────────────────────────────────────────── */
 int pool_avail(void); pool_served(void); pool_in_flight(void);
@@ -211,7 +214,7 @@ init_ctx(profile):
 	stage.cheap_acquire= profile & P_CHEAP
 	stage.main_acquire = stage.cma_complete = (profile & P_MAIN)
 	/* 「建儲備池」不是獨立 stage:main/cheap 填 avail 到 want_cma,flip 把超過 want 的挪進 cma */
-	stage.stage_in = stage.flip = stage.shed = true
+	stage.stage_in = stage.drop_reservoir = stage.flip = stage.shed = true
 	precise_target_pages = main_target_pages = nil
 	non_ranged_acquire_retry_hp = 8
 	stage_in_hp = 8
@@ -322,23 +325,24 @@ adjust_round():                            /* 每 10ms */
 		pool_sweep_catch(pfn)              /* 失敗:留在 released,等逾時 purge */
 		if (empty(precise_target_pages))   stage.precise = false
 
-	case stage_in:       /* cma→avail(→ext):一輪一塊,避免 avail 暴脹 */
-		/* 兩種情況走到這:pool 短而總量已足(再向外拿會衝破 I2,這是唯一合法來源);
-		 * 或 want_cma 被調小(儲備池要拆)。統一條件就是 cma_excess>0。 */
-		if (!cma_capable || cma_excess <= 0) { stage.stage_in = false; break }
-		if (pool_from_cma(1) == 0):        /* ★ 遷移失敗:借用者這輪動不了(pin/writeback/無去處) */
-			if (--stage_in_hp == 0)    { stage.stage_in = false; break }  /* 連續撞牆 → 放棄本輪,回報 partial */
-			break                      /* 這輪先過,下輪再試(pool_from_cma 內部已輪到別的塊) */
+	case stage_in:       /* cma→avail:pool 短而 total 已足 → 從自己的儲備池補「池內可服務的頁」 */
+		/* 只有這個場合需要 cma→avail:頁必須變成池內、我們擁有的、可服務 VM 的。
+		 * want_cma 縮小不走這裡——那不需要頁回池子,走 drop_reservoir(cma→ext)。 */
+		if (!cma_capable || diff_want <= 0 || cma_excess <= 0) { stage.stage_in = false; break }
+		if (pool_from_cma(1) == 0):        /* 遷移失敗:借用者這輪動不了(pin/writeback/無去處) */
+			if (--stage_in_hp == 0)    { stage.stage_in = false; break }  /* 連續撞牆 → 放棄,partial */
+			break                      /* 下輪再試(pool_from_cma 內部已輪到別的塊) */
 		stage_in_hp = 8                    /* 成功一次就回血 */
-		if (pool_held() > ctx.want):       /* want_cma 在縮 → 這塊是多的,當輪就送走 */
-			pool_to_ext(pool_held() - ctx.want)   /* cma→avail→ext 一塊走完,avail 回基線 */
-		/* held <= want → 這塊是要補進 pool 的(total 已足、pool 短),留著,不 shed。
-		 *
-		 * 【為什麼不能先全抽再 shed】avail 1G / want_cma 8G(借出 7.9G),調成 1G/1G:
-		 *   若 stage_in 把 7G 全抽回 avail 才輪到 shed,中間 avail 撐到 8G、
-		 *   7.9G 借用者一次被逐出 → 壓力尖峰。
-		 *   一輪一塊 reclaim+shed:每輪只逐出一個 block(2MB),壓力攤平到數十秒,
-		 *   avail 全程 ≈ want。這正是「小塊小塊執行」。 */
+		/* 只在 pool 短(diff_want>0)時跑,reclaim 的塊填進 pool,held 不會超過 want → 不需 shed。 */
+
+	case drop_reservoir: /* cma→ext:want_cma 縮 → 放棄監護,不逐出、保證成功 */
+		/* 取代前兩輪「stage_in 逐塊 reclaim+shed 攤平逐出」的做法——那是為不必要的逐出想辦法。
+		 * 縮儲備池根本不必把頁弄回池子:翻標籤回 MOVABLE + 刪簿記即可。
+		 * 借用者留著他們的頁(變普通 movable),空閒的隨標籤回系統。零遷移、零逐出、零壓力。
+		 * avail 1G / want_cma 8G(借出 7.9G) 調成 1G/1G:直接 drop 7G,沒有暴脹、沒人被逐出。 */
+		if (!cma_capable || cma_excess <= 0 || diff_want > 0) { stage.drop_reservoir = false; break }
+		/* diff_want>0(pool 短)時先讓 stage_in 用掉需要的量(它排在前面),這裡只處理純多餘。 */
+		pool_cma_to_ext(min(cma_excess, DROP_BATCH=64))    /* 保證成功,可批次,不必逐塊攤平 */
 
 	case cheap_acquire:  /* 向系統要,最便宜的一級:撿現成,失敗即停 */
 		if (new_page_need <= 0)            { stage.cheap_acquire = false; break }
@@ -450,11 +454,12 @@ rmmod:                        /* 全同步。worker 停掉之後就沒有 worker
 
 卸載順序仍是鐵律:**先卸 hook,再停 worker,最後交還參照**。
 
-**served→ext 與 cma→ext 是 rmmod 專用的直達邊**,不違反「avail 是樞紐」:
-執行期的縮小走 `cma→avail→ext`,因為那是**要把記憶體拿回來**(逐出借用者、收回、再釋放);
-rmmod 走直達,因為意圖相反——**停止監護**,借用者留著他們正在用的頁,誰都不被逐出。
-兩種意圖、兩條路,同名不同事。也因此 rmmod 的 `*→ext` 全部同步完成:
-它不需要逐出、不需要遷移,每一步都是 O(entries) 的簿記加 free,沒有慢的部分。
+**`cma→ext`(`pool_cma_to_ext`)是共用原語,rmmod 與執行期縮儲備池都用它**:
+停止監護、翻標籤回 MOVABLE、刪簿記,借用者留著頁,保證成功。
+`served→ext` 仍是 rmmod 專用(執行期沒有直接放棄 served 的場景)。
+`cma→avail`(會逐出、會失敗)只在「pool 短而 total 已足、要把頁弄回池子服務 VM」時用——
+執行期縮小**不**走它。這也是 rmmod 的 `*→ext` 能全同步的原因:
+翻標籤+刪簿記+free,每步 O(entries),沒有逐出/遷移這種慢的部分。
 
 ---
 
@@ -480,7 +485,7 @@ rmmod 走直達,因為意圖相反——**停止監護**,借用者留著他們�
 | 16 | **adjust_trigger → adjust_try**:run!=0 就放棄,不續命不覆寫 | 所有觸發者統一語意;acquire 撞上=EBUSY,release 撞上=靜默重試。ctx 只在 run==0 可寫,自然成立 |
 | 17 | **調小 want_cma 先 clamp pool_total** | 否則 `ctx.want_cma=max(pool_total,真值)` 用回舊高值,SHRINK 縮不動 |
 | 18 | **執行期 cma→ext = stage_in+shed 組合**,無直達邊(直達只在 rmmod) | 執行期意圖=拿回記憶體(逐出借用者);rmmod 意圖=停止監護(不逐出)。回答「cma→ext 如何引入 adjust」 |
-| 19 | **stage_in 抽一塊立刻 shed 一塊**(want_cma 縮時),不先全抽再 shed | 否則中間態 avail 暴脹、大量借用者一次被逐出=壓力尖峰。逐塊 reclaim+shed 把逐出攤平到數十秒,avail 全程 ≈ want。回答本輪「小塊小塊執行」 |
+| 19 | **want_cma 縮走 cma→ext(drop_reservoir),不走 cma→avail→ext** | 前兩輪用「逐塊 reclaim+shed 攤平逐出」解 avail 暴脹,是為不必要的逐出想辦法。縮儲備池不需頁回池子:翻標籤回 MOVABLE+刪簿記即可,借用者留著頁,零遷移零逐出零壓力。cma→avail(會失敗)只剩「pool 短、total 已足」補池子一個用途 |
 | 20 | **cma→avail 會在 kapi 層失敗**(遷移借用者:短期 pin/writeback/無去處),stage_in 有 hp 給上限、內部輪替避免撞同一塊 | 舊碼 cma_block_demolish 已回 -errno,v2 設計原本當它必成:會永遠空轉同一個 stuck 塊、且縮不動時無聲。stuck 塊留在 cma 仍是「我們的」,只是這輪無法變現;shrink 因此可能 partial,要回報 |## 10. 明確不做 / 待決
 
 - 不做 tree/雙池(atomic 插入點);不宣稱物件化防競態(它買到的是維護點收斂)。
