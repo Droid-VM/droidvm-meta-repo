@@ -91,7 +91,10 @@ bool pool_from_ext_contig_any(void);     /* alloc_contig_pages,拿不到指定�
 bool pool_from_ext_contig_at(pfn);       /* alloc_contig_range 指定 2MB 窗 → avail */
 bool pool_sweep_catch(pfn);              /* 同上,但目標是自己 released 的頁:
                                           * 成功記 ORIGIN_SWEEP 而非 ORIGIN_USER */
-int  pool_from_cma(int nblocks);         /* cma→avail:逐出借用者、拆一個 block 回池 */
+int  pool_from_cma(int nblocks);         /* cma→avail:遷移借用者出去(alloc_contig_range)後拆塊回池。
+                                          * 回傳實際拿回幾塊,**可能 < nblocks 甚至 0**:
+                                          * 遷移會因短期 pin / writeback / 無遷移目的地而失敗。
+                                          * 內部輪替 cma_blocks[],連呼叫不會一直撞同一個 stuck 塊。 */
 int  pool_to_cma(int nblocks);           /* avail→cma:從底端取 cma_able 的整塊翻入 */
 int  pool_to_ext(int npages);            /* avail→ext:從頂端 free(先丟 !cma_able) */
 bool pool_cand_push(pfn);                /* cma_complete 專用,見 §7:候選 FIFO */
@@ -211,6 +214,7 @@ init_ctx(profile):
 	stage.stage_in = stage.flip = stage.shed = true
 	precise_target_pages = main_target_pages = nil
 	non_ranged_acquire_retry_hp = 8
+	stage_in_hp = 8
 	approach/evict = profile 帶的(SHRINK/RELEASE: 用不到;USER: 使用者給;INSMOD: alloc_pages/無)
 
 	/* 目標值在觸發當下快照進 ctx,輪內不再讀全域(全域可能被 sysfs 改)。 */
@@ -280,6 +284,7 @@ struct adjust_ctx {
 	enum  { EVICT_MEMCG,           /* try_to_free_mem_cgroup_pages */
 	        EVICT_ISOLATE }        /* folio_isolate_lru + reclaim_pages */  evict;
 	int   non_ranged_acquire_retry_hp;   /* 初值 8 */
+	int   stage_in_hp;                   /* cma→avail 連續失敗的忍耐值,初值 8 */
 };
 
 adjust_round():                            /* 每 10ms */
@@ -321,7 +326,10 @@ adjust_round():                            /* 每 10ms */
 		/* 兩種情況走到這:pool 短而總量已足(再向外拿會衝破 I2,這是唯一合法來源);
 		 * 或 want_cma 被調小(儲備池要拆)。統一條件就是 cma_excess>0。 */
 		if (!cma_capable || cma_excess <= 0) { stage.stage_in = false; break }
-		pool_from_cma(1)                   /* 逐出「一個 block」的借用者(慢是刻意的) */
+		if (pool_from_cma(1) == 0):        /* ★ 遷移失敗:借用者這輪動不了(pin/writeback/無去處) */
+			if (--stage_in_hp == 0)    { stage.stage_in = false; break }  /* 連續撞牆 → 放棄本輪,回報 partial */
+			break                      /* 這輪先過,下輪再試(pool_from_cma 內部已輪到別的塊) */
+		stage_in_hp = 8                    /* 成功一次就回血 */
 		if (pool_held() > ctx.want):       /* want_cma 在縮 → 這塊是多的,當輪就送走 */
 			pool_to_ext(pool_held() - ctx.want)   /* cma→avail→ext 一塊走完,avail 回基線 */
 		/* held <= want → 這塊是要補進 pool 的(total 已足、pool 短),留著,不 shed。
@@ -473,9 +481,12 @@ rmmod 走直達,因為意圖相反——**停止監護**,借用者留著他們�
 | 17 | **調小 want_cma 先 clamp pool_total** | 否則 `ctx.want_cma=max(pool_total,真值)` 用回舊高值,SHRINK 縮不動 |
 | 18 | **執行期 cma→ext = stage_in+shed 組合**,無直達邊(直達只在 rmmod) | 執行期意圖=拿回記憶體(逐出借用者);rmmod 意圖=停止監護(不逐出)。回答「cma→ext 如何引入 adjust」 |
 | 19 | **stage_in 抽一塊立刻 shed 一塊**(want_cma 縮時),不先全抽再 shed | 否則中間態 avail 暴脹、大量借用者一次被逐出=壓力尖峰。逐塊 reclaim+shed 把逐出攤平到數十秒,avail 全程 ≈ want。回答本輪「小塊小塊執行」 |
-## 10. 明確不做 / 待決
+| 20 | **cma→avail 會在 kapi 層失敗**(遷移借用者:短期 pin/writeback/無去處),stage_in 有 hp 給上限、內部輪替避免撞同一塊 | 舊碼 cma_block_demolish 已回 -errno,v2 設計原本當它必成:會永遠空轉同一個 stuck 塊、且縮不動時無聲。stuck 塊留在 cma 仍是「我們的」,只是這輪無法變現;shrink 因此可能 partial,要回報 |## 10. 明確不做 / 待決
 
 - 不做 tree/雙池(atomic 插入點);不宣稱物件化防競態(它買到的是維護點收斂)。
 - 排序照舊在 adjust_worker 輪尾,不是獨立 worker。
+- **cma→avail 永久失敗的收尾**:借用者被驅動長期 pin(不該發生但會),
+  該塊縮不回來。目前:stuck 塊留在 cma、shrink 回報 partial、下次 trigger 再試。
+  要不要對「N 次 campaign 都縮不動」發 sysfs 可讀的警示,待定。
 - **待決**:`released` 命名(released/handover);`GRACE` 具體值(現 3s 級);
   `ADJUST_RUN_MAX` 與各批次常數要在真機上調。
