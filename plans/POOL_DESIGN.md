@@ -180,6 +180,22 @@ init_ctx(profile):
 	precise_target_pages = main_target_pages = nil
 	non_ranged_acquire_retry_hp = 8
 	approach/evict = profile 給的(BACKGROUND: alloc_pages / 無 evict)
+
+	/* 目標值在觸發當下快照進 ctx,輪內不再讀全域(全域可能被 sysfs 改)。 */
+	if (profile == USER || profile == INSMOD):
+		want     = pool_want                 /* 真值 */
+		want_cma = pool_want_with_cma
+		is_user  = true
+	else:                                    /* BACKGROUND */
+		want     = pool_want                 /* I1 份額用真值(見下方【詮釋】) */
+		want_cma = max(pool_total, pool_want_with_cma)   /* 至少維持已證明過的高水位 */
+		is_user  = false
+	/* pool_total = 曾成功過的最大總監護頁數(held_cma 高水位),
+	 * 由 USER run 結束時更新(見 §7 輪尾),使用者縮小目標時 clamp 下降(既有行為)。
+	 * 【詮釋】使用者原話「背景代入 max(pool_total,真值)」對 want / want_cma 皆可讀,
+	 *  但 pool_total 是「總監護」量,拿去當 I1(pool 份額)的下限會把儲備池抽回池子、
+	 *  破壞 pool/cma 分割。故 max 只套在 want_cma(總量),want(分割點)用真值。
+	 *  若原意是兩者都套,改這一行即可——但那會讓背景把 cma 抽乾。 */
 ```
 
 ---
@@ -215,6 +231,9 @@ release_round():                          /* 每 1000ms */
 /* ctx ─────────────────────────────────────────────────── */
 struct adjust_ctx {
 	int   run;
+	int   want;          /* 這一輪瞄準的 I1 目標(pool 份額),快照,輪內不變 */
+	int   want_cma;      /* 這一輪瞄準的 I2 目標(總監護),快照,輪內不變 */
+	bool  is_user;       /* USER run:結束成功時抬 pool_total 高水位 */
 	struct { bool precise, stage_in, cheap_acquire,
 	              main_acquire, cma_complete, flip, shed; } stage;
 	list  precise_target_pages;     /* nil = 尚未初始化 */
@@ -232,16 +251,23 @@ adjust_round():                            /* 每 10ms */
 
 	/* 每輪重算,絕不快取 —— 目標值與池況隨時在變 */
 	held           = pool_held()           /* 含 in_flight,見 §1 */
-	diff_want      = pool_want          - held
+	want_cma_eff   = cma_capable ? max(ctx.want_cma, ctx.want) : ctx.want
+	diff_want      = ctx.want           - held
 	diff_want_cma  = want_cma_eff       - (held + pool_cma())
-	                 /* want_cma_eff = cma_capable ? max(want_cma, want) : want */
 	new_page_need  = diff_want_cma
-	reserve_target = want_cma_eff - pool_want
+	reserve_target = want_cma_eff - ctx.want
 	cma_excess     = pool_cma() - max(reserve_target, 0)
+	/* 全部讀 ctx 快照,不讀全域 pool_want/pool_want_with_cma —— 輪內目標恆定,
+	 * sysfs 中途改值不會讓這一輪自相矛盾;下一次 trigger 才帶新值進來。 */
 
 	st = 第一個仍為 true 的 stage 旗標
 	if (沒有):
-		if (所有不變量已達成 || run 即將耗盡) { run = 0; stop_reason = ...; return }
+		if (所有不變量已達成 || run 即將耗盡):
+			if (ctx.is_user):
+				pool_total = max(pool_total, pool_held() + pool_cma())
+				/* 高水位:這次 USER run 真的撐到這麼多且沒出事 → 背景以後可維持到此。
+				 * 只在 USER run 抬,背景不能自己把天花板墊高(那就繞過了風險歸屬)。 */
+			run = 0; stop_reason = ...; return
 		stage = 全部 true                   /* 還有缺口:再跑一個 campaign。
 		                                     * run 倒數是總上限,不會無窮迴圈 */
 
@@ -381,6 +407,9 @@ rmmod 走直達,因為意圖相反——**停止監護**,借用者留著他們�
 | 8 | **USER 撞上進行中 → -EBUSY** | ctx 規則(run>0 時外部不可寫)的直接推論:要改 approach 得先 acquire=0 |
 | 9 | **cheap/shed 的每輪批次**(64/32) | 一輪一頁的話 prefill 3072 頁要 30 秒;cheap 很便宜,批次不傷中斷延遲(run=0 最多等一輪) |
 | 10 | **cma_complete 需要 contig_range 能力**,沒有就整段跳過 | acquire 0/1 的裝置(不能指定位置)本來就做不到湊塊 |
+| 11 | **目標值快照進 ctx**(want/want_cma),輪內只讀快照 | sysfs 中途改值不會讓進行中的一輪自相矛盾;下次 trigger 才帶新值。取代原本輪內直讀全域 pool_want |
+| 12 | **背景 want_cma = `max(pool_total, 真值)`,但 want(I1 分割)用真值** | 使用者原話對兩者皆可讀;pool_total 是總監護量,拿去當 pool 份額下限會把儲備池抽乾。若原意是兩者都套,改 init_ctx 一行——**這是我替你做的詮釋,請確認** |
+| 13 | **pool_total 高水位只由 USER run 結束時抬**,縮小目標時 clamp 下降 | 「已成功過的最大」語意;背景不能自己墊高天花板,否則繞過風險歸屬。clamp 下降是既有 resize 行為 |
 
 ## 10. 明確不做 / 待決
 
