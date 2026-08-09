@@ -317,11 +317,20 @@ adjust_round():                            /* 每 10ms */
 		pool_sweep_catch(pfn)              /* 失敗:留在 released,等逾時 purge */
 		if (empty(precise_target_pages))   stage.precise = false
 
-	case stage_in:       /* cma→avail:儲備池超過應有大小時,先拿自己的回來 */
+	case stage_in:       /* cma→avail(→ext):一輪一塊,避免 avail 暴脹 */
 		/* 兩種情況走到這:pool 短而總量已足(再向外拿會衝破 I2,這是唯一合法來源);
 		 * 或 want_cma 被調小(儲備池要拆)。統一條件就是 cma_excess>0。 */
 		if (!cma_capable || cma_excess <= 0) { stage.stage_in = false; break }
-		pool_from_cma(1)                   /* 一輪一塊:拆塊要逐出借用者,慢 */
+		pool_from_cma(1)                   /* 逐出「一個 block」的借用者(慢是刻意的) */
+		if (pool_held() > ctx.want):       /* want_cma 在縮 → 這塊是多的,當輪就送走 */
+			pool_to_ext(pool_held() - ctx.want)   /* cma→avail→ext 一塊走完,avail 回基線 */
+		/* held <= want → 這塊是要補進 pool 的(total 已足、pool 短),留著,不 shed。
+		 *
+		 * 【為什麼不能先全抽再 shed】avail 1G / want_cma 8G(借出 7.9G),調成 1G/1G:
+		 *   若 stage_in 把 7G 全抽回 avail 才輪到 shed,中間 avail 撐到 8G、
+		 *   7.9G 借用者一次被逐出 → 壓力尖峰。
+		 *   一輪一塊 reclaim+shed:每輪只逐出一個 block(2MB),壓力攤平到數十秒,
+		 *   avail 全程 ≈ want。這正是「小塊小塊執行」。 */
 
 	case cheap_acquire:  /* 向系統要,最便宜的一級:撿現成,失敗即停 */
 		if (new_page_need <= 0)            { stage.cheap_acquire = false; break }
@@ -463,7 +472,7 @@ rmmod 走直達,因為意圖相反——**停止監護**,借用者留著他們�
 | 16 | **adjust_trigger → adjust_try**:run!=0 就放棄,不續命不覆寫 | 所有觸發者統一語意;acquire 撞上=EBUSY,release 撞上=靜默重試。ctx 只在 run==0 可寫,自然成立 |
 | 17 | **調小 want_cma 先 clamp pool_total** | 否則 `ctx.want_cma=max(pool_total,真值)` 用回舊高值,SHRINK 縮不動 |
 | 18 | **執行期 cma→ext = stage_in+shed 組合**,無直達邊(直達只在 rmmod) | 執行期意圖=拿回記憶體(逐出借用者);rmmod 意圖=停止監護(不逐出)。回答「cma→ext 如何引入 adjust」 |
-
+| 19 | **stage_in 抽一塊立刻 shed 一塊**(want_cma 縮時),不先全抽再 shed | 否則中間態 avail 暴脹、大量借用者一次被逐出=壓力尖峰。逐塊 reclaim+shed 把逐出攤平到數十秒,avail 全程 ≈ want。回答本輪「小塊小塊執行」 |
 ## 10. 明確不做 / 待決
 
 - 不做 tree/雙池(atomic 插入點);不宣稱物件化防競態(它買到的是維護點收斂)。
