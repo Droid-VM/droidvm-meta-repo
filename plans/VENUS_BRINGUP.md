@@ -171,8 +171,15 @@ dev/golden MC 差異二分、或 mesa 上游 kopper 修 cherry-pick。
 真因修法候選:zink kopper 上游韌性修 cherry-pick、查 venus 端 acquire 失敗原因
 (首幀 resize/OUT_OF_DATE?)。GALLIUM_THREAD=0 不進 deb(犧牲 GL 效能)。
 
-**剩:MC kopper 真因修(上游 cherry-pick 或 venus acquire 失敗根因)+ venus_host pool
-merge(ring 仍 runtime-share)+ 效能基準(鎖頻/交錯 A/B)+ fork 私有 diag 清理。**
+**kopper 續(2026-08-12 凌晨二)**:acquire_submit 護欄(mesa e14d2e5fc2c)擋掉原崩點後
+crash 移到 `begin_rendering+0x17d8`——證實是**整場 tc-vs-swapchain-recreate 競態**,單點
+防禦打地鼠不可行;根治=上游 tc/kopper 同步(未做)。**繞開觸發源成功**:MC `fullscreen:true`
+(首幀幾何穩定→無 OUT_OF_DATE→無 recreate)下零 crash 零 workaround 進世界,世界渲染正確。
+**驗收 3/3 達成**(known-issue:MC windowed 首啟動在幾何變動時仍可能踩 begin_rendering
+競態;護欄+fullscreen 是實用解,真根治留上游同步修)。
+
+**剩:tc/kopper recreate 競態真根治(上游同步修)+ venus_host pool merge(ring 仍
+runtime-share)+ 效能基準(鎖頻/交錯 A/B)+ fork 私有 diag 清理。**
 
 原「vkmark 卡在 present 的 semaphore」調查紀錄(已破,留檔):桌面(kwin/plasma,
 zink 路)跑得動且持續渲染(fence→18002),但 vkmark(純 vn ICD)第一輪 texture 場景跑一陣後
