@@ -111,6 +111,75 @@ survey 見 `plans/VENUS_SURVEY.md`。此檔是實作進度錨點(session 換手�
 RM constituent 上限,解法=resource_map_blob 對 virgl 組件 memfd 泛用呼叫
 prepare_blob_backing)、各 repo commit(等 build r2 綠)、部署+bring-up(task 7)。
 
+## bring-up 戰況(2026-08-11 深夜)
+
+**已點亮**:vulkaninfo 回報 `Virtio-GPU Venus (Adreno 830)`;kwin 全鏈 zink→venus 起得來;
+guest-alloc blob 管線實測通(VENUS-DIAG:park fd→get_blob flags=0x9/0xf 成對,kwin 的
+3686400 colorbuffer 帶 CREATE_GUEST_HANDLE);兩池就位;wire format 1 正確;
+`--gpu virglrenderer,context-types=virgl2:venus`(**venus 單獨列會 NO_VIRGL → 2D scanout
+資源建不出來**,fbcon/EDK2 全黑+ErrInvalidResourceId 風暴——已加 virgl2)。
+
+**已修的三個 vkr in-process teardown 炸點**(kwin session 結束→FORTIFY abort→VMM 死;
+詳見 memory `vkr-ring-monitor-teardown-crash`):ring_monitor 先停(vkr_context.c)、
+`dev->object_mutex` 的 mtx_destroy 移到 objects/queues 清理後(vkr_device.c;bionic FORTIFY
+才抓得到的上游確定性 bug)、config.h 定義 `ENABLE_RENDER_SERVER_WORKER_THREAD`
+(on_worker_thread=true → teardown 真清理:DeviceWaitIdle+VK 物件 destroy+DestroyDevice)。
+monitor 修驗證過(sddm restart 存活);後兩修在 build r9。
+
+**【已破,桌面出圖 2026-08-11 15:16】**:KDE splash/桌面經 venus 全鏈渲染出圖,
+fence 15→2028。解鎖組合=guest `/etc/environment.d/99-zink-debug.conf` 設
+`MESA_SHADER_CACHE_DISABLE=true` + `ZINK_DEBUG=nobgc,nopc,noopt`(哪個是關鍵待二分;
+根因=zink 的 `prog->base.cache_fence` 等待與 disk-cache/precompile job 的死鎖,headless venus
+submit+fence 實測健康、vkcube 卡只是等 kwin 的 wayland 回應=二次受害)。
+**環境變數傳遞的坑(花了整晚)**:`systemctl restart sddm` **不會重啟既存 wayland session**
+(user@1000 持有;只有 `loginctl terminate-user` 會)——中間好幾輪「重啟後仍黑」其實都在看
+15:03 那個卡死的舊 kwin;kwin 的 env 來源是 user-manager 的 **environment.d**
+(`/usr/lib/environment.d/50-mesa-guest.conf` = mesa deb 的 zink override 同路),
+per-unit drop-in/user.conf.d/etc-environment 都不可靠。workaround 若要進驗收,
+寫進 mesa-guest-venus deb 的 environment.d 檔。
+
+**【2026-08-12 全破:桌面+vkmark 都通,零 workaround】** 兩個互相糾纏的真根因,都已修+commit:
+1. **vn ring mutex 重入自鎖**(mesa-venus **958d64bb23f**):`vn_ring_cs_upload_locked`
+   持鎖下,guest_vram 的新 upload chunk 觸發 roundtrip → `vn_async_vkWaitVirtqueueSeqnoMESA`
+   → `vn_ring_submit_command` → 同鎖重入。kwin 首個大 shader 上傳必踩(=黑畫面);
+   vkmark texture 踩(=present 卡+swapchain fence 拖死 kwin)。修=`vn_ring_roundtrip_locked`。
+   zink 的 SHADER_CACHE/nobgc workaround 只是繞開觸發點,**全部移除仍正常**。
+2. **crosvm per-ring fence 路由**(crosvm **b7069c454**):virgl `create_fence` 一律呼全域
+   `virgl_renderer_create_fence`(vrend GL timeline)→ RING_IDX fence 永不 signal;
+   改路由到 `virgl_renderer_context_create_fence`。
+驗證:桌面無 workaround 出圖、**vkmark 435**(vertex 451/texture 461/shading 395 @800x600,
+DVFS 未鎖)、fence 3.3 萬順跑、session restart 存活(teardown 三修 virglrenderer ecc56c8)。
+**剩:MC + 正式驗收(乾淨 overlay+兩 deb)+ venus_host pool merge(ring 仍 runtime-share)+
+效能基準(鎖頻/交錯 A/B)。**
+
+原「vkmark 卡在 present 的 semaphore」調查紀錄(已破,留檔):桌面(kwin/plasma,
+zink 路)跑得動且持續渲染(fence→18002),但 vkmark(純 vn ICD)第一輪 texture 場景跑一陣後
+卡死、SIGTERM 殺不掉(SIGKILL 可):`vn_wsi[0,0]` thread 卡
+`wsi_common_queue_present → wsi_signal_dma_buf_from_semaphore → vn_GetSemaphoreFdKHR →
+vn_wsi_sync_wait(futex)`——present 的 explicit→implicit sync 橋在等 render-complete
+semaphore 就緒,永不來。頭號嫌疑:**venus semaphore feedback**(host GPU 把完成旗標寫進
+guest_vram 池的 feedback buffer,guest CPU 輪詢)——guest-alloc import 的 **GPU 寫→guest CPU
+讀**方向可能沒接通(gfxstream 時代 pattern_match 驗過該方向,venus 的 import 路要重驗;
+也可能是 sync_fd export/allow_vk_wait_syncs 路)。桌面 zink 為何沒事:待查(可能 zink 的
+present 同步路不同或頻率低)。查法:headless 加 semaphore 測試(vksubmit.c 擴充
+signal semaphore + vkWaitSemaphores)、feedback buffer 的 VENUS-DIAG(get_blob 對應
+res)、GPU 寫池頁 aliasing test(池側讀回 GPU 寫的 pattern)。
+
+原「未解=黑畫面(kwin 不 present)」調查紀錄(已破,留檔):kwin 主執行緒卡
+`zink_get_gfx_pipeline → do_futex_fence_wait`(等 pipeline 編譯 fence),venus/host 全程
+無錯、fence 5/5 全 signal、ring-5 idle 空、**新 vulkaninfo instance 正常**——不是 transport
+卡,是 guest 端 zink 的 pipeline 編譯 job 沒人執行/沒 signal(kwin thread 清單裡沒有 zink
+compile queue thread)。假設=turnip-via-venus 露出 GPL → zink async precompile 路;
+`ZINK_DEBUG=nobgc` 測試未完成(第一次 drop-in 沒進 user manager;第二次 terminate-user
+撞 teardown crash)。**r9 部署後續作**:/etc/environment 已有 ZINK_DEBUG=nobgc,
+完整重啟 session 驗 nobgc;若仍卡,gdb 看 fence 屬誰(zink prog cache?)、
+或試 `ZINK_DEBUG=noopt`/`GALLIUM_THREAD=0`、比對 gfxstream ICD 下 zink 的 ext 差集
+(GPL/pipeline_cache_control/maintenance5)。
+diag 插樁:adapter VENUS-DIAG(fprintf stderr)在 attach/get_blob/park;
+`GPU_SCANOUT_TRACE=1` 開 crosvm flush/scanout strace;guest `droidvm_trace=1` 開 VGBLOB。
+fbcon 游標閃爍=每 0.5s flush res=2(黑畫面時 host 唯一動靜,別誤判成 kwin 在送幀);
+`note_flush_route` 每字串只印一次。
+
 ## 下一步(依序)
 1. **Vendor**:cp upstream `src/venus/`(整包含 venus-protocol)+ `venus_hw.h` → fork;
    include 路徑適配(upstream 是 src/util/、src/vrend/ 佈局:`../vrend/vrend_winsys_gbm.h`→
