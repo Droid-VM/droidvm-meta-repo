@@ -178,8 +178,19 @@ crash 移到 `begin_rendering+0x17d8`——證實是**整場 tc-vs-swapchain-rec
 **驗收 3/3 達成**(known-issue:MC windowed 首啟動在幾何變動時仍可能踩 begin_rendering
 競態;護欄+fullscreen 是實用解,真根治留上游同步修)。
 
-**剩:tc/kopper recreate 競態真根治(上游同步修)+ venus_host pool merge(ring 仍
-runtime-share)+ 效能基準(鎖頻/交錯 A/B)+ fork 私有 diag 清理。**
+**venus_host pool merge 落地(2026-08-12 深夜二,task 3 完)**:vkr `blob_id==0` shmem 改從
+venus_host 池子分配(coalescing free list;`vkr_renderer_create_resource` 增 out_map_ptr/
+out_fd_offset;adapter 轉遞;crosvm `virgl_pool_offset` 認兩個池窗+改名)。驗證:
+`venus_host pool: 16 MiB` init、**runtime-share 歸零**(mthp 僅 boot 3 region)、
+vkr-ring ×25、三關回歸全過(MC 進世界零 crash)。fusion 語意=guest 仍提位置,host 回
+MAP_INFO_POOL+offset 蓋掉(池)或不帶 POOL(share 進 guest 位置=fallback)。
+**兩個踩坑**:(1) vkr 私有 mmap 的 VA 與 crosvm 窗檢查(VENUS_POOL_HOST_VA)不同→probe
+永 miss→ring 全滅(instance retry 風暴、vulkaninfo INITIALIZATION_FAILED)——修=直接用
+VMM 映射;(2) `drm2kgsl_pool_offset` 已改名 `virgl_pool_offset`。
+vkmark 單次 125(vs 前輪 457)=DVFS 雜訊類,正式基準要鎖頻/交錯 A/B。
+
+**剩:tc/kopper recreate 競態真根治(上游同步修;現行=護欄+fullscreen 繞開)+
+效能基準(鎖頻/交錯 A/B)+ fork 私有 diag(VENUS-DIAG)清理或定案。**
 
 原「vkmark 卡在 present 的 semaphore」調查紀錄(已破,留檔):桌面(kwin/plasma,
 zink 路)跑得動且持續渲染(fence→18002),但 vkmark(純 vn ICD)第一輪 texture 場景跑一陣後
