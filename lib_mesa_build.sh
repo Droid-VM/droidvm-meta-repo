@@ -23,7 +23,7 @@ MESA_URL=${MESA_URL:-https://github.com/Droid-VM/mesa.git}
 
 mesa_build_variant() {
     local v=$1 src ver deb
-    case $v in gfxstream|drm2kgsl) ;; *) echo "error: unknown variant '$v'" >&2; return 2 ;; esac
+    case $v in gfxstream|drm2kgsl|venus) ;; *) echo "error: unknown variant '$v'" >&2; return 2 ;; esac
     command -v docker >/dev/null || { echo "error: docker required" >&2; return 1; }
 
     # One clone, two worktrees. The variants' branches share no history (26.0.3 for gfxstream,

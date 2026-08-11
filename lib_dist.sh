@@ -50,6 +50,7 @@ dist_report() {
     [ -e "$DIST"/droidvm-guest-additions_*.deb ] 2>/dev/null || missing+=("9_build_guest_addition.sh")
     [ -e "$DIST"/mesa-guest-gfxstream_*.deb ]   2>/dev/null || missing+=("8_build_guest_mesa_gfx.sh")
     [ -e "$DIST"/mesa-guest-drm2kgsl_*.deb ]    2>/dev/null || missing+=("8_build_guest_mesa_drm2kgsl.sh")
+    [ -e "$DIST"/mesa-guest-venus_*.deb ]       2>/dev/null || missing+=("8_build_guest_mesa_venus.sh")
     if [ ${#missing[@]} -gt 0 ]; then
         echo "    still to run: ${missing[*]}"
     else
