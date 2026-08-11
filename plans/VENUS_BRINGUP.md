@@ -189,6 +189,10 @@ MAP_INFO_POOL+offset 蓋掉(池)或不帶 POOL(share 進 guest 位置=fallback)�
 VMM 映射;(2) `drm2kgsl_pool_offset` 已改名 `virgl_pool_offset`。
 vkmark 單次 125(vs 前輪 457)=DVFS 雜訊類,正式基準要鎖頻/交錯 A/B。
 
+**soak(2026-08-12 02:5x)**:r13 連跑 30+ 分鐘(MC 在世界內),crosvm 零 FORTIFY、
+fence 57 萬順跑、pool 穩;MC 一次 in-game crash(hs_err_pid1916,裸位址幀,疑 kopper/tc
+競態家族,檔留 guest /home/droidvm/)——host 棧穩定,應用層 crash 待符號化+上游根治。
+
 **剩:tc/kopper recreate 競態真根治(上游同步修;現行=護欄+fullscreen 繞開)+
 效能基準(鎖頻/交錯 A/B)+ fork 私有 diag(VENUS-DIAG)清理或定案。**
 
