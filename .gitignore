@@ -21,6 +21,7 @@ mesa-guest-*.tar.gz
 mesa-guest-*.deb
 /mesa-gfxstream/
 /mesa-drm2kgsl/
+/mesa-venus/
 # turnip host ICD: built/cached blob + build checkout (5_prepare_turnip.sh); README tracked
 /turnip/*.so
 /turnip/turnip_probe
