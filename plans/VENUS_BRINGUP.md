@@ -163,8 +163,16 @@ options.txt 正常;**dev 碟同 deb 同 host 卻能進世界**(差異未定位:g
 狀態?)。下一步:hs_err 寄存器+gdb core 分析 kopper NULL 來源(swapchain 建立失敗未 bail?)、
 dev/golden MC 差異二分、或 mesa 上游 kopper 修 cherry-pick。
 
-**剩:MC-on-驗收碟 kopper crash + venus_host pool merge(ring 仍 runtime-share)+
-效能基準(鎖頻/交錯 A/B)+ fork 私有 diag(VENUS-DIAG/adapter)清理或定案。**
+**MC kopper crash 定位+繞過(2026-08-12):**反組譯實錘=`zink_kopper_acquire_submit+0x1c`
+讀 `images[dt_idx].acquired` 時 **dt_idx=0x30000658 垃圾**——kopper acquire 失敗
+(kill_swapchain 路)後 `zink_batch_rp` 仍用未初始化 index;tc thread 競態
+(`GALLIUM_THREAD=0` 三連過:主選單+進世界,渲染正確)。dev 碟不踩=acquire 不失敗
+(差異未定位)。**驗收三關實質全過**(MC 帶 GALLIUM_THREAD=0 註記)。
+真因修法候選:zink kopper 上游韌性修 cherry-pick、查 venus 端 acquire 失敗原因
+(首幀 resize/OUT_OF_DATE?)。GALLIUM_THREAD=0 不進 deb(犧牲 GL 效能)。
+
+**剩:MC kopper 真因修(上游 cherry-pick 或 venus acquire 失敗根因)+ venus_host pool
+merge(ring 仍 runtime-share)+ 效能基準(鎖頻/交錯 A/B)+ fork 私有 diag 清理。**
 
 原「vkmark 卡在 present 的 semaphore」調查紀錄(已破,留檔):桌面(kwin/plasma,
 zink 路)跑得動且持續渲染(fence→18002),但 vkmark(純 vn ICD)第一輪 texture 場景跑一陣後
