@@ -154,8 +154,17 @@ DVFS 未鎖)、fence 3.3 萬順跑、session restart 存活(teardown 三修 virg
 (Adreno 830) MESA_TURNIP)`。坑:GLFW 要 XAUTHORITY(從 kwin cmdline 抓 xauth_ 路徑),
 authlib 401 是離線帳號噪音。**dev 碟三關全過、零 workaround。**
 
-**剩:正式驗收(乾淨 overlay+兩 deb 重跑三關)+ venus_host pool merge(ring 仍
-runtime-share)+ 效能基準(鎖頻/交錯 A/B)+ fork 私有 diag(VENUS-DIAG/adapter)清理或定案。**
+**正式驗收(2026-08-12 凌晨,overlay=venus-acceptance.qcow2,golden=acceptance-gfx-clean2)
+=2/3 關過**:兩顆 deb 安裝完美(md5→Conflicts 自動移除 gfxstream→DKMS 編譯→initramfs 自動
+更新,零手工)→ 重啟後桌面出圖(r25 模組生效、venus_host 探測)✓、**vkmark 457**(未手動指
+ICD,deb 環境接線自證)✓;**MC 三連崩在 `zink_kopper_acquire_submit+0x1c`(SEGV_MAPERR,
+gallium tc thread,zink_draw→zink_batch_rp 路)**——驗收碟穩定重現、XWayland 冷熱無關、
+options.txt 正常;**dev 碟同 deb 同 host 卻能進世界**(差異未定位:golden 的 MC 首次啟動
+狀態?)。下一步:hs_err 寄存器+gdb core 分析 kopper NULL 來源(swapchain 建立失敗未 bail?)、
+dev/golden MC 差異二分、或 mesa 上游 kopper 修 cherry-pick。
+
+**剩:MC-on-驗收碟 kopper crash + venus_host pool merge(ring 仍 runtime-share)+
+效能基準(鎖頻/交錯 A/B)+ fork 私有 diag(VENUS-DIAG/adapter)清理或定案。**
 
 原「vkmark 卡在 present 的 semaphore」調查紀錄(已破,留檔):桌面(kwin/plasma,
 zink 路)跑得動且持續渲染(fence→18002),但 vkmark(純 vn ICD)第一輪 texture 場景跑一陣後
