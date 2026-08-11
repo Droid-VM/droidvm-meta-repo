@@ -149,8 +149,13 @@ per-unit drop-in/user.conf.d/etc-environment 都不可靠。workaround 若要進
    改路由到 `virgl_renderer_context_create_fence`。
 驗證:桌面無 workaround 出圖、**vkmark 435**(vertex 451/texture 461/shading 395 @800x600,
 DVFS 未鎖)、fence 3.3 萬順跑、session restart 存活(teardown 三修 virglrenderer ecc56c8)。
-**剩:MC + 正式驗收(乾淨 overlay+兩 deb)+ venus_host pool merge(ring 仍 runtime-share)+
-效能基準(鎖頻/交錯 A/B)。**
+**MC 也過了(2026-08-12 16:29 guest 時間)**:mclaunch.py 26.2 → 主選單 → 進世界,
+世界渲染零錯誤(天空/海洋/植被/手持物),log 直證 `zink Vulkan 1.4 (Virtio-GPU Venus
+(Adreno 830) MESA_TURNIP)`。坑:GLFW 要 XAUTHORITY(從 kwin cmdline 抓 xauth_ 路徑),
+authlib 401 是離線帳號噪音。**dev 碟三關全過、零 workaround。**
+
+**剩:正式驗收(乾淨 overlay+兩 deb 重跑三關)+ venus_host pool merge(ring 仍
+runtime-share)+ 效能基準(鎖頻/交錯 A/B)+ fork 私有 diag(VENUS-DIAG/adapter)清理或定案。**
 
 原「vkmark 卡在 present 的 semaphore」調查紀錄(已破,留檔):桌面(kwin/plasma,
 zink 路)跑得動且持續渲染(fence→18002),但 vkmark(純 vn ICD)第一輪 texture 場景跑一陣後
