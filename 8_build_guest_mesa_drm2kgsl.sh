@@ -11,7 +11,8 @@
 # The variant is named for the HOST translation, not the guest driver -- turnip here speaks msm
 # over vdrm and never touches a KGSL device of its own.
 #
-# Only ONE mesa-guest package can be installed in a guest at a time; see mesa-variants.sh.
+# Only ONE mesa-guest package can be installed in a guest at a time; see
+# mesa-cross/mesa-variants.sh (Droid-VM/mesa-cross, cloned by step 1 or by this step).
 set -e
 cd "$(dirname "$0")"
 source ./lib_mesa_build.sh

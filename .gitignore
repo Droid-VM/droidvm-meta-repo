@@ -3,6 +3,7 @@
 /edk2-gunyah/
 /gunyah_host_mod/
 /mesa/
+/mesa-cross/
 /droidvm-guest-additions/
 /crosvm-minimal-manifest/
 # Soong-tree entries (symlinks into crosvm_build; the tree itself is repo-synced)

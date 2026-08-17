@@ -11,7 +11,8 @@
 # wire, so the guest ICD and the host decoder are one codebase and must match -- which is why
 # it tracks mesa 26.0.3 while the drm2kgsl variant tracks a different upstream entirely.
 #
-# Only ONE mesa-guest package can be installed in a guest at a time; see mesa-variants.sh.
+# Only ONE mesa-guest package can be installed in a guest at a time; see
+# mesa-cross/mesa-variants.sh (Droid-VM/mesa-cross, cloned by step 1 or by this step).
 set -e
 cd "$(dirname "$0")"
 source ./lib_mesa_build.sh

@@ -11,7 +11,8 @@
 # host (context-types=venus). Guest-allocated VkDeviceMemory takes the drm2kgsl-style
 # HOST3D_GUEST + CREATE_GUEST_HANDLE wire shape (see the vn patch on the venus branch).
 #
-# Only ONE mesa-guest package can be installed in a guest at a time; see mesa-variants.sh.
+# Only ONE mesa-guest package can be installed in a guest at a time; see
+# mesa-cross/mesa-variants.sh (Droid-VM/mesa-cross, cloned by step 1 or by this step).
 set -e
 cd "$(dirname "$0")"
 source ./lib_mesa_build.sh

@@ -19,7 +19,9 @@ REPO=$PWD
 
 TARGET=${1:?usage: provision.sh <ssh-target> <gfxstream|drm2kgsl>}
 VARIANT=${2:?usage: provision.sh <ssh-target> <gfxstream|drm2kgsl>}
-source ./mesa-variants.sh
+# Package names and ICD paths live with the build recipe, in its own repo (cloned by step 1/8).
+[ -f mesa-cross/mesa-variants.sh ] || { echo "no mesa-cross/ -- run 1_build_crosvm_prepare.sh (or a step-8 build) first" >&2; exit 1; }
+source ./mesa-cross/mesa-variants.sh
 
 case $VARIANT in gfxstream|drm2kgsl) ;; *) echo "unknown variant: $VARIANT" >&2; exit 1 ;; esac
 

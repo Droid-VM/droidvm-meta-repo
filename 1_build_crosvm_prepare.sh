@@ -12,6 +12,10 @@ clone_at droidvm-guest-additions https://github.com/Droid-VM/droidvm-guest-addit
 # mesa is the one component with genuinely different content per variant (two unrelated
 # upstreams), so its variant branch is real rather than an alias of the trunk.
 clone_at mesa https://github.com/Droid-VM/mesa.git
+# The guest mesa build recipe (cross container, packaging, mesa-variants.sh). Step 8 clones it
+# too if it is missing, so it still works on its own; fetching it here means the prepare step
+# delivers every component, which is what "prepare" promises.
+clone_at mesa-cross https://github.com/Droid-VM/mesa-cross.git
 
 mkdir -p crosvm_build
 cd crosvm_build
