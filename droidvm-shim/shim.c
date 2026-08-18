@@ -11,8 +11,9 @@
  * replace a library, a build dependency, and the temptation to do more here than belongs here.
  *
  * Keeping the length identical is what makes that work: whatever number of ranges `/memory`
- * arrives with -- the resource manager prepends its own low-memory donation on some generations --
- * the window is split into exactly that many pieces on the way out.
+ * arrives with -- the resource manager prepends its own low-memory donation on some generations,
+ * and adds a range for every parcel it knows about -- the same number goes back out, with the
+ * window in the first one and the rest empty.
  */
 
 #include <stdint.h>
@@ -392,7 +393,6 @@ static int rewrite_memory_reg(void *fdt, uint64_t base, uint64_t size)
 {
 	struct fdt_hit hit;
 	uint32_t entries, i;
-	uint64_t chunk;
 
 	if (fdt_find_prop(fdt, NULL, "memory", "reg", &hit))
 		return -1;
@@ -400,18 +400,19 @@ static int rewrite_memory_reg(void *fdt, uint64_t base, uint64_t size)
 		return -2;
 
 	entries = hit.len / 16;
-	/* Same number of ranges out as in, so the property keeps its length and nothing in the
-	 * structure block has to move. Every piece but the last is a 2 MiB multiple. */
-	chunk = size / entries;
-	chunk &= ~0x1fffffULL;
-	if (!chunk)
-		return -3;
-	for (i = 0; i < entries; i++) {
-		uint64_t this_base = base + chunk * i;
-		uint64_t this_size = (i == entries - 1) ? size - chunk * i : chunk;
-
-		put_be64(hit.val + i * 16, this_base);
-		put_be64(hit.val + i * 16 + 8, this_size);
+	/*
+	 * The whole window in the FIRST range, and every other range emptied.
+	 *
+	 * Splitting the window evenly across the ranges would keep the length just as well, but
+	 * EDK2 reads only the first one (PrePi's FindMemnode) and would then run in a fraction of
+	 * the memory it was given. An empty range costs nothing on the other side: Linux's
+	 * early_init_dt_scan_memory skips a zero-sized entry outright.
+	 */
+	put_be64(hit.val, base);
+	put_be64(hit.val + 8, size);
+	for (i = 1; i < entries; i++) {
+		put_be64(hit.val + i * 16, 0);
+		put_be64(hit.val + i * 16 + 8, 0);
 	}
 	return 0;
 }

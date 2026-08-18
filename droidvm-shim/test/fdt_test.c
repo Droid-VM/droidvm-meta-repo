@@ -60,7 +60,9 @@ int main(int argc, char **argv)
 	check(hit.len == 32, "/memory has two ranges");
 
 	/* Rewriting keeps the length, so the structure block never moves: two ranges in, two
-	 * ranges out, together covering exactly the window. */
+	 * ranges out, the window in the first and the second emptied. Everything that was there --
+	 * the boot region, the resource manager's own donation, any parcel it knew about -- is
+	 * memory the payload must not treat as RAM, so none of it survives. */
 	check(rewrite_memory_reg(blob, 0x80400000, 0x40000000) == 0, "rewrite /memory to the window");
 	check(fdt_find_prop(blob, NULL, "memory", "reg", &hit) == 0, "/memory still there");
 	check(hit.len == 32, "and still two ranges");
@@ -71,10 +73,9 @@ int main(int argc, char **argv)
 		printf("  -> [%#llx +%#llx] [%#llx +%#llx]\n",
 		       (unsigned long long)b0, (unsigned long long)s0,
 		       (unsigned long long)b1, (unsigned long long)s1);
-		check(b0 == 0x80400000, "first range starts at the window");
-		check(b1 == b0 + s0, "the two ranges are adjacent");
-		check(s0 + s1 == 0x40000000, "together they are exactly the window");
-		check((s0 & 0x1fffff) == 0, "every range but the last is 2 MiB aligned");
+		check(b0 == 0x80400000 && s0 == 0x40000000,
+		      "the FIRST range is the whole window (EDK2 reads only that one)");
+		check(b1 == 0 && s1 == 0, "the rest are empty (Linux skips a zero-sized range)");
 	}
 
 	/* A tree that does not have what we ask for must say so rather than return a neighbour. */
