@@ -211,10 +211,22 @@ guest 用 `droidvm-guest-additions/dynpool_test` 加 `accept` / `window` / `exec
 | 讀回 host 預先寫的圖樣 | **相符** —— 拿到的真的是 host 的頁 |
 | EL0 執行(`/dev/dynpool` + `PAGE_SHARED_EXEC`,跑 `mov x0,#42; ret`)| **回傳 42** |
 | **反面對照**:同一台、同一個池子、同一個位移、同一段程式碼,只把 `GH_SHARE_EXEC` 關掉 | **`NO-EXEC: signal 7`**(SIGBUS)在 CALL,而同一頁的讀寫照常 —— 所以可執行是 ACL 的 X 給的,不是本來就有 |
-| EL1 執行 | **測不到**:7.0 的 arm64 `ioremap_prot` 要求 `PTE_USER` 且只保留記憶體型別位元,而 `ioremap_page_range()` 一律 `pgprot_nx` —— 核心 API 根本給不出可執行的 EL1 映射。實測到的 `ESR=0x8600000f`(L3 指令權限錯誤)是**我們自己的 stage-1**,不是 stage-2 |
+| EL1 執行 | **測不到,兩條路都被 stage-1 擋死** |
 
-EL1 的答案改由 shim v0 給(MMU off,只剩 stage-2,正是真實情境)。旁證:Gunyah 的
-`pgtable_access_t` 沒有「只在 EL0 可執行」這種編碼,RWX 就是兩級都可執行。
+EL1 為什麼在 Linux 裡量不到,兩條路都試過:
+
+1. **核心映射**:7.0 的 arm64 `ioremap_prot` 要求 `PTE_USER` 且只保留記憶體型別位元,底層的
+   `ioremap_page_range()` 又一律套 `pgprot_nx` —— 沒有任何 ioremap 路徑能產生可執行的核心映射。
+2. **使用者映射清掉 PXN,再從模組裡(同一個行程的 syscall 中)呼叫進去**:一樣被拒。ARMv8.7 的
+   FEAT_PAN3/EPAN 會讓「使用者可執行」的頁對 EL1 自動變成 PXN,這條路在這代核心上本來就是死的。
+
+兩次的 `ESR` 都是 `0x8600000f`(L3 指令權限錯誤)、位址都是**我們自己映的那個 VA**,也就是說
+擋下來的是 stage-1,stage-2 完全沒有表態。第二條路的程式碼已經撤掉,留著只會誤導。
+
+所以 EL1 的答案只能由 shim 給(MMU off → 沒有 stage-1 → 只剩 stage-2,正是真實情境),
+`SHIM_FLAG_PROBE_EXEC` 就是為此存在。旁證仍然很強:Gunyah 的 `pgtable_access_t` 沒有
+「只在 EL0 可執行」這種編碼,RM 把 ACL 的 RWX 映成 `PGTABLE_ACCESS_RWX` —— 和 guest 自己那塊
+LEND'd RAM(guest kernel 每分每秒都在上面執行 EL1 程式碼)用的是同一個 access 值。
 
 ### E3 開機拒絕的真因 —— 是 `/reserved-memory` 節點,不是 region
 
