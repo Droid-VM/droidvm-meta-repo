@@ -210,6 +210,7 @@ guest 用 `droidvm-guest-additions/dynpool_test` 加 `accept` / `window` / `exec
 | guest `MEM_ACCEPT` 到一個「crosvm 沒有 region、DT 沒節點、沒有 shm vdevice」的純空洞 | **成功**(rc=0)|
 | 讀回 host 預先寫的圖樣 | **相符** —— 拿到的真的是 host 的頁 |
 | EL0 執行(`/dev/dynpool` + `PAGE_SHARED_EXEC`,跑 `mov x0,#42; ret`)| **回傳 42** |
+| **反面對照**:同一台、同一個池子、同一個位移、同一段程式碼,只把 `GH_SHARE_EXEC` 關掉 | **`NO-EXEC: signal 7`**(SIGBUS)在 CALL,而同一頁的讀寫照常 —— 所以可執行是 ACL 的 X 給的,不是本來就有 |
 | EL1 執行 | **測不到**:7.0 的 arm64 `ioremap_prot` 要求 `PTE_USER` 且只保留記憶體型別位元,而 `ioremap_page_range()` 一律 `pgprot_nx` —— 核心 API 根本給不出可執行的 EL1 映射。實測到的 `ESR=0x8600000f`(L3 指令權限錯誤)是**我們自己的 stage-1**,不是 stage-2 |
 
 EL1 的答案改由 shim v0 給(MMU off,只剩 stage-2,正是真實情境)。旁證:Gunyah 的
@@ -285,8 +286,8 @@ POPULATE_WRITE)才退回手動 write-fault,`ENOMEM` 直接往上回,否則手動
 ### 還沒做的
 
 * E1 的 EL1(等 shim v0)。
-* 8e / 8e5 的對照(照使用者指示,那兩台直接進實作)。
-* `GH_SHARE_EXEC=0` 的反面對照(EL0 探針應該要失敗)—— 不做的話「X 有效」這句只有正面證據。
+* 8e5 只驗到「新的 pool DT 模型能開機」(firmware-only,`GH_VM_START` 無錯);完整的 grow/exec 沒跑。
+* 8e 完全沒驗 —— 量測期間那台一直有使用者自己的 acc-test VM 在跑。
 
 ## 8b. 順帶解鎖:growable pool 在 8gen3 可用了(新的 DT 模型)
 
