@@ -161,7 +161,7 @@ crosvm 不必新增任何裝置。
 * 它有自己的 `/reserved-memory` 節點(`reg` 精確等於那顆 parcel,`no-map`)—— 8gen3 的 RM 因此
   接受它,而 RM 重新產生 `/memory` 時也會因為 `no-map` 把它排除,不會變成 Linux 的 RAM。
 * shim 不必找節點:位址由 crosvm 在開機前寫進 shim 的 header。
-* 內容就是 `struct shim_handoff`(`droidvm-shim/shim.h`):magic/version、`nparcels`、每顆
+* 內容就是 `struct shim_handoff`(`crosvm/hypervisor/src/gunyah/shim_abi.rs`):magic/version、`nparcels`、每顆
   `{handle, base, size}`、以及 host 最後才寫的 `ready`;回程是 `status`/`error`/`exec_probe`/`msg`,
   crosvm 輪詢它來決定 boot 成不成功、並把 `msg` 印進 log。
 
