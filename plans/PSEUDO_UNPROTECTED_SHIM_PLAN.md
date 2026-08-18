@@ -197,7 +197,7 @@ crosvm 不必新增任何裝置。
 
 ## 8. 量到的東西(2026-08-19,8gen3 / OPD2404 / 6.1.118,除非另註)
 
-裝置實測,不是讀碼推論。rig 在 `scratchpad/poolvm.sh`(無 GPU 的最小 VM + 可調 test pool),
+裝置實測,不是讀碼推論。rig 在 `deploy/pseudo-unprotected/poolvm.sh`(無 GPU 的最小 VM + 可調 test pool),
 guest 用 `droidvm-guest-additions/dynpool_test` 加 `accept` / `window` / `exec` 命令與
 `tests/dynpool_exec.c`(EL0 探針)。crosvm 端三個診斷開關:`GH_SHARE_EXEC`、
 `DROIDVM_POOL_HIDE=dt|shm|both`、`DROIDVM_TEST_POOL[_2]_GAP_MB`。
