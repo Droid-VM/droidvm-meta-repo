@@ -347,3 +347,66 @@ crosvm 的 CLI 也沒動。
 3. shim v1(accept + memory reg)+ crosvm share-after-start + teardown reclaim → 8e 上 kernel 直開通。
 4. EDK2 路線(Ubuntu grub、Windows)驗證;overlay 機制視需要補。
 5. 8gen3 全套;app 選項;三台驗收(沿用 R5 條件)。
+
+---
+
+## 11. 定案(2026-08-19,實作中)
+
+設計討論收斂後的最終形狀,和 §2–§5 的差別都在這裡。
+
+### 布局:boot region 從 `--mem` 裡切,不是外加
+
+```
+0x8000_0000  +2 MiB   shim(實測 5 KiB + 16 KiB stack)
+0x8020_0000  +2 MiB   DTB(AARCH64_FDT_MAX_SIZE;必須和 shim 同一個 region —— RM 用
+                      「含 DTB 的 parcel」當 image parcel)
+0x8040_0000  +2 MiB   handoff(開機完整 SHARE,host 之後還寫得到)
+0x8060_0000  ...      窗口 = --mem 減掉上面三塊
+             ...      pools / platform MMIO / 64-bit PCI 視窗:位置和 protected 模式逐位元相同
+```
+
+`--mem 4096` 是「總共 4 GiB」,不是「窗口 4 GiB 另外加」。因為 pools 和 MMIO 都從
+`PHYS_MEM_START + memory_size` 起算,這樣選的話上層布局完全不動 —— 「其餘的和 protected 模式
+一模一樣」這句話才是真的。
+
+### shim 只碰一個屬性
+
+不新增節點、不刪除節點:`/memory` 的 `reg` 就地改值,長度不變。進來幾段就出去幾段,窗口放
+**第一段**、其餘補 `{0,0}`(EDK2 的 PrePi 只讀第一段,Linux 的 `early_init_dt_scan_memory` 跳過
+size==0)。
+
+進來的每一段都不留:boot region 是 LEND'd 的(host 看不見)、RM 捐的低位記憶體是 RW no-X、
+pool floor 和 handoff 是 driver 的。窗口是唯一該當 RAM 的東西,而它在 `/memory` 裡從頭到尾
+不存在。
+
+### swiotlb 不是「移除」,是一開始就不產
+
+這個模式不帶 `--swiotlb`,所以 `restricted-dma-pool` 節點和 `/pci memory-region` 都不存在。
+EDK2 的 `GunyahIoMmuDxe` 找不到就跳過,不裝 IOMMU protocol、不產 RDMA0000。目標 kernel
+(Debian trixie 6.12.101,`CONFIG_RESTRICTED_DMA_POOL` 沒開)因此才有機會開機。
+
+### handoff 沒有 guest DT 節點
+
+RM 只檢查「節點 → parcel」的方向,沒有節點就沒東西可檢查;而「別被當成 RAM」已經由
+`/memory` 改寫解決。它只需要 `gunyah-vm-config/vdevices` 底下的 shm 節點 —— 那是 RM 建 VM 時
+吃的設定,6.1 上正是靠它的 `base` 把 parcel 釘在 crosvm 選的 IPA。
+
+### 語言與打包
+
+Rust `no_std`,住在 `crosvm/droidvm-shim/`(自成 workspace,cargo_embargo 看不到)。ABI 是
+`crosvm/hypervisor/src/gunyah/shim_abi.rs`,**一份被兩邊 include**。`2-0_build_shim.sh` 在 soong
+之前產出 `shim.bin`,`include_bytes!` 內嵌 —— rustc 的 dep-info 會列出它、soong 有餵 depfile 給
+ninja,所以改 shim 會自動重編 crosvm。不多一顆要 push 的 blob;`shim=PATH` 覆蓋留給 bring-up。
+
+### 兩個實作時抓到的坑
+
+* **exec 探針不能寫窗口起點** —— 那是 payload 的前 8 個位元組。改寫最後一頁。
+* **窗口必須先做 folio 準備** —— 保留池服務的是 order-9;用 4 KiB 頁組出來的 parcel,4 GiB 窗口
+  會有一百萬個 mem_entry。準備在 `GunyahVm::new` 做(和 LEND'd RAM 同一個位置),但**不** SHARE,
+  SHARE 留到 `GH_VM_START` 之後。
+
+### 驗收目標
+
+Debian trixie cloud image 抽出來的 kernel(`6.12.101+deb13-arm64`,無 `CONFIG_RESTRICTED_DMA_POOL`)
+在 direct 與 EDK2 兩條路都能正常開機。這顆 kernel 在今天的 protected 模式下開不起來,而它是
+「發行版 kernel 能不能跑」這個問題的代表。
