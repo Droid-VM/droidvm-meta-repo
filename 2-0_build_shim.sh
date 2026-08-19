@@ -38,6 +38,16 @@ simd=$(aarch64-linux-gnu-objdump -d "$OUT"/shim.elf | grep -cE '\s(q|v)[0-9]+(\.
 # include_bytes! looks, and because a stale one is then visible to git rather than invisible.
 cp "$OUT"/shim.bin crosvm/hypervisor/src/gunyah/shim.bin
 
+# The shim shares its lent region with the guest's device tree, which crosvm puts at
+# AARCH64_SHIM_FDT_OFFSET = 2 MiB. `_shim_end` is past the stack and the BSS -- neither of which
+# is in the flat binary -- so it, not the file size, is what must stay below that.
+end=$(aarch64-linux-gnu-nm "$OUT"/shim.elf | awk '$3 == "_shim_end" { print strtonum("0x" $1) }')
+[ -n "$end" ] || { echo "no _shim_end in the shim: the linker script did not do what it says"; exit 1; }
+[ "$end" -le $((0x200000)) ] || {
+    printf 'shim ends at %#x, past the device tree at 0x200000 (AARCH64_SHIM_FDT_OFFSET)\n' "$end"
+    exit 1
+}
+
 size=$(stat -c%s "$OUT"/shim.bin)
 echo "shim.bin: $size bytes"
 # It shares the boot region with the device tree; there is no reason for it ever to approach this,

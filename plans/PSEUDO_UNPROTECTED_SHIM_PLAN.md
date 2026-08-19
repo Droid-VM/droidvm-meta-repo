@@ -549,3 +549,77 @@ shim 實測時序:窗口 SHARE(2 GiB,單一 parcel)約 0.9–1.0 s,guest 這側 
 
 guest 看到的 `/memory` 由 shim 改成窗口本身(`0x80600000 + size`),`/reserved-memory` 只剩
 handoff 那一個 no-map 節點,沒有 `restricted-dma-pool`。
+
+
+## 14. 之後的調整(2026-08-19 下午)
+
+### `alloc_from_vm_sys_ram`:池子從 `--mem` 裡切,不再疊在上面
+
+`--pre-alloc alloc-from-vm-sys-ram=true`。池子本身完全不變 —— 一樣大、一樣的位址、一樣的分享方式
+—— 只有「system ram 要多大」的算式改了:4 GiB 的 VM 配 1 GiB 池子,以前跟 host 要 5 GiB,現在要
+4 GiB、guest 拿 3 GiB。**設定多少就拿多少**,這在記憶體來自固定 reserve pool 的情況下才是能預算的數字。
+
+實測(8gen3,`--mem 2048` + `test-pool-mb=256`):
+
+```
+GH-POOL: 0x10000000 of --mem set aside for pools, 0x10000000 used
+guest /memory = 0x80400000+0x6fc00000  (1788 MiB = 2048 - 2 boot - 2 handoff - 256 pool)
+reserve pool:  2816 → 1792 pages = 1024 pages = 2048 MiB  ← 剛好 --mem
+```
+
+池子大小必須在布局存在**之前**就知道(要拿來縮 RAM),所以那組環境變數被讀了兩次:一次縮 RAM、
+一次擺池子。兩者會漂移,所以布局會把「保留了多少 / 用掉多少」印出來,而且用超過會出聲。
+
+### shim + device tree 壓到 2 MiB:6.1 可以,6.12 不行 → 維持 4 MiB
+
+把 tree 放在 +64 KiB、宣告 1 MiB 長,boot region 就能是 2 MiB(一個 folio),8gen3 完全正常開機。
+但 8e5(6.12)的 RM 直接拒絕 VM_INIT:
+
+```
+gunyah: RM rejected message 5600000b. Error: 10     ← VM_INIT / GH_RM_ERROR_MEM_INVALID
+misc gunyah: Failed to initialize VM: -22
+```
+
+那一代要求 tree 待在一般 VM 放它的地方(`AARCH64_FDT_ALIGN`,長度 `AARCH64_FDT_MAX_SIZE`),
+而一個同時要塞 shim(offset 0)和 2 MiB tree 的區域不可能小於兩者相加。所以維持 4 MiB,常數上把
+原因寫清楚,另外 `2-0_build_shim.sh` 會在 shim 長到吃掉 tree 的位置時讓 build 失敗。
+
+### 把視窗切成多個 parcel:可以,而且在 6.1 上值 3.6 倍
+
+`DROIDVM_SHIM_PARCEL_MB`,**預設 0 = 一次整塊**(6.12 上切不切都一樣快,而切要花 memparcel 配額)。
+6.1 上 4 GiB 整塊交出去要 ~3.4 s,切成 8 顆 512 MiB 只要 ~0.94 s(含 guest 全部 accept 完)。
+
+這條路先前兩代都失敗 —— 6.1 第二個 accept 被回 `ARGUMENT_INVALID`,6.12 guest 吃到 instruction
+abort —— 而**兩個都是同一個 bug,而且是 shim 自己的**:
+
+> shim 的 msgq 收送 buffer 沒有做 cache maintenance。shim 的 MMU 是關的,所以它寫 request buffer
+> 是寫進記憶體、不是寫進 cache line;而 hypervisor 是**用 cacheable 映射去讀**那塊 buffer,而且它
+> 之前就讀過同一個位址。於是第二個 request 是用第一個的 bytes 送出去的 —— RM 被要求 accept 一個
+> 它已經 accept 過的 parcel,回 `ARGUMENT_INVALID`,而且回覆上蓋的是**第一個 request 的 seq**。
+>
+> 這看起來就像「RM 一個 VM 只回答一次 accept 然後裝死」,所以第一次的診斷是錯的。
+
+修法:送出前 `dc civac` request buffer,收完後 `dc civac` reply buffer(handoff 頁本來就有做,
+只有這兩塊漏了)。修完之後 8 顆 parcel 在 8gen3 和 8e5 都完整 accept,guest 看到全部 4 GiB。
+seq 比對也改回嚴格比對 —— RM 的 seq 一直是對的。
+
+**對 guest 的 virtio-gunyah-accept 沒有影響**:accept 之間沒有 RM 端的上下文,不需要把任何東西
+傳給 Linux。壞掉的是 shim 自己的 buffer,而 Linux 的 RM client 跑在 MMU/cache 開著的環境,
+用自己的 buffer,碰不到這個 hazard。
+
+### app:兩個在「host 看得到記憶體」時沒有意義的設定
+
+普通 / 偽非保護 兩個模式下:
+
+* **SWIOTLB 欄位隱藏**。沒有東西需要 bounce;偽非保護下還會多一個 `restricted-dma-pool` 節點,
+  正好是這個模式要避開的東西。
+* **guest-alloc 池子(顯存大小 / 啟用動態顯存)隱藏,CLI 帶 0**。它的用途是讓 host 摸得到 guest
+  配出來的 buffer,而這兩個模式下 host 本來就摸得到。歸零做在 backend 而不只是 UI:換模式前存的
+  設定、或直接走 daemon API 的設定,還是會帶著一個大小進來。
+
+guest 端不需要改:virtio-gpu 找不到池子節點就退回 shmem(`virtgpu_vram.c` 裡本來就寫著
+「That is the correct behaviour on a VMM whose host can read guest RAM directly」),而且只有在
+DT 帶著 `restricted-dma-pool`(= 記憶體是借出去的)時才會大聲警告 —— 偽非保護不帶那個節點,
+所以走的是安靜那條。顯存用量沒有 sysfs 可改:這個驅動只有 debugfs
+(`virtio-gpu-features` / `-irq-fence` / `-host-visible-mm`),沒有池子就沒有池子帳,blob 就是
+一般的 guest shmem,本來就算在 guest 自己的記憶體帳上。

@@ -32,11 +32,17 @@ CPUS=${CPUS:-2}
 # here because this rig exists to prove the mode works on a device, and that is the one question
 # no probe inside Linux can answer.
 PROBE_EXEC=${PROBE_EXEC:-1}
-# How much of the VM is lent to boot in. Everything above it is the window.
-BOOT_MB=${BOOT_MB:-4}
+# How much of the VM is lent to boot in. Everything above it is the window. Unset = whatever
+# crosvm's own default is, which is the number worth testing.
+BOOT_MB=${BOOT_MB:-}
 # SWIOTLB=<MB> adds a bounce pool the mode does not need, for comparing against the old one.
 SWIOTLB=${SWIOTLB:-}
 [ -n "$SWIOTLB" ] && SWIOTLB_ARG="--swiotlb $SWIOTLB" || SWIOTLB_ARG=""
+# PARCEL_MB=<MB> hands the window over in chunks instead of one parcel. 0/unset = one parcel.
+PARCEL_MB=${PARCEL_MB:-0}
+# PREALLOC=<--pre-alloc value>, e.g. "test-pool-mb=256,alloc-from-vm-sys-ram=true".
+PREALLOC=${PREALLOC:-}
+[ -n "$PREALLOC" ] && PREALLOC_ARG="--pre-alloc $PREALLOC" || PREALLOC_ARG=""
 KERNEL=${KERNEL:-}
 INITRD=${INITRD:-}
 DISK=${DISK:-}
@@ -128,8 +134,10 @@ PROT_ARG="$PROT_ARG"
 DISK_OPT="$DISK_ARG"
 INITRD_OPT="$INITRD_ARG"
 SWIOTLB_OPT="$SWIOTLB_ARG"
+PREALLOC_OPT="$PREALLOC_ARG"
 export DROIDVM_SHIM_PROBE_EXEC=$PROBE_EXEC
-export DROIDVM_SHIM_BOOT_MB=$BOOT_MB
+[ -n "$BOOT_MB" ] && export DROIDVM_SHIM_BOOT_MB=$BOOT_MB
+export DROIDVM_SHIM_PARCEL_MB=$PARCEL_MB
 # No --swiotlb: the guest's RAM is host-visible, so there is nothing to bounce through and no
 # restricted-dma-pool node for a guest kernel to need a config option for.
 exec \$DBG/crosvm --log-level info --extended-status run \\
@@ -139,7 +147,7 @@ exec \$DBG/crosvm --log-level info --extended-status run \\
   --prepare-lend-mthp-mode $MTHP \\
   --socket \$DBG/pseudovm.sock \\
   --dump-device-tree-blob \$DBG/vm.dtb \\
-  \$DISK_OPT \$INITRD_OPT \$SWIOTLB_OPT \\
+  \$DISK_OPT \$INITRD_OPT \$SWIOTLB_OPT \$PREALLOC_OPT \\
   --params "$PARAMS" \\
   --serial type=file,hardware=serial,num=1,earlycon,console,path=\$DBG/console.log \\
   $IMAGE
