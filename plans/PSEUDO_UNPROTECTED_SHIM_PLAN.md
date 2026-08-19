@@ -410,3 +410,124 @@ ninja,所以改 shim 會自動重編 crosvm。不多一顆要 push 的 blob;`shi
 Debian trixie cloud image 抽出來的 kernel(`6.12.101+deb13-arm64`,無 `CONFIG_RESTRICTED_DMA_POOL`)
 在 direct 與 EDK2 兩條路都能正常開機。這顆 kernel 在今天的 protected 模式下開不起來,而它是
 「發行版 kernel 能不能跑」這個問題的代表。
+
+---
+
+## 12. 第一次上機:一個**後來被推翻**的假說(留著當紀錄)
+
+> **這一節的結論是錯的。** 「共享區域之間有洞」不是 RM 拒絕的原因 —— 把 swiotlb 加回去(洞就在
+> 兩塊 SHARE'd parcel 中間)照樣被拒,把窗口整個拿掉(完全沒有洞)也照樣被拒。真因見 §13。
+> 這一節唯一站得住的部分是「crosvm 預設偷塞 64 MiB swiotlb」那個發現本身,以及它給的教訓。
+> 留著是因為推論過程本身有價值:一個能解釋當時所有觀察的假說,仍然可以是錯的。
+
+### (以下為當時的推論)
+
+
+2026-08-19,8gen3。crosvm 端每一步都做對了 —— shim 載入、header patch、窗口 100% 2 MiB folio 覆蓋
+並 mlock —— 但 `GH_VM_START` 回 ENODEV,kernel 印 `Failed to start VM: -19`。
+
+`-19` 在 6.1 driver 的對照表是 **`GH_RM_ERROR_NORESOURCE`**(`rsc_mgr.c:209`),而那行訊息來自
+`vm_mgr.c:590`,也就是**最後那個 VM_START RPC** —— 表示 `VM_CONFIG_IMAGE` 與 `VM_INIT` 都通過了,
+RM 解析我們的 DT 沒有意見。
+
+### bisect
+
+RM 對所有不滿都回同一個碼,只能一次改一項(`DROIDVM_SHIM_BOOT_MB` / `DROIDVM_SHIM_NO_HANDOFF`):
+
+| boot region | handoff | 結果 |
+|---|---|---|
+| 4 MiB | 無 | 拒絕 |
+| 16 MiB | 有 | 拒絕 |
+| 64 MiB | 無 | 拒絕 |
+| 1900 MiB(窗口只剩 82 MiB)| 有 / 無 | 都拒絕 |
+
+同一顆 binary 跑舊模式 `--protected-vm-without-firmware`:**VM 有起來**,vcpu 跑了才崩在 kernel
+自己身上(那顆 Debian kernel 沒有 `CONFIG_RESTRICTED_DMA_POOL`,protected 模式下的預期下場)。
+所以不是 binary 壞了,是布局被拒。
+
+### 真因
+
+`src/crosvm/sys/linux.rs:1568`:**只要不是 `Unprotected`,crosvm 就自動給 64 MiB swiotlb**。
+沒傳 `--swiotlb` 不等於沒有。於是實際布局是:
+
+```
+boot(LEND) │ handoff(SHARE) │ 窗口(不 share ── RM 不知道的洞) │ swiotlb 64 MiB(SHARE)
+```
+
+這是第一次讓**兩塊 SHARE'd parcel 之間隔著一個 RM 不知道的洞**。舊模式所有區域連續;E3 那次
+「宣告了卻不 share」的池子在**所有共享區域之上**,也沒有夾在中間。四組 bisect 全滅正是因為那個洞
+在每一組裡都在。
+
+順帶一提它還讓驗收目標註定失敗:swiotlb 會產生 `restricted-dma-pool` 節點,而這個模式存在的理由
+就是不需要它。
+
+**修法**:這個模式和 `Unprotected` 一樣不給預設 swiotlb。窗口本來就是 host 可見的,沒有東西要 bounce。
+
+### 記下來的教訓
+
+「我沒傳那個旗標」不等於「那個東西不存在」。這次是 64 MiB 的 swiotlb 悄悄出現在布局裡,而它同時
+是 RM 拒絕的原因和驗收目標開不了機的原因 —— 兩個症狀,一個來源,而我原本在追的是前者。
+
+
+## 13. 真因與驗收(2026-08-19,8gen3 / OPD2404 / 6.1.118)
+
+### RM 拒絕的真因:**每一塊 SHARE'd memparcel 都要有一個 `reg` 對得起來的 `/reserved-memory` 節點**
+
+`create_pool_node` 的註解早就寫著這件事 ——「**RM blesses by `reg`**」—— 只是先前把它當成池子的規矩,
+沒當成所有共享區域的規矩。handoff 頁有 shm vdevice、卻沒有 reserved-memory 節點,就是全部的差別:
+
+| 佈局 | 結果 |
+|---|---|
+| shim + handoff + 窗口 | 拒絕 |
+| 同上,加回 swiotlb(洞夾在兩塊 SHARE 中間) | 拒絕 |
+| 沒有窗口(boot 吃滿),仍有 handoff | 拒絕 |
+| 沒有窗口、沒有 shim(等於舊模式,只換了 ProtectionType) | 拒絕 |
+| 沒有窗口、沒有 handoff | **起來了** |
+| handoff 加上 `/reserved-memory`(`compatible = "droidvm,shim-handoff"`, `no-map`) | **起來了** |
+| 完整模式(shim + handoff + 節點 + 窗口) | **起來了** |
+
+RM 對此只回一個 `GH_RM_ERROR_NORESOURCE`,而且是在最後那個 VM_START RPC —— 前面的 CONFIG_IMAGE
+和 INIT 都過,所以看起來像「DT 沒問題但 VM 起不來」。
+
+倒過來 bisect(從**會動的舊模式**開始,一次加一項)是最後找到它的方法。從壞掉的組態一項一項拿掉,
+四輪都全滅,因為每一輪裡真兇都還在。
+
+### 另外兩個絆了很久的東西
+
+* **`2-0_build_shim.sh` 一直在複製舊 target 目錄的 binary。** `.cargo/config.toml` 改成
+  `aarch64-unknown-none-softfloat`(為了拿掉 NEON)之後,腳本還在 `cp` 舊的
+  `target/aarch64-unknown-none/release/droidvm-shim`。整個上午上機跑的都是那顆**含 SIMD 的舊
+  shim**,而它在 CPACR_EL1.FPEN 還沒開的情況下第一條 SIMD 就 trap —— 一個沒有 vector table、
+  沒有 console、什麼都說不出來的 VM。現在 target 名字只寫一次,並且 objdump 檢查 SIMD 運算元。
+* **shim 沒有 exception vectors → 手機重開機。** MMU 關著的 EL1 fault 會無限迴圈,vcpu 不退出,
+  底下那顆 host CPU 不再回應 IPI,下一個 `kick_all_cpus_sync` 就是 watchdog bite
+  (`qcom_wdt_bark_handler` panic,實測 17278 秒那次)。加了 vectors 之後同樣的錯只印一行。
+* **`gh_vm_mem_alloc` 的 pinned-page 陣列是一次 kmalloc。** 2 GiB parcel = 4 MiB = order 10,
+  剛開機的手機給得出來,用過一陣子的給不出來(同一個 VM,差一小時)。這就是 repo 裡
+  `gunyah_kvcalloc` 模組存在的理由;重開機會把它清掉,rig 現在自己 insmod。
+
+### 驗收(目標達成)
+
+`https://images.linuxcontainers.org/images/debian/trixie/arm64/cloud/20260818_05:24/disk.qcow2`
+裡的 **Debian trixie,Linux 6.12.101+deb13-arm64,沒有 `CONFIG_RESTRICTED_DMA_POOL`**:
+
+| 路徑 | 結果 |
+|---|---|
+| direct(`--protected-vm-pseudo-unprotected`,無 swiotlb) | 開到 `multi-user.target` / login prompt |
+| edk2(同一顆 VM,UEFI → GRUB → 同一顆 kernel) | 開到同一個 login prompt |
+
+shim 實測時序:窗口 SHARE(2 GiB,單一 parcel)約 0.9–1.0 s,guest 這側 accept + DT 改寫 + 交棒
+約 10 ms。**`exec_probe = 0x2a`** —— 也就是本案最後一個未解問題的答案:**guest 在 EL1、MMU 關閉的
+狀態下,可以從 runtime SHARE'd + 自己 accept 的窗口取指執行**。
+
+### 現在的樣子
+
+```
+0x80000000  shim(12 KiB)          ─┐
+0x80200000  device tree            ├ boot region,LEND,4 MiB(DROIDVM_SHIM_BOOT_MB 可調)
+0x80400000  handoff 頁,SHARE      ─┘ 有自己的 /reserved-memory 節點(droidvm,shim-handoff)
+0x80600000  窗口 ── VM_START 之後才 SHARE(帶 EXEC),由 shim accept,payload 就放在最底下
+```
+
+guest 看到的 `/memory` 由 shim 改成窗口本身(`0x80600000 + size`),`/reserved-memory` 只剩
+handoff 那一個 no-map 節點,沒有 `restricted-dma-pool`。

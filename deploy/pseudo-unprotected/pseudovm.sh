@@ -21,9 +21,22 @@ APP=/data/data/cn.classfun.droidvm
 SP="$(dirname "$0")"
 LOG=${LOG:-/tmp/pseudovm_$PHONE.log}
 
+# MODE=old runs this exact rig -- same kernel, same devices, same flags -- as an ordinary
+# protected VM. It is the control that separates "the new mode is wrong" from "this kernel or
+# this command line never worked here".
+MODE=${MODE:-new}
+[ "$MODE" = old ] && PROT_ARG=--protected-vm-without-firmware || PROT_ARG=--protected-vm-pseudo-unprotected
 MEMMB=${MEMMB:-2048}
 CPUS=${CPUS:-2}
+# Have the shim execute two instructions out of the window before handing over. On by default
+# here because this rig exists to prove the mode works on a device, and that is the one question
+# no probe inside Linux can answer.
 PROBE_EXEC=${PROBE_EXEC:-1}
+# How much of the VM is lent to boot in. Everything above it is the window.
+BOOT_MB=${BOOT_MB:-4}
+# SWIOTLB=<MB> adds a bounce pool the mode does not need, for comparing against the old one.
+SWIOTLB=${SWIOTLB:-}
+[ -n "$SWIOTLB" ] && SWIOTLB_ARG="--swiotlb $SWIOTLB" || SWIOTLB_ARG=""
 KERNEL=${KERNEL:-}
 INITRD=${INITRD:-}
 DISK=${DISK:-}
@@ -36,7 +49,10 @@ push_one() {
     local src=$1 dst=$2 b
     b=$(basename "$dst")
     $A push "$src" /data/local/tmp/"$b" >/dev/null 2>&1 || { echo "push $b failed"; exit 1; }
-    $A shell su -c "mkdir -p $DBG; cp /data/local/tmp/$b $dst && chmod 755 $dst" >/dev/null 2>&1
+    # Inner single quotes so the whole thing runs under su. Written the other way round, su gets
+    # only the first command and the copy runs as `shell`, which cannot write into a directory
+    # root just made -- and says nothing about it.
+    $A shell "su -c 'mkdir -p $DBG; cp /data/local/tmp/$b $dst; chmod 755 $dst'" >/dev/null 2>&1
     local l r
     l=$(md5sum "$src" | cut -c1-32)
     r=$($A shell su -c "md5sum $dst" 2>/dev/null | cut -c1-32 | tr -d '\r')
@@ -65,14 +81,17 @@ direct|edk2)
     echo "pool $avail pages, this VM needs $need"
     [ "${avail:-0}" -ge "$need" ] || { echo "not enough reserve pool"; exit 1; }
 
+    # Optional arguments travel as shell variables rather than as lines of the command: an empty
+    # continuation line ends the command right there, and the failure ("Executable is not
+    # specified") points at the last argument rather than at the blank line that swallowed it.
     if [ "$what" = edk2 ]; then
         IMAGE="\$APP/usr/share/droidvm/edk2-gunyah.fd"
         INITRD_ARG=""
     else
         IMAGE="\$DBG/Image"
-        INITRD_ARG="--initrd \$DBG/initrd.img \\\\"
+        INITRD_ARG="--initrd $DBG/initrd.img"
     fi
-    [ -n "$DISK" ] && DISK_ARG="--block $DISK,lock=false \\\\" || DISK_ARG=""
+    [ -n "$DISK" ] && DISK_ARG="--block $DISK,lock=false" || DISK_ARG=""
 
     cat > "$SP/pseudorun.sh" <<EOF
 #!/system/bin/sh
@@ -82,21 +101,45 @@ export LD_LIBRARY_PATH=\$DBG:\$APP/usr/lib
 export LD_PRELOAD=\$APP/lib/libsimpledump.so:\$APP/lib/libcompat_a16.so
 export TMPDIR=/data/local/tmp
 export RUST_LOG=info
+# Two host modules this mode cannot do without, normally loaded by the app's Kernel Module page.
+# A reboot clears them and the failures that follow point anywhere but here, so load them.
+#
+#   host-share  the window is handed over with a runtime SHARE through /dev/gunyah_share; without
+#               it the failure arrives as ENOENT from deep inside VM start.
+#   kvcalloc    gh_vm_mem_alloc sizes its pinned-page array by 4 KiB pages and kmallocs it in one
+#               piece: 4 MiB, order 10, for a 2 GiB parcel. It succeeds on a freshly booted phone
+#               and fails on a used one -- the same VM, an hour apart. The module makes that
+#               allocation a kvmalloc.
+for KO in \$APP/usr/lib/modules/*/gunyah-kvcalloc-gki-*.ko; do
+    [ -f "\$KO" ] && insmod "\$KO" 2>/dev/null && break
+done
+if [ ! -e /dev/gunyah_share ]; then
+    for KO in \$APP/usr/lib/modules/*/gunyah-host-share-gki-*.ko; do
+        [ -f "\$KO" ] && insmod "\$KO" 2>/dev/null && break
+    done
+    [ -e /dev/gunyah_share ] || echo "WARNING: no /dev/gunyah_share -- the window cannot be shared"
+fi
 echo madvise > /sys/kernel/mm/transparent_hugepage/enabled
 echo advise  > /sys/kernel/mm/transparent_hugepage/shmem_enabled
 echo 3 > /proc/sys/vm/drop_caches
 ulimit -n 65536
 ulimit -l unlimited
+PROT_ARG="$PROT_ARG"
+DISK_OPT="$DISK_ARG"
+INITRD_OPT="$INITRD_ARG"
+SWIOTLB_OPT="$SWIOTLB_ARG"
+export DROIDVM_SHIM_PROBE_EXEC=$PROBE_EXEC
+export DROIDVM_SHIM_BOOT_MB=$BOOT_MB
 # No --swiotlb: the guest's RAM is host-visible, so there is nothing to bounce through and no
 # restricted-dma-pool node for a guest kernel to need a config option for.
 exec \$DBG/crosvm --log-level info --extended-status run \\
   --name pseudovm \\
   --mem $MEMMB --cpus $CPUS --hypervisor gunyah \\
-  --protected-vm-pseudo-unprotected --no-balloon --disable-sandbox --hugepages \\
+  $PROT_ARG --no-balloon --disable-sandbox --hugepages \\
   --prepare-lend-mthp-mode $MTHP \\
   --socket \$DBG/pseudovm.sock \\
-  $DISK_ARG
-  $INITRD_ARG
+  --dump-device-tree-blob \$DBG/vm.dtb \\
+  \$DISK_OPT \$INITRD_OPT \$SWIOTLB_OPT \\
   --params "$PARAMS" \\
   --serial type=file,hardware=serial,num=1,earlycon,console,path=\$DBG/console.log \\
   $IMAGE

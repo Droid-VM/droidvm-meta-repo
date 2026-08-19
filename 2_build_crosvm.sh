@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 cd "$(dirname "$0")"
+# The boot shim first: crosvm embeds it with include_bytes!, and soong sees the dependency
+# through rustc's depfile, so a changed shim rebuilds crosvm on its own -- but only if something
+# has built it. Nothing else will.
+./2-0_build_shim.sh
 mkdir -p crosvm_out
 cd crosvm_build
 source build/envsetup.sh
