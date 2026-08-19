@@ -520,6 +520,24 @@ shim 實測時序:窗口 SHARE(2 GiB,單一 parcel)約 0.9–1.0 s,guest 這側 
 約 10 ms。**`exec_probe = 0x2a`** —— 也就是本案最後一個未解問題的答案:**guest 在 EL1、MMU 關閉的
 狀態下,可以從 runtime SHARE'd + 自己 accept 的窗口取指執行**。
 
+### 跨機驗收(2026-08-19)
+
+同一顆 crosvm、同一顆 Debian trixie kernel、同一個 overlay 磁碟:
+
+| 機器 | SoC / kernel | direct | edk2 | 窗口 SHARE 耗時 | exec probe |
+|---|---|---|---|---|---|
+| 8gen3(5567,OPD2404) | pineapple / 6.1.118 | login | login | 2 GiB ≈ 1.0 s、4 GiB ≈ 3.4 s | 42 |
+| 8e5(5566,PLK110) | canoe / 6.12.23 | login | login | 2 GiB ≈ 30 ms、4 GiB ≈ 63 ms | 42 |
+| 8e(5568,TB322FC) | sun / 6.6.118 | 未測 | 未測 | — | — |
+
+* 4 GiB 窗口兩台都開得起來,guest 看到 `Memory: 3899132K/4188160K available`,`/memory` 就是窗口本身。
+* **6.1 和 6.12 的 SHARE 耗時差兩個數量級**:6.1 的 RM 要當場把 2043 個 folio 組成一個 parcel,
+  6.12 的 driver 走 demand paging。6.1 上 4 GiB 的 3.4 s 是實打實的開機延遲,要壓的話就是切成多個
+  parcel 平行送(handoff 頁本來就是 parcel 陣列),不過目前還在可接受範圍。
+* guest accept + 改 DT + 交棒在兩台都是 10–35 ms,與窗口大小無關。
+* 兩台的 reserve pool 在 VM 結束後都完整歸還(3072 / 2816 pages),沒有洩漏。
+* 8e 沒測:使用者的 `acc-test` VM(4608 MB)還在跑,pool 是空的,沒去動它。
+
 ### 現在的樣子
 
 ```
