@@ -38,9 +38,7 @@ whose failures are all silent.
 | 5 | `5_prepare_turnip.sh` | build the host turnip Vulkan driver (Droid-VM/turnip `gen8`, KGSL) → `turnip/libvulkan_freedreno.so` |
 | 6 | `6_build_apk_prepare.sh` | clone app + prebuilt-root, overlay crosvm/EDK2/gunyah/turnip artifacts into `manual-build/` |
 | 7 | `7_build_apk.sh` | build the DroidVM APK with the local prebuilts baked in |
-| 8 | `8_build_guest_mesa_gfx.sh` | build the guest mesa for the gfxstream route (cross-compiled in a container, recipe from `mesa-cross/`) |
-| 8 | `8_build_guest_mesa_drm2kgsl.sh` | the same for the drm2kgsl route |
-| 8 | `8_build_guest_mesa_venus.sh` | the same for the venus route |
+| 8 | `8_build_guest_mesa.sh` | build the guest mesa — one package carrying all three routes (cross-compiled in a container, recipe from `mesa-cross/`) |
 | 9 | `9_build_guest_addition.sh` | package the guest kernel modules as a DKMS .deb |
 
 `gh_hugepage_reserve` is a separate out-of-tree module (`../gh-hugepage-reserve`)
@@ -60,42 +58,50 @@ translates the DRM layer.
 
 ## Guest mesa
 
-The guest ships one of THREE stacks, from three branches of Droid-VM/mesa
-checked out as three worktrees of one clone. The build recipe is its own repo,
+The guest ships ONE mesa package carrying all three routes, built from one
+branch of Droid-VM/mesa. The build recipe is its own repo,
 [Droid-VM/mesa-cross](https://github.com/Droid-VM/mesa-cross) (`wip/3d-accel`,
-cloned into `mesa-cross/` by step 1 or by any step-8 script): the cross
-container, the packaging, and `mesa-cross/mesa-variants.sh`, which holds the
-whole per-variant configuration -- meson options, package names, ICD paths,
-the version scheme -- so the local build and CI cannot drift apart:
+cloned into `mesa-cross/` by step 1 or by step 8): the cross container, the
+packaging, and `mesa-cross/mesa-config.sh`, which holds the whole
+configuration -- meson options, package name, ICD list, the version scheme --
+so the local build and CI cannot drift apart:
 
-| variant | branch | package | Vulkan ICD |
-|---|---|---|---|
-| gfxstream | `wip/3d-accel-gfxstream` (26.0.3) | `mesa-guest-gfxstream_<ver>_arm64.deb` | `gfxstream_vk_icd.aarch64.json` |
-| drm2kgsl | `wip/3d-accel-drm2kgsl` (26.3.0-devel) | `mesa-guest-drm2kgsl_<ver>_arm64.deb` | `freedreno_icd.aarch64.json` |
-| venus | `wip/3d-accel-venus` (26.0.3) | `mesa-guest-venus_<ver>_arm64.deb` | `virtio_icd.aarch64.json` |
+| route | Vulkan driver | ICD |
+|---|---|---|
+| gfxstream | gfxstream guest ICD, paired with the host gfxstream decoder | `gfxstream_vk_icd.aarch64.json` |
+| venus | venus (`vn`), speaking the venus wire to virglrenderer's vkr | `virtio_icd.aarch64.json` |
+| drm2kgsl | turnip over vdrm (freedreno, kmds `msm,virtio`) | `freedreno_icd.aarch64.json` |
 
-The mesa branch is always THIS repo's branch plus the variant suffix
-(`mesa_variant_branch`), so a new meta branch never silently keeps building
-the old mesa.
+The mesa branch is always THIS repo's branch (`mesa_branch`), so a new meta
+branch never silently keeps building the old mesa.
 
-All install to `/usr/local`, so a guest holds one at a time
-(`sudo apt install ./mesa-guest-<variant>_<ver>_arm64.deb`). That is why these
-are packages rather than the tarball they used to be: they `Conflict` with
-each other through a shared `mesa-guest` virtual name and by naming each other,
-so dpkg swaps rather than overwrites. All ship libgallium, the desktop
-composites through gallium rather than through the Vulkan ICD, and an
-unnoticed overwrite shows up as a fully black VNC scanout with no error
-anywhere. Each route has its own build script; on the trunk all three are
-built.
+Until 2026-08-18 this was three packages from three mesa branches, because the
+routes sat on unrelated upstream lines: gfxstream and venus on 26.0.3 (the
+gfxstream guest ICD and the host decoder are one codebase and must match),
+drm2kgsl on 26.3.0-devel (where the tu/virtio work lives). Rebasing every route
+onto the same upstream commit showed the three trees touch disjoint files --
+`src/gfxstream/**`, `src/virtio/vulkan/vn_*`, `src/freedreno/**` -- so they
+became one branch and one build (`-Dvulkan-drivers=gfxstream,freedreno,virtio`).
+
+**The route is now chosen at run time, not install time.** `VK_DRIVER_FILES`
+names all three ICDs and the Vulkan loader keeps whichever one enumerates a
+device: a guest sees exactly one virtio-gpu capset, so exactly one answers.
+Nothing has to be swapped to change route. The package still supersedes the old
+per-route `mesa-guest-{gfxstream,venus,drm2kgsl,kgsl}` packages, which installed
+to the same `/usr/local` paths, so `apt install ./mesa-guest_<ver>_arm64.deb`
+removes whichever of them a guest still carries. That matters because they all
+shipped libgallium, the desktop composites through gallium rather than through
+the Vulkan ICD, and a leftover copy shows up as a fully black VNC scanout with
+no error anywhere.
 
 The split between the two repos is git vs. build: `lib_mesa_build.sh` here
-resolves branches and keeps the worktrees, then hands a PATH to
+resolves the branch and keeps the checkout, then hands a PATH to
 `mesa-cross/build.sh`, which knows nothing about git. The same recipe runs in
 mesa-cross's GitHub Actions workflow (**Actions → guest mesa → Run workflow**):
-pick the branch family, it clones `Droid-VM/mesa` at `<family>-<variant>` for
-each variant, builds the three `.deb`s in parallel and publishes them as a
-release with `MD5SUMS` -- the same files a local `dist-guest/` would hold. Note
-that CI builds what is PUSHED to Droid-VM/mesa; a local worktree with
+pick the branch, it clones `Droid-VM/mesa`, builds the one `.deb` and publishes
+it as a pre-release tagged with the branch name (`/` becomes `_`, which git
+requires) plus `MD5SUMS` -- the same files a local `dist-guest/` would hold.
+Note that CI builds what is PUSHED to Droid-VM/mesa; a local checkout with
 uncommitted changes only reaches the local build.
 
 ## Layout
@@ -106,7 +112,7 @@ uncommitted changes only reaches the local build.
 - `guest-patches/` — guest kernel delta as patches (in-tree reference; the
   supported install route is Droid-VM/droidvm-guest-additions) + ICD snapshots
 - `mesa-cross/` — clone of Droid-VM/mesa-cross (gitignored): the guest mesa
-  cross-build recipe + `mesa-variants.sh`; `mesa-<variant>/` are the worktrees
-  the step-8 scripts build from
+  cross-build recipe + `mesa-config.sh`; `mesa/` is the checkout step 8 builds
+  from
 - `crosvm`/`gfxstream`/`virglrenderer`/`Virtualization` — symlinks into
   `crosvm_build/` (the soong build sandbox needs the real directories in-tree)

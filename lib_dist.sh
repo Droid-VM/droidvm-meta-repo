@@ -48,9 +48,9 @@ dist_report() {
 
     local missing=()
     [ -e "$DIST"/droidvm-guest-additions_*.deb ] 2>/dev/null || missing+=("9_build_guest_addition.sh")
-    [ -e "$DIST"/mesa-guest-gfxstream_*.deb ]   2>/dev/null || missing+=("8_build_guest_mesa_gfx.sh")
-    [ -e "$DIST"/mesa-guest-drm2kgsl_*.deb ]    2>/dev/null || missing+=("8_build_guest_mesa_drm2kgsl.sh")
-    [ -e "$DIST"/mesa-guest-venus_*.deb ]       2>/dev/null || missing+=("8_build_guest_mesa_venus.sh")
+    # One mesa package for all three routes since 2026-08-18; a guest that still has the old
+    # per-route mesa-guest-<route> debs here is looking at a stale dist-guest/.
+    [ -e "$DIST"/mesa-guest_*.deb ]              2>/dev/null || missing+=("8_build_guest_mesa.sh")
     if [ ${#missing[@]} -gt 0 ]; then
         echo "    still to run: ${missing[*]}"
     else

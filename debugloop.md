@@ -16,7 +16,7 @@ scratchpad/devvm.sh start               # 起 VM,並開始串流 log 到 scratch
 scratchpad/devvm.sh stop                # 一定要用這個關,絕不 kill -9
 
 # 改客體 mesa(gfxstream ICD / zink)
-bash 8_build_guest_mesa_gfx.sh          # → dist-guest/mesa-guest-gfxstream_*.deb
+bash 8_build_guest_mesa.sh              # → dist-guest/mesa-guest_*.deb (all three routes)
 # 改客體核心模組(virtio-gpu / gunyah_guest)
 bash 9_build_guest_addition.sh          # → dist-guest/droidvm-guest-additions_*.deb
 scp dist-guest/*.deb root@172.22.68.12:/root/
