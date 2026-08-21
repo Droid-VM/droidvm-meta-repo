@@ -928,3 +928,45 @@ It also enlarges the starvation picture that has been discussed all along as "fo
 twenty-odd gfxstream render threads on one core, each able to burn three thousand `sched_yield`s
 when its ring runs dry -- competing, if the cpuset confines our threads without excluding the
 kernel's, with `kgsl_hwsched` itself.
+
+### The queue that stopped being short (2026-08-22)
+
+`lastop` pointed at `vkResetFences`, so the question became what that call actually does. It calls
+`CompleteOpsForSignalledFences`, which walks the tracker's pending queue linearly **under
+`mPollFunctionsMutex`, a lock every render thread shares**, on a per-frame, per-ring path with the
+guest blocked waiting for the reply. Its own comment states the assumption it rests on:
+
+> the queue is short (single digits in practice), so a linear scan is cheaper than any index
+
+That assumption held while the sweep ran from `vkQueueSubmit`, `vkDestroyFence` and
+`vkDestroySemaphore`. `c1220d770`, a deliberate port-time change made 2026-08-21, took it off
+those paths and gave it a background thread at 500ms, explicitly "deliberately infrequent". The
+old tree still sweeps from all three (`gfx-old` lines 4472 and 4836 call `PollAndProcessGarbage()`
+right after `AddPendingGarbage()`; the re-port calls only the latter).
+
+So the queue is no longer single digits -- it is half a second of submissions. The scan is
+unchanged; what it scans grew by two orders of magnitude.
+
+There is a second consequence on the same path. A `latestUse` promise can only be fulfilled from
+inside a sweep, so at 500ms a fence whose GPU work finished long ago still reads as not done. That
+makes `on_vkResetFences` enter its wait block nearly every time, where the old tree frequently
+skipped the block entirely.
+
+**And it corrects a bad inference used all night.** Candidate after candidate was excluded on
+"byte-equivalent between the trees, therefore not it" -- `waitForFences`, `ring_buffer`,
+`type1Read`, the sweeper thread, and `CompleteOpsForSignalledFences` itself, which an earlier
+section here records as restored and excluded. That reasoning is only valid when the state the
+code operates on is also equivalent. Identical code over a queue two orders of magnitude longer is
+not identical behaviour, and the exclusion of this function was wrong.
+
+Three measurements, cheapest first, none needing a rebuild:
+
+1. `GFXSTREAM_DEVICE_OP_POLL_MS=5` against the default 500 on the re-port. Convergence confirms
+   it; no movement kills the line cleanly.
+2. Queue depth, read directly -- `SweepProfile` already records `mPollFunctions.size()` under
+   `GFXSTREAM_SUBMIT_TRACE=1`. Single digits on the old tree and hundreds on the new would make
+   the broken premise a measurement rather than an inference.
+3. `RESETFENCE_TRACE`, reading **`M/N`** -- the share of calls that had a pending use at all. The
+   earlier instruction to watch `K/M` (already-signalled) was an incomplete criterion: this
+   hypothesis predicts `K/M` near 100% in both trees, since the fences really are done, and the
+   difference showing up in `M/N` instead.
