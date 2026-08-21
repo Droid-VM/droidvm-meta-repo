@@ -1084,3 +1084,65 @@ so none is the difference and any of them can turn a small difference into a lar
 The third was uninstrumented, so a host blocked on a guest that is slow to read its answer looked
 identical to a host with nothing to do. `ASGWRITE` now counts it -- raw counts and a duration
 histogram, because every mean tonight has been silent and every tail has not.
+
+### A knob this port added that aborts the guest when used (2026-08-22)
+
+`GFXSTREAM_ASG_WRITE_BUFFER_SIZE` changed what the host allocates and what `RingStream` declares,
+but `virtio_gpu_frontend.cpp` kept reporting the compile-time constant in the capset. The guest
+sizes its ring blob from the capset and derives **both** `ring_buffer_view` masks from that figure,
+so setting the variable left the two ends masking the same memory differently.
+
+It does not present as a size error. The desktop comes up fully, runs for about fifty seconds, and
+aborts once traffic rises on a decoded packet carrying `sType 0xB0002` -- stream misalignment,
+several seconds downstream of the mismatch that caused it. Both 4MB and 512K fail, which is what
+ruled out the first explanation offered for it (54 contexts against a 64MB pool): 512K uses *less*
+pool and fails identically.
+
+The comment directly above the capset line had described this exact failure -- "two literals in
+different files agreeing today is not the same as them being the same number" -- and the override
+was then added to one of the two files. Fixed by promoting `asgWriteBufferSize()` to a single
+accessor declared beside the constant it overrides.
+
+This is a defect the port introduced; the old tree has no such knob. It belongs on the PR list
+regardless of whether the knob survives, because an environment variable that aborts the guest
+when set must not ship.
+
+### Which benchmark numbers can be used (2026-08-22)
+
+**mailbox cannot.** Same backend, same guest, two consecutive boots, the only difference a pool
+size that should not affect performance at all:
+
+| | mailbox | fifo |
+|---|---|---|
+| NEW-1MB-pool64 | 394 | 82 |
+| NEW-1MB-pool256 | 1562 | 86 |
+
+4.0x on mailbox, 4.9% on fifo. No cross-run confounder, so this is not "noisy" -- under this test
+design mailbox is measuring something other than performance. Across the night the same NEW
+configuration produced 394 / 544 / 638 / 931 / 1061 / 1239.
+
+**fifo gives a lower bound only.** It is clamped by the panel, and the old tree reaches 111
+against a 120Hz panel -- 92.5% of the ceiling, so it is almost certainly topped out. The 1.3x
+old-versus-new gap in fifo is therefore a floor, and the true ratio can only be larger. Any claim
+of the form "the re-port is N times slower" has to say which metric produced N and whether that
+metric was clamped.
+
+### Method notes worth keeping (2026-08-22)
+
+The failure mode that recurred all night was **a quantity defined by its own conclusion**, four
+times: `spins/waits` (a counter incremented on every call, so the ratio was 1.000 by
+construction); raw counts against a tree drawing 6.2x more frames; `spins/packet` (fewer packets
+in the denominator *because* slower, more spin turns in the numerator *because* slower); and an
+arithmetically plausible story -- 54 contexts against a 64MB pool -- accepted as evidence before
+the case that refutes it was checked.
+
+Two practices that worked, both from acceptance: **make sure a zero result has only one possible
+explanation before starting the run** (verifying the probe is actually in the binary, printing
+crosvm's `environ`, distinguishing BOOT-FAIL from FAILED), and **build the null control into the
+matrix** rather than assuming an unrelated parameter is unrelated.
+
+And a hazard specific to this repo: `gfxstream/` is the *build* checkout and gets switched between
+branches to build the old tree. Both sessions read the wrong tree through it tonight. Compare via
+`git -C gfxstream show <ref>:<path>`, or use the fixed worktrees `gfx-old` and `gfx-old-instr` --
+never that path. The signature of having been fooled is old and new agreeing at identical line
+numbers.
