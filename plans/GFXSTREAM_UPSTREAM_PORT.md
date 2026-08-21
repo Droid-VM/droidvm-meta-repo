@@ -305,7 +305,10 @@ mesa 6634f48977c  gfxstream guest: stop hiding extensions the host could not dec
 
 > **判斷這一類問題的訊號**：症狀是「小整數被當成指標」或「非 null 指標指向空東西」。第一個要問的是：**這個決定是看平台，還是看實際型別／實際內容？**
 
-### R↔B 通道對調：根因已定位（08-22），修正待驗
+### R↔B 通道對調：因果鏈與已排除清單（08-22 白天）
+
+> ⚠️ **本節的標題原本寫「根因已定位、修正待驗」，那個結論已經被後面的〈R↔B 的狀態（08-22 深夜，未結）〉推翻。** 本節保留的是**因果鏈的測量資料和已排除清單**，那些仍然有效；**結論以後面那節為準**。
+
 
 畫面正常、kwin 零錯誤、guest 開到桌面，但顏色 R 和 B 對調。
 
@@ -579,6 +582,37 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 **兩類已判定為正當過時的**（掃過確認，不要再補）：AHB 時代的匯出補償（`mImageExportBroken` 等，`ExternalMemory::Mode::OpaqueFd` 讓成因消失）、以及 `zcModCreateInfo` 裡剝 AHB 位元那一半（上游的 `transformExternalMemoryHandleTypeFlags_tohost` 系統性地做了同一件事）。
 
 **下次移植的具體做法**：先 `git grep` 本地標記字串（`gfxstream-zerocopy` / `DroidVM` / 專案特有的識別字）數出兩邊的計數差，再**按符號而非按標記**逐條核對——標記數會因為重寫註解而失真（本例 39→15，實際 pVM 主體一項未缺）。**診斷要和修正一樣進清單**：漏掉診斷的代價不是功能壞掉，是重新發現一個已經被記載過的問題。
+
+### 效能退步 A 的排除清單（08-22 深夜，進行中）
+
+**目前的敘述**：每幀送出的 opcode 數、host dispatch 時間、批次與 replay 結構、flush 路徑**全部相同（4% 以內）**，而幀時間差 6.9 倍、guest 每幀多燒約 9 倍 CPU。
+
+**已排除（每一項都有實測，不是推論）**：
+
+| 項目 | 怎麼排除的 |
+|---|---|
+| ASG 往返次數 | `batches/opcode` 兩棵樹 0.615–0.627（校正 replay 計數後） |
+| host dispatch | 每幀 96us vs 100us |
+| 批次／replay 結構 | 每幀 8.0/8.3 批次、1.0/1.0 replay、每次 5 個命令 |
+| flush 路徑 | 兩棵樹逐字相同，都走 `transfer_read` |
+| 每幀 5.9MB 讀回 | 由 Rutabaga2D 在 **crosvm 內部**服務，一個位元組不進 gfxstream；crosvm 兩棵樹同一顆二進位 |
+| present 模式／緩衝數 | 四種模式差距都是 5–6 倍；`MAILBOX_IMAGES=8` 無影響 |
+| guest 自旋設定 | `GFXSTREAM_GUEST_BACKOFF_SPINS` 100→200000 無影響 |
+| 生產端領先量 | `GFXSTREAM_ASG_WRITE_BUFFER_SIZE` 16 倍（`maxOutstanding` 3→63）無影響 |
+| 延遲垃圾回收（sweep） | 實測每次 35–72us、佇列恆 0、`vkGetFenceStatus` 10–36us，對上 7474us 的尾巴差兩個數量級 |
+| 執行緒洩漏 | 總數 86→82 / 85→81，會回落 |
+| 執行緒排程屬性 | 兩棵樹都不設定，全靠繼承；繼承來源未變 |
+| 單核 cpuset | **舊樹在同一顆核上跑 2662 / fifo 114（貼面板）**，它不需要第二顆核 |
+| 記憶體型別／heap 夾制 | 已修（`VulkanMaxSafeHeapSize`），但實測不是 A |
+| `vkResetFences` 的 driver sweep | 已修（`CompleteOpsForSignalledFences`），但實測沒有穿透雜訊的改善 |
+
+**目前唯一還活著的假設**：**閒置的 ASG 消費者在偷 cpu7**。一個沒有流量的 context 卡在單一 `readRaw` 呼叫裡，反覆「自旋 3000 圈 → park → 被喚醒 → 再自旋」，而所有消費者共用一顆核。它符合每一項還沒被解釋的觀測，**而且它解釋了為什麼工作路徑的每一項量測都相同：變慢的東西不在工作路徑上。**
+
+（`sleepUs == 0` 那條路走 `ring_buffer_yield()`，**每圈一個系統呼叫**——所以那不是純自旋，是反覆讓出再搶回一顆共用的核。）
+
+**待驗**：per-thread 的 `ASGSPIN` 計數（新舊兩樹都已儀器化），以及 `ps -T -o TIME` 的累積 CPU 對照。
+
+**一個重要的量測限制**：**吞吐量指標在這台機器上的跨輪變異是 2.1 倍**（同一顆 `.so`、同配置量到 447 和 938），而**計數類指標的變異是 4%**。所有靠吞吐量分辨的實驗（自旋掃描、cpuset、asgbuf）都受此限制；**能用計數回答的問題就不要用吞吐量問。**
 
 ### 驗收方法上值得留著的東西
 
