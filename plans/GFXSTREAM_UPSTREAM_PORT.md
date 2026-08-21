@@ -336,7 +336,18 @@ mesa 6634f48977c  gfxstream guest: stop hiding extensions the host could not dec
 
 **這才是真正的缺陷**：一個健康的堆疊裡這兩者不該能分開——kwin 挑一個 fourcc，mesa 依它建 bo，zink 依它建 VkImage，turnip 依 VkImage 的格式寫入，全鏈同一個來源。**四種配置有三種不一致，代表鏈條中一直有一處在替換**，舊樹和修正版只是落在「兩邊剛好同值」的組合上。
 
-所以：**修正版可出貨（恢復了一套自洽、長期驗證過的配置），但它沒有修掉這個解耦，只是讓兩邊重新對齊。解耦記為 known defect。** 舊樹也帶著它，只是從未被觸發。
+**取得出貨配置的效能數字之後，這個缺陷從衛生問題變成了出貨路徑本身。** 在只有顏色資料時，「修正版可出貨、解耦記為 known defect」是正確的結論；加上下面這組數字之後，同一個缺陷變成擋在出貨前面的東西：
+
+```
+出貨配置（environment_variables=[]）的 vkmark：
+  舊樹            2130   顏色正確
+  新樹＋strip     1176   顏色反
+  新樹＋兩顆       463   顏色正確     ← 比 strip-only 慢 2.54 倍
+```
+
+**世界 A 的代價是 2.54 倍效能，而那個代價就是我們懷疑在蓋住 bug 的那顆中介拷貝——代價和可疑之處是同一個東西。** 所以修掉那個固定交換是目前唯一能同時拿到正確顏色和 1176 分的路。
+
+（1176 之上還有另一個 1.81 倍的退步要處理，見下。）
 
 已知的兩個候選管道（診斷已加，待驗）：guest ICD 對每顆 image 都加 `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`（`ResourceTracker.cpp:5062`），所以**跨格式的 view** 可以寫入交換過的位元組；而模擬路徑會多一顆 `usage=0x94 tiling=1` 的 1400x1050 中介 image，**跨格式的 `vkCmdCopyImage`** 是逐 byte 原樣搬、不轉換。兩條都能造成脫鉤。
 
@@ -379,6 +390,23 @@ mesa 6634f48977c  gfxstream guest: stop hiding extensions the host could not dec
 - crosvm 的 swizzle 邏輯：照 fourcc 辦事，AB24 換、AR24 不換，兩條都對
 - **桌面沒有 host ColorBuffer**：整個 session 只有 `findRepresentativeColorBufferMemoryTypeIndexLocked()` 建的 64×64 探針（寫死 R8G8B8A8）。畫素在 guest pool 裡
 - 一度以為的「多顆 buffer 貼不同標籤」：那些 AR24 是 64x64 的游標，三顆 1400x1050 scanout 標籤一致
+
+### 效能：兩個不同的退步（08-22，出貨配置實測）
+
+逐場景資料顯示這不是一個退步而是兩個，形狀完全不同：
+
+**退步 A（舊樹 → 新樹＋strip，1.81 倍）是集中的**：
+
+```
+blur     1752 → 345   5.08x        edge  2226 → 780   2.85x
+desktop  2275 → 892   2.55x        其餘一般場景      1.4~1.8x
+```
+
+命中最重的是每幀命令數最多的場景（多 render pass、barrier、layout 轉換、多次 submit），不是像素量最大的。可能是「每命令固定成本」而非「特定功能路徑」——兩者在總分上無法分辨，要靠 `DecoderProfile` 的**每批封包數**：封包數變多＝guest 送得更多（不是 host 慢），封包數不變而各 opcode 都貴一點＝每命令成本。
+
+**退步 B（新樹＋strip → 新樹＋兩顆，2.54 倍）是均勻的**：除 blur 外一律 0.29–0.56x，與畫什麼無關。這是「每幀多一次全螢幕拷貝」的形狀，和模擬路徑多出來的那顆 `usage=0x94`（帶 `TRANSFER_DST`）1400x1050 中介 image 對得上。
+
+**先前那組 force-cpu + `GFXSTREAM_DIAG=1` 下量到的數字（1341 / 221 / 185）配置失真，不可引用。** 保留在這裡是因為它本身是一條教訓：**同一組比較在兩種配置下給出相反的結論**——force-cpu 下 fix2 ≈ strip-only（185 vs 221，噪音內），出貨配置下差 2.54 倍。每幀 CPU 拷貝太貴，把要找的差異蓋掉了。
 
 ### 同批：vkmark 選到 `R16G16B16A16_UNORM` 後 segfault
 
@@ -476,3 +504,4 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 - **兩人獨立得到同樣結論，不等於有兩份證據。** 如果兩個推論的根據是同一個未經檢查的前提，一致只是把同一個假設數了兩次。這一輪「strip 只移除項目、不改變順序」兩邊各自推出來、彼此增強信心，然後被一次實測推翻——兩個推論錯在同一處（都假設清單是「先建好再過濾」）。在多人協作裡，一致是最容易被誤讀成證據的東西
 - **收集工具會靜默丟資料，而那比丟掉一輪嚴重——它讓你以為自己有資料。** vkmark 的逐場景 `FPS:` 行被 grep pattern 濾掉，留下的 `===` 分隔線還被拿來論證「兩輪場景數相同」。原始輸出一律全留，過濾只在讀的時候做
 - **設計測試的人和使用測試的人都要做那條檢查。** 「image 宣告的格式」被當成「shader 寫進去的值」的證據，設計的人沒做，收到的人也沒做就轉發出去了
+- **觀測手段本身是一個變因，而且它可能剛好蓋住你要找的差異。** 這一輪出現四次：`GPU_SCANOUT_TRACE` 把桌面推去零拷貝路徑、force-cpu 蓋住中介拷貝的效能代價、vkmark 收集腳本的 grep 濾網丟掉逐場景數字、診斷的 fprintf 走 crosvm stderr pipe 本身會壓低分數（一輪 vkmark 6622 行）。量效能前先問：這個配置有沒有把我要量的東西改掉
