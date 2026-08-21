@@ -394,6 +394,10 @@ surface 宣告 `R16G16B16A16_UNORM` 可用，但 VirtGpu 資源路徑只認 `FLO
 
 **guest 是硬依賴這個回傳值的**：`ResourceTracker.cpp:4203` — `if (!subResourceLayout.rowPitch) return VK_ERROR_INITIALIZATION_FAILED;`
 
+**實測：補回隱藏之後 B 組沒有被觸發**（整份 logcat 裡 `MEMORY_PLANE` / `query stride` / `INITIALIZATION_FAILED` 各 0 筆，桌面正常起來）。**但這是「休眠」不是「過時」，成因仍在。** 追過一遍：guest 決定 aspect 的條件是 `info.createInfo.tiling == DRM_FORMAT_MODIFIER_EXT`（`ResourceTracker.cpp:4191`），而模擬路徑把 tiling 改成 LINEAR 的是 `localCreateInfo`（`4918`），記進 `info_VkImage` 的卻是**原始的** `*pCreateInfo`（`5163`）——所以模擬情況下那個條件仍然成立，仍然會選 `MEMORY_PLANE_0`。它沒觸發只是因為 `4178` 那整塊是「dedicated allocation 匯出成 VirtGpu resource」的路徑，kwin 的緩衝這一輪沒走到。換一個 client 或換一種配置就可能踩到。
+
+**標記為 known latent。** 下一個踩到的人的症狀會是 guest 端 `Failed to query stride for VirtGpu resource creation` 加上 `VK_ERROR_INITIALIZATION_FAILED`；要找的東西就是本節 B 組那 11 處。
+
 **這組的六處落在 `VkDecoder.cpp`，那是生成檔。** 重新生成就整批消失——這是最不該有的分歧形式，也是它整組被漏掉的原因。若最後決定保留這條路線，必須把它做成「生成後套用」的 patch 腳本，而不是手改生成檔。
 
 **C. 外部記憶體 / AHB→dmabuf（14 處）— 待逐條確認**
@@ -407,6 +411,26 @@ surface 宣告 `R16G16B16A16_UNORM` 可用，但 VirtGpu 資源路徑只認 `FLO
 | `VkImageDrmFormatModifierExplicitCreateInfoEXT` | 2 | 0 |
 
 這一族多半是「host 只能用 AHB 匯出」時代的補償（AHB 沒有 BGRA 格式 → BGRA colorBuffer 匯出失敗 → latch `mImageExportBroken` → 連 RGBA8 都不能匯）。**新樹選 `ExternalMemory::Mode::OpaqueFd`（自動升級成 `DMA_BUF_BIT_EXT`），AHB 那條路不走了，這些補償的成因就不存在**——但要逐條確認，不能假設。桌面路線上這一族影響較小（實測桌面沒有 host ColorBuffer）。
+
+**D. pVM / pool 移植的主體：逐項對得上，沒有缺口**
+
+`DroidVM` 標記 old=39 / new=15 看起來像缺口，但那是移植時重寫註解措辭造成的。按**符號**查才準：
+
+```
+poolOffset        32/32     folio             32/32     HostVisiblePool   23/22
+blob backing      14/15     STREAM_HANDLE_TYPE_MEM_POOL 7/9   guest-alloc  10/10
+HostVisibleFolio   4/4      CreateFromPool     4/4
+```
+
+zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟用條件（`IsAndroidKernel6_6() && HasUdmabufDevice()`）也都逐字保留。
+
+**E. 唯一的其他缺口：`DecoderProfile`（old=7 / new=0）**
+
+舊樹自己寫的逐 opcode 解碼耗時剖析器（`GFXSTREAM_DECODER_PROFILE=1` 才啟用，關閉時只付一次比較）。掛法是**解碼迴圈層級的六行**，不是 per-opcode，所以重新移植很便宜。
+
+它處理了巢狀歸戶——`vkQueueFlushCommandsGOOGLE` 的耗時會扣掉內含的 `vkCmd*`，否則兩者重複計算（註解記錄過一次實測：427us 的 flush 裡有 ~268us 是內含的 vkCmd\*）。
+
+**這是回答「vkmark 1341 → 185 從哪來」的儀器。** 若退步證實與那兩顆修正無關而是 rebase 本身的，先補這個再談修哪裡——否則只能點名猜測。
 
 ### 真正的決定：兩個世界選一個
 
