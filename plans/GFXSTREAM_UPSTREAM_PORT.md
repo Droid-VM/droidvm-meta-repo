@@ -857,20 +857,18 @@ stock guest. Any number quoted as the port's result must come from that configur
 
 The +72% measured tonight is therefore not a shipping figure. It is evidence about a mechanism.
 
-### CPU per frame, the first non-circular cost number (2026-08-22) -- PENDING CONFIRMATION
-
-**Read the caveat at the end of this section before using any number in it.**
+### CPU per frame, the first non-circular cost number (2026-08-22)
 
 
 Restricted to the threads actually inside the consumer cpuset, over the same ten seconds:
 
 | | gpuworker share of cpu7 | frames | ticks per frame |
 |---|---|---|---|
-| old | 32.6% | 3205 | 0.099 |
-| new | 44.3% | 724 | 0.601 |
+| old | 33.0% | 3205 | 0.1030 |
+| new | 44.3% | 724 | 0.6119 |
 
 Ratio-of-ratios, so the units cancel and neither the frame count nor the spin counter defines the
-result: **the re-port spends about six times as much consumer CPU per frame.** That is waste, and
+result: **the re-port spends 5.94x as much consumer CPU per frame.** That is waste, and
 it is the first statement of the cost that does not depend on a quantity the conclusion defines.
 
 It does not by itself explain the slowdown, because the core is not full -- 44.3% leaves room. Two
@@ -885,19 +883,19 @@ Those are distinguishable, and `RESETFENCE_TRACE` distinguishes them: if the fen
 signalled the block is elsewhere, and if they are not, the fence is the trigger and the spinning
 is downstream of it.
 
-**Caveat, added the same day.** The measuring script that produced these had two defects found
-afterwards: Android's toybox has no `join`, so a line meant to combine two thread lists failed
-silently and left arithmetic being done on empty strings, and the cpuset file is `cpus`, not
-`cpuset.cpus`, so the check that the run really was confined to one core never ran. A later run of
-the same tooling reported the cpuset consuming 995% of one core, which is impossible and is what
-exposed the first defect.
+**Provenance, since the tooling around it broke three times.** These per-thread ticks were added
+by hand from a printed list, not through the script whose `join` failed silently on Android (toybox
+has none), so that defect never touched them. They were, however, transcribed from a `head`-
+truncated top-8 list, and a full recount over the complete 86- and 82-row files moves the ratio
+from 6.06 to 5.94. The recount also drops four threads that are not in the cpuset's task list at
+all (`Binder:crosvm`, `blockingPool0`, `virtio_blk`, `v_net:0`).
 
-The per-thread ticks quoted above appear to have been added by hand from a printed list rather
-than through the broken path, which would leave them sound -- but that is an inference about
-someone else's script, not a verification. Treat the 6x as unconfirmed until it is re-derived from
-tooling known to work. It is the sort of number that reads as solid precisely because it is a
-ratio of ratios, and three metrics tonight have already looked solid and been circular or
-self-defined.
+A third defect is worth recording because it nearly poisoned everything: `/proc/<tid>/stat` does
+not report that thread when the tid is not the thread-group leader -- the kernel routes it to
+`proc_tgid_stat` and returns the whole process's utime/stime. Reading it 54 times added the same
+number 54 times, which is where a reported "995% of one core" came from. The correct path is
+`/proc/<pid>/task/<tid>/stat`. This dataset is provably unaffected: its per-thread values differ
+from each other (160/158/4/2/1), and the broken path would have made them identical.
 
 ### How many rings there are, and what that broke (2026-08-22)
 
@@ -924,10 +922,24 @@ manufactured by merging rings. What has to be re-read: the runs of consecutive s
 position, because "consecutive" was defined over interleaved rings; and stalls per frame, whose
 numerator summed an unknown and possibly different number of rings in each tree.
 
-It also enlarges the starvation picture that has been discussed all along as "four rings". It is
-twenty-odd gfxstream render threads on one core, each able to burn three thousand `sched_yield`s
-when its ring runs dry -- competing, if the cpuset confines our threads without excluding the
-kernel's, with `kgsl_hwsched` itself.
+It looked at first as though this enlarged the starvation picture from "four rings" to twenty-odd
+render threads each able to burn three thousand `sched_yield`s. **Per-thread CPU says otherwise
+and that reading was wrong.** In this workload the consumer CPU sits almost entirely on exactly
+two threads:
+
+    old   kwin_wayland/29878 +160   kwin_wayland/29880 +158   the other 7 total +12
+    new   kwin_wayland/31992 +218   kwin_wayland/31996 +216   the other 4 total  +9
+
+The remaining ~52 spend no measurable CPU in the window, which means they are parked, not
+spinning -- spinning burns CPU and parking does not. So the count of rings that *exist* is 54; the
+count that is *hot* is two, and "twenty-odd threads each spinning" did not happen here.
+
+The whole 33.0%-versus-44.3% difference therefore lives on those two threads. That does not touch
+the `kgsl_hwsched` question -- two spinning threads can contend with it as well as twenty -- but
+any argument resting on the number of spinners has to use two.
+
+Ring counts themselves are not the difference either: 54 threads under the old tree, 55 under the
+new.
 
 ### The queue that stopped being short (2026-08-22)
 
