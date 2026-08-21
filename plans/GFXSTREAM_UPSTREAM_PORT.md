@@ -718,3 +718,40 @@ What that leaves: the consumer runs dry because the guest goes quiet for more th
 spins at the measured 0.45us a turn), and the guest binary is shared -- so the difference is in
 how long this host takes to answer something the guest waits on. The probe now names the last
 opcode decoded before each stall, which is the question put directly.
+
+### Result of the ping fix (2026-08-22)
+
+| | before | after | |
+|---|---|---|---|
+| old tree vkmark | 1885 | 2056 | +9% |
+| new tree vkmark | 302 | 518 | +72% |
+| gap | 6.2x | 4.0x | |
+
+The old tree is the control and it did not regress, which is the only reason the new tree's +72%
+can be read as caused rather than coincident -- both trees run the same guest binary, so a change
+that helped only one would have been suspect.
+
+The mechanism check mattered more than the FPS. If stalls had fallen while the queued-ping count
+stayed up, the improvement would have been luck. Instead `wakeups` per stall went 24.1 -> 0.0 on
+the new tree (100% zero) and 11.2 -> 0.0 on the old, and runs of five consecutive same-write
+stalls went 47 -> 1. That also confirms after the fact what the "five" was: the number of pings
+waiting in the queue, one spin budget each.
+
+**The stalls did not stop, they got shorter.** 0.2440 -> 0.1678 per frame, with the run lengths
+squeezed from 2-5 down to 2-3 but occurring more often. Those residual stalls carry `wakeups=0`,
+so whatever runs the ring dry now is not the doorbell. The remaining 4.0x is a separate problem
+and is open.
+
+The next datum: `vkWaitForFences` max is 5280us on the new tree and 484us on the old, with the
+same mean. Since `waitForFences` is byte-identical between the trees, an unchanged mean with an
+11x tail cannot come from the handler -- the fence really had not signalled, so the submission
+behind it landed late. That gives a closed loop worth testing: a residual stall burns three
+thousand `sched_yield`s, which eats the single-core cpuset every consumer for the VM shares,
+which starves the host's own submit, which signals the fence late, which keeps the guest quiet
+past 225us, which is the next stall. Self-sustaining, and it needs no large difference between
+the trees to get going -- only for one of them to step in first.
+
+Two runtime knobs are worth re-measuring against that loop, because both were measured while the
+ping amplifier was still present and could have been masked by it: widening the cpuset (the clean
+test -- if the gap collapses, contention is the mechanism) and the spin ladder, whose default
+`3000:0` spins three thousand times with no sleep, every turn a syscall.
