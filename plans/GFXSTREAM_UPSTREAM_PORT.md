@@ -799,3 +799,43 @@ bug with a different fix.
 - `ring_buffer_copy_contents` does differ -- old measures `available_at_end` from `write_pos`, new
   from `read_pos`, and new is the correct one -- but it only decides whether the copy splits in
   two. How much the consumer may take comes from `ring_buffer_available_read`, which is untouched.
+
+### What the stalls are waiting for (2026-08-22)
+
+The stall probe now names the last opcode the ring's decoder finished before it ran dry, and the
+answer on the vkmark ring is not a distribution: **95.7% of 920 stalls begin immediately after
+`vkResetFences`** (20037), with `vkWaitForFences` a distant second at 0.9%.
+
+`vkResetFences` is synchronous -- the guest cannot proceed until the host answers -- and the
+handler waits on the fences of any host operation still in flight. So the causal order has to be
+rewritten. Spinning was never the cause; both trees spin exactly three thousand turns, and the
+user put the question that makes this obvious: if the budget is the same in both, the budget
+cannot be the difference. What differs is how often a tree enters the spin at all, 0.0043 versus
+0.1678 stalls per frame:
+
+    a fence is not signalled when vkResetFences asks
+      -> the host blocks in the wait, and that thread *is* this ring's consumer
+      -> the guest waits for the reply, so this ring goes quiet
+      -> the OTHER rings' consumers see nothing and spin three thousand sched_yields
+      -> the shared core is divided up and everyone slows down
+
+The spin is the last step, not the first. It explains why four cores fixes the symptom -- the
+rings stop starving each other -- while leaving the trigger untouched.
+
+**Two measurements that do not yet agree.** Widening the cpuset gave 6x. Per-thread CPU over a
+fixed ten seconds gave old 1323 ticks and new 1295 -- 2% apart -- for 4.4x different output, with
+no thread near saturation. Equal CPU and unequal output says serialisation, and serialisation
+should not care about a second core. The gap in the second measurement is that its total spans
+every crosvm thread including the vCPUs, which are not in the consumer cpuset; a single-core
+cpuset saturates at 100%, so a 130% total cannot say whether that core was full. The sum
+restricted to threads inside the cpuset is what resolves it, and until it exists neither reading
+is safe.
+
+**An instrument not yet trusted.** The same probe reports values far outside the opcode range on
+low-traffic rings -- 36% of ksplashqml's stalls, 37% of plasmashell's, 3.4% of kwin's, 0.2% of
+vkmark's -- while every other field on those lines is sane, which rules out log interleaving and
+argument misalignment. The field is zero-initialised, so a non-zero garbage value means something
+wrote it, and the same two or three values recur, which means the source is deterministic rather
+than random memory. Either the decoder returned it or this memory is being clobbered; the second
+would be a real bug. `noteDecoded` now range-checks and counts rejections separately, so `badops`
+splits the two. vkmark's 0.2% is low enough that the 95.7% finding stands regardless.
