@@ -857,7 +857,10 @@ stock guest. Any number quoted as the port's result must come from that configur
 
 The +72% measured tonight is therefore not a shipping figure. It is evidence about a mechanism.
 
-### CPU per frame, the first non-circular cost number (2026-08-22)
+### CPU per frame, the first non-circular cost number (2026-08-22) -- PENDING CONFIRMATION
+
+**Read the caveat at the end of this section before using any number in it.**
+
 
 Restricted to the threads actually inside the consumer cpuset, over the same ten seconds:
 
@@ -881,6 +884,20 @@ like, and the thing that stops the frames is still the unsignalled fence.
 Those are distinguishable, and `RESETFENCE_TRACE` distinguishes them: if the fences are already
 signalled the block is elsewhere, and if they are not, the fence is the trigger and the spinning
 is downstream of it.
+
+**Caveat, added the same day.** The measuring script that produced these had two defects found
+afterwards: Android's toybox has no `join`, so a line meant to combine two thread lists failed
+silently and left arithmetic being done on empty strings, and the cpuset file is `cpus`, not
+`cpuset.cpus`, so the check that the run really was confined to one core never ran. A later run of
+the same tooling reported the cpuset consuming 995% of one core, which is impossible and is what
+exposed the first defect.
+
+The per-thread ticks quoted above appear to have been added by hand from a printed list rather
+than through the broken path, which would leave them sound -- but that is an inference about
+someone else's script, not a verification. Treat the 6x as unconfirmed until it is re-derived from
+tooling known to work. It is the sort of number that reads as solid precisely because it is a
+ratio of ratios, and three metrics tonight have already looked solid and been circular or
+self-defined.
 
 ### How many rings there are, and what that broke (2026-08-22)
 
