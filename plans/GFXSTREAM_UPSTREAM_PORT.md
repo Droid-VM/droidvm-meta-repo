@@ -839,3 +839,45 @@ wrote it, and the same two or three values recur, which means the source is dete
 than random memory. Either the decoder returned it or this memory is being clobbered; the second
 would be a real bug. `noteDecoded` now range-checks and counts rejections separately, so `badops`
 splits the two. vkmark's 0.2% is low enough that the 95.7% finding stands regardless.
+
+### The guest change is a probe, not a shipping fix (2026-08-22, user's instruction)
+
+The three tightened ping conditions in `AddressSpaceStream.cpp` exist to find the problem, not to
+be part of the answer. The final comparison has to run on the **unmodified guest**, or the re-port
+is being scored against a control that was altered to help it.
+
+Which is right for a second reason: both trees share that guest binary, so a change there moves
+both numbers and cannot settle anything about the host port. Its value was diagnostic -- `wakeups`
+going to zero is what proved the queued-ping mechanism -- and that value has been collected.
+
+Practically: mesa commit `8c7d7ccc8ed`, one file, reverts cleanly (6 insertions, 42 deletions).
+Before the acceptance matrix, revert it, rebuild the guest deb, reinstall (a persistent write to
+the qcow2 overlay, so it needs a graceful shutdown afterwards), and take old-versus-new on the
+stock guest. Any number quoted as the port's result must come from that configuration.
+
+The +72% measured tonight is therefore not a shipping figure. It is evidence about a mechanism.
+
+### CPU per frame, the first non-circular cost number (2026-08-22)
+
+Restricted to the threads actually inside the consumer cpuset, over the same ten seconds:
+
+| | gpuworker share of cpu7 | frames | ticks per frame |
+|---|---|---|---|
+| old | 32.6% | 3205 | 0.099 |
+| new | 44.3% | 724 | 0.601 |
+
+Ratio-of-ratios, so the units cancel and neither the frame count nor the spin counter defines the
+result: **the re-port spends about six times as much consumer CPU per frame.** That is waste, and
+it is the first statement of the cost that does not depend on a quantity the conclusion defines.
+
+It does not by itself explain the slowdown, because the core is not full -- 44.3% leaves room. Two
+readings survive. Either the spare capacity is not actually spare, because the cpuset confines our
+threads to cpu7 without excluding anyone else's from it, and the obvious other tenants are KGSL's
+own `kgsl_hwsched` and `kgsl-events` -- in which case the consumers are burning three thousand
+`sched_yield`s against the very thread that feeds the GPU, and four cores helps by separating
+them. Or the waste is a symptom: more spinning per frame is what running dry more often looks
+like, and the thing that stops the frames is still the unsignalled fence.
+
+Those are distinguishable, and `RESETFENCE_TRACE` distinguishes them: if the fences are already
+signalled the block is elsewhere, and if they are not, the fence is the trigger and the spinning
+is downstream of it.
