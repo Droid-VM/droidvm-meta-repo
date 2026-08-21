@@ -671,3 +671,50 @@ end:   parked after 1349us ...
 - **一個測量沒有涵蓋的狀態，很容易被當成它排除了那個狀態。** profiler 量的是 dispatch 時間，自旋不算在裡面——於是「host 只忙 3.8%」被讀成「host 在 park」，而它同樣可能是「host 忙著自旋」。這條和「診斷沒印出來不是證據」同源，但更難察覺，因為這裡**有**數字，只是那個數字不涵蓋你要問的狀態
 - **分母不是你以為的那個。** `DECODERPROF` 的報告視窗固定 10 秒，但工作負載只佔其中一部分，而且跑得慢的那一輪佔比更小——於是所有 `n=/s` 的速率被稀釋了**不同的倍數**，「opcodes/s 少 8.9 倍」「host dispatch 少 7 倍」全是假象。**用一個每幀必然發生一次的事件當幀標記正規化之後，每幀的量兩邊全部相同（4% 以內）。** 任何 per-second 的比較，先確認兩邊的分母是同一段時間
 - **共用工作樹是移動目標。** 一邊為了編另一棵樹而 `git checkout`，另一邊同時在 `grep host/` —— 結果是「拿舊樹跟自己比」而毫無察覺。而 Soong 是邊跑邊讀檔案的，所以 build 進行中切分支會編出混合樹。**兩條規則：讀別棵樹一律用 `git show <branch>:<path>` 從物件庫讀，不碰工作樹；build 進行中不切分支。** 前者比「記得先講一聲」可靠，因為它不依賴任何人的記憶
+
+## The guest ping, and what it is not (2026-08-22)
+
+The stall probe's answer to "what do the hundred-fold waits have in common" turned out to be a
+loop with a name: the consumer catches the producer, spins its three thousand turns, parks, is
+woken immediately because a ping was already queued, finds the write position exactly where it
+left it, and does the whole thing again. About five times, about seven milliseconds.
+
+The pings come from `AddressSpaceStream.cpp`, which sends one after a transfer whenever the host
+is not RENDERING. A host spinning in its consumer loop reads as CAN_CONSUME, so the ping goes to
+a thread that was already about to find the data. Where cores are plentiful that costs nothing.
+Here every consumer for a VM shares one cpuset on one core, a consumer only looks at its message
+queue after the spin budget runs out, and with a zero sleep each of those turns is a `sched_yield`
+-- so a redundant ping waits out a full spin budget before revealing it meant nothing.
+
+Three things about this are worth writing down, because each one nearly got mis-filed.
+
+**It is not an eighth dropped item.** `git log -S isRenderingAfter` puts those three sites in
+`72d2f698fc4`, an upstream commit. The seven dropped items are work measured against this
+hardware that upstream never had; this is upstream code that is simply wrong for this hardware.
+Different category, different argument for changing it.
+
+**It is not regression A's cause.** Both trees run the same guest binary. Whatever makes the
+re-port run the ring dry 57x more often per frame is on the host side and is still open; the ping
+only sets the price of running dry. Fixing it should move both trees, which is what makes it
+testable: the old tree must not get worse.
+
+**Per-frame normalisation is the whole measurement.** Raw counts say the old tree stalls more.
+The old tree also drew 6.2x more frames in the same ten seconds. Per frame it stalls 57x less,
+and hits a consecutive-same-write run 212x less, while receiving the same order of pings per
+stall (11.2 vs 24.1) -- so the pings did not multiply, they got more expensive.
+
+### Excluded on the host side (2026-08-22)
+
+Diffed old against new and found byte-equivalent behaviour, so none of these can be the 57x:
+
+- `readRaw`'s spin ladder, its stage table, and the per-thread timer slack.
+- `onUnavailableRead` and the park path. The only difference is that the old tree still prints
+  PARK-STATE / PARK-WITH-DATA / PARK-WITH-PARTIAL there, which can only make the old tree slower.
+- Every `host_state` transition: same writes, same order, same places.
+- `on_vkWaitForFences`, and `on_vkResetFences` including the `CompleteOpsForSignalledFences` fast
+  path. The only difference is the old tree's `GFXSTREAM_RESETFENCE_TRACE` counters.
+
+What that leaves: the consumer runs dry because the guest goes quiet for more than 225us (500
+spins at the measured 0.45us a turn), and the guest binary is shared -- so the difference is in
+how long this host takes to answer something the guest waits on. The probe now names the last
+opcode decoded before each stall, which is the question put directly.
