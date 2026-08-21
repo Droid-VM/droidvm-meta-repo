@@ -321,7 +321,24 @@ mesa 6634f48977c  gfxstream guest: stop hiding extensions the host could not dec
 
 `framebuffer` 那一欄是 guest 核心自己記的（`/sys/kernel/debug/dri/0/framebuffer`），完全不經過 host。
 
-**結論：畫素內容從頭到尾是 B-first、一個 bit 沒變，變的是 guest 貼上去的標籤。** crosvm 照著 fourcc 辦事，做的是對的事，只是被錯的宣告指揮。
+**crosvm 照著 fourcc 辦事，做的是對的事，只是被錯的宣告指揮。**
+
+**但「內容從頭到尾沒變」這句話是錯的，補上第四個變體就翻掉了**（保留這個更正，因為它是這一輪最容易重犯的錯）：
+
+| build | label（scanout fourcc） | content（raw head） | 一致 | 螢幕 |
+|---|---|---|---|---|
+| 舊樹 | AR24（B-first） | `67 7d 57 ff`（B-first） | ✓ | 正確 |
+| 新樹（無修正） | AB24（R-first） | `67 7d 57 ff`（B-first） | ✗ | 反 |
+| 新樹＋strip | AR24（B-first） | `57 7d 67 ff`（**R-first**） | ✗ | 反 |
+| 新樹＋strip＋隱藏 | AR24（B-first） | `67 7d 57 ff`（B-first） | ✓ | 正確 |
+
+**label 和 content 由兩條可以獨立翻轉的機制決定。** strip 兩個都翻，modifier 隱藏只翻 content；兩顆一起，label 翻了而 content 淨值不變，於是對齊。
+
+**這才是真正的缺陷**：一個健康的堆疊裡這兩者不該能分開——kwin 挑一個 fourcc，mesa 依它建 bo，zink 依它建 VkImage，turnip 依 VkImage 的格式寫入，全鏈同一個來源。**四種配置有三種不一致，代表鏈條中一直有一處在替換**，舊樹和修正版只是落在「兩邊剛好同值」的組合上。
+
+所以：**修正版可出貨（恢復了一套自洽、長期驗證過的配置），但它沒有修掉這個解耦，只是讓兩邊重新對齊。解耦記為 known defect。** 舊樹也帶著它，只是從未被觸發。
+
+已知的兩個候選管道（診斷已加，待驗）：guest ICD 對每顆 image 都加 `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT`（`ResourceTracker.cpp:5062`），所以**跨格式的 view** 可以寫入交換過的位元組；而模擬路徑會多一顆 `usage=0x94 tiling=1` 的 1400x1050 中介 image，**跨格式的 `vkCmdCopyImage`** 是逐 byte 原樣搬、不轉換。兩條都能造成脫鉤。
 
 真正的根因是**兩個漏移植的本地修正**（不是任何一顆新 commit 的 regression）：
 
@@ -456,3 +473,6 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 - **開診斷會改變被觀測的對象。** `GPU_SCANOUT_TRACE=1` 一開，桌面就切到 zero-copy 路徑，而 byte probe 根本不在那條路上 —— 量到的不是原本要量的東西。加觀測點前先問：這個開關會不會換掉資料路徑
 - **挑測試的準則：問「兩個假設會給出不同答案」的那個問題。** 「跑純紅的 GL 程式看變不變藍」沒有鑑別力——R↔B 是對整個 framebuffer 做的，紅變藍在「zink 的問題」和「kwin 挑格式的問題」兩個假設下都會發生。換成「同一個測量、只換 `.so`，看標籤變了還是內容變了」就一次砍掉一半
 - **對照組不是可選的。** 「新 .so 的位元組是 BGRA、宣告是 RGBA，所以有人翻轉了畫素」——這個推論錯了，錯在只有單一觀測。舊 .so 一跑，位元組逐 byte 相同，「翻轉」根本不存在
+- **兩人獨立得到同樣結論，不等於有兩份證據。** 如果兩個推論的根據是同一個未經檢查的前提，一致只是把同一個假設數了兩次。這一輪「strip 只移除項目、不改變順序」兩邊各自推出來、彼此增強信心，然後被一次實測推翻——兩個推論錯在同一處（都假設清單是「先建好再過濾」）。在多人協作裡，一致是最容易被誤讀成證據的東西
+- **收集工具會靜默丟資料，而那比丟掉一輪嚴重——它讓你以為自己有資料。** vkmark 的逐場景 `FPS:` 行被 grep pattern 濾掉，留下的 `===` 分隔線還被拿來論證「兩輪場景數相同」。原始輸出一律全留，過濾只在讀的時候做
+- **設計測試的人和使用測試的人都要做那條檢查。** 「image 宣告的格式」被當成「shader 寫進去的值」的證據，設計的人沒做，收到的人也沒做就轉發出去了
