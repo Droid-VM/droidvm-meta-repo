@@ -881,3 +881,33 @@ like, and the thing that stops the frames is still the unsignalled fence.
 Those are distinguishable, and `RESETFENCE_TRACE` distinguishes them: if the fences are already
 signalled the block is elsewhere, and if they are not, the fence is the trigger and the spinning
 is downstream of it.
+
+### How many rings there are, and what that broke (2026-08-22)
+
+A ring is per guest **thread**, not per application, and there is no pool anywhere in the path.
+
+The guest's `GfxStreamConnectionManager::getThreadLocalInstance()` keeps its instance in a TLS
+key, so the first Vulkan call on a thread allocates that thread its own connection and its own
+ring. The host answers each context in `RendererImpl::addressSpaceGraphicsConsumerCreate()` with
+`new RenderThread(info, loadStream); thread->start();`, and `RenderThread` derives from
+`gfxstream::base::Thread` -- a real OS thread. One guest thread, one ring, one host thread, shared
+with nobody.
+
+On this device that is 54 threads in the `gpuworker` cpuset, among them 11 named `plasmashell`, 8
+`kwin_wayland`, 9 `v_gpu`, 12 `crosvm:traceq0` -- all on cpu7.
+
+**Which invalidates how the probe was labelling.** It took its label from
+`prctl(PR_GET_NAME)`, and crosvm names each render thread after the guest process it serves. So
+`ASGSTALL[kwin_wayland]` was eight rings' events tallied as one, `ASGSTALL[plasmashell]` eleven,
+and nothing in the output admitted it. The label is now `comm/tid`.
+
+What survives unchanged: `wakeups` going to zero, which is a presence question rather than a
+distribution; and vkmark's 95.7% `vkResetFences`, since a concentration that sharp cannot be
+manufactured by merging rings. What has to be re-read: the runs of consecutive stalls at one write
+position, because "consecutive" was defined over interleaved rings; and stalls per frame, whose
+numerator summed an unknown and possibly different number of rings in each tree.
+
+It also enlarges the starvation picture that has been discussed all along as "four rings". It is
+twenty-odd gfxstream render threads on one core, each able to burn three thousand `sched_yield`s
+when its ring runs dry -- competing, if the cpuset confines our threads without excluding the
+kernel's, with `kgsl_hwsched` itself.
