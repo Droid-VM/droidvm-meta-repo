@@ -474,7 +474,18 @@ surface 宣告 `R16G16B16A16_UNORM` 可用，但 VirtGpu 資源路徑只認 `FLO
 | `formatExternalizable` | 2 | 0 |
 | `VkImageDrmFormatModifierExplicitCreateInfoEXT` | 2 | 0 |
 
-這一族多半是「host 只能用 AHB 匯出」時代的補償（AHB 沒有 BGRA 格式 → BGRA colorBuffer 匯出失敗 → latch `mImageExportBroken` → 連 RGBA8 都不能匯）。**新樹選 `ExternalMemory::Mode::OpaqueFd`（自動升級成 `DMA_BUF_BIT_EXT`），AHB 那條路不走了，這些補償的成因就不存在**——但要逐條確認，不能假設。桌面路線上這一族影響較小（實測桌面沒有 host ColorBuffer）。
+**C 族裡最重要的一塊已逐條判定完（08-22）：`zcModCreateInfo`（舊樹 `VkDecoderGlobalState.cpp:3296`，明確為 zink 的 GBM scanout buffer 而寫）**
+
+它做兩件事，而這兩件事的命運相反：
+
+- **AHB → DMA_BUF（剝掉 `handleTypes` 的 AHB 位元）：已被上游取代。** 新樹有系統性的 `DEFINE_EXTERNAL_HANDLE_TYPE_TRANSFORM(VkExternalMemoryImageCreateInfo, handleTypes)` → `transformExternalMemoryHandleTypeFlags_tohost()`，而我們選 `ExternalMemory::Mode::OpaqueFd`（自動升級 `DMA_BUF_BIT_EXT`），guest 送來的 AHB 位元會被轉掉。**這也解釋新樹為何踩不到舊樹記載的那個 SIGSEGV**（host Mesa 不再判成 `android_buffer_type = HARDWARE` → Turnip memReq size 0 → 解參 NULL gralloc handle）
+- **改寫 tiling 成 `DRM_FORMAT_MODIFIER_EXT` + 明確 `DRM_FORMAT_MOD_LINEAR` 佈局（`rowPitch = align(width*bpp, 256)`，「與 host colorBuffer 佈局相同」）：確實還缺**，新樹零筆對應物
+
+第二點的後果：**舊樹有兩條獨立的路確保 scanout image 是 linear**（guest 端的 modifier 模擬 + host 端的這塊改寫）；移植只保住了 guest 那條，也就是補回的 `687df86cd`——**變成單點依賴，而它正在 1/11 失效**。這也解釋了實測到的「新樹只有 OPTIMAL 的 1400x1050、fix2 才多一顆 LINEAR」。
+
+**但它管的是 layout / stride，不是通道順序**——stride 不一致會produce斜切或花屏，不是乾淨的 R↔B 交換。所以定位是：**確定缺失、確定該補、機制上尚未對上 R↔B。** 補它需要新增 `supportsDrmFormatModifier()`（新樹沒有），改動面比先前幾顆大。
+
+C 族其餘的多半是「host 只能用 AHB 匯出」時代的補償（AHB 沒有 BGRA 格式 → BGRA colorBuffer 匯出失敗 → latch `mImageExportBroken` → 連 RGBA8 都不能匯）。**新樹選 `ExternalMemory::Mode::OpaqueFd`（自動升級成 `DMA_BUF_BIT_EXT`），AHB 那條路不走了，這些補償的成因就不存在**——但要逐條確認，不能假設。桌面路線上這一族影響較小（實測桌面沒有 host ColorBuffer）。
 
 **D. pVM / pool 移植的主體：逐項對得上，沒有缺口**
 
