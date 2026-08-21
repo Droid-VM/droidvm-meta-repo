@@ -755,3 +755,47 @@ Two runtime knobs are worth re-measuring against that loop, because both were me
 ping amplifier was still present and could have been masked by it: widening the cpuset (the clean
 test -- if the gap collapses, contention is the mechanism) and the spin ladder, whose default
 `3000:0` spins three thousand times with no sleep, every turn a syscall.
+
+### The cpuset test, and why it is not the fix (2026-08-22)
+
+Widening the consumer cpuset from one core to four took the new tree's vkmark fifo from 53 to 115
+-- panel rate, the same number the old tree gets. So the residual gap is contention on the shared
+core, not anything in the Vulkan path.
+
+That is a diagnosis, not a fix, for three reasons worth keeping:
+
+The single core is deliberate. Giving the render threads cpu4-7 puts them on top-app's cores,
+where the vCPUs are (`0=2:1=3:2=4:3=5`). vkmark is a light load and does not show what that costs;
+a heavy one will.
+
+The question it answers is not the question. The old tree reaches panel rate on that same single
+core. So the finding is not "one core is not enough", it is "the re-port wastes something on that
+core that the old tree does not" -- and the trigger for that is still unknown.
+
+Fixing only the cpuset would demote a CPU waste from fatal to expensive and meet it again on the
+next heavier workload.
+
+**A metric to distrust.** "64 spin turns per packet versus 3.5" looks like the trigger and is
+circular: both trees run ten seconds, the slower tree has fewer packets in the denominator and
+spends more of those seconds waiting -- and spinning is time-driven -- so the numerator grows for
+the same reason the denominator shrinks. It cannot separate "spins more, therefore slow" from
+"slow, therefore spins more". This is the third variant of the same trap tonight, after
+`spins/waits = 1.000` (a counter that defined its own result) and raw counts against a tree
+drawing 6.2x more frames.
+
+The non-circular replacement: per-thread CPU time on that core over a fixed run, from
+`/proc/<pid>/task/*/stat`. It depends on no packet count, no frame rate and no spin counter, and
+it splits the question cleanly -- more CPU burnt means waste and names the thread burning it;
+equal CPU means the work is being serialised into a longer chain instead, which is a different
+bug with a different fix.
+
+### Also excluded (2026-08-22, byte-equivalent between trees)
+
+- `type1Read`, the large-transfer drain. Both trees return on the first iteration -- that is what
+  the `-Wunreachable-code-loop-increment` pragma is there for -- so both handle one xfer per call.
+  The re-port only adds upstream's bounds check on the guest-controlled offset and size.
+- `DeviceOpTracker`'s background poll thread: same interval, same body, same start/stop.
+- `kStreamBufferSize`, 128KB in both.
+- `ring_buffer_copy_contents` does differ -- old measures `available_at_end` from `write_pos`, new
+  from `read_pos`, and new is the correct one -- but it only decides whether the copy splits in
+  two. How much the consumer may take comes from `ring_buffer_available_read`, which is untouched.
