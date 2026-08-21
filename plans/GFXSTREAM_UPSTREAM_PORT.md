@@ -558,6 +558,28 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 
 **那個開關實際切換的東西**（`ResourceTracker.cpp:7718`）：模擬開啟時 guest **自己捏造**一份 modifier 能力表（只有 `DRM_FORMAT_MOD_LINEAR`，feature bits 寫死）；關閉時把 host 的真實清單原樣交出去——那份就是舊樹註解描述的「只有 QCOM-tiled、只給 BGRA8、拒絕 COLOR_ATTACHMENT」。**所以它不是在切換畫素怎麼寫，是在切換 mesa 拿到什麼樣的 format×modifier 能力表**，而 mesa 在能力表不足時的標準做法正是「換一個支援的格式 + 加 swizzle 補償」。
 
+### 移植漏掉的七項，以及它們共同的形狀（08-22）
+
+驗收一路挖出來的缺口，全部是同一類東西：
+
+| | 項目 | 性質 | 症狀 |
+|---|---|---|---|
+| 1 | `gfxstream-zerocopy` format strip | 修正 | vkmark 挑到 guest 匯不出去的格式後 crash |
+| 2 | `kHiddenDeviceExtensions`（藏 modifier） | 修正 | R↔B：kwin 改挑 ABGR8888 而畫素仍是 BGRA |
+| 3 | `RING-VIEW` attach 狀態 | 診斷 | 無法分辨 ring 建立健康與否 |
+| 4 | `PARK-STATE` | 診斷 | 未補 |
+| 5 | `VulkanMaxSafeHeapSize` | 修正 | guest 依據一個不存在的 heap 大小規劃 |
+| 6 | `CompleteOpsForSignalledFences` | 修正 | `vkResetFences` 進 driver 做完整 sweep |
+| 7 | `SweepProfile` | 診斷 | 看不到佇列深度與每次 sweep 的實際成本 |
+
+**共同形狀：漏掉的不是「上游沒有的功能」，而是「上游有、但我們針對這個硬體量過並改掉的東西」。** 每一項的價值都寫在它自己的註解裡——3.7ms 一次、佔四分之一的 host dispatch、批次化試過反而更慢、AHB 沒有 BGRA 格式——但移植時沒有人去讀那些註解。
+
+**這也解釋了為什麼效能那條線的前五個假設全部被實測否定**：我們一直在猜「新樹多做了什麼」，而真相是**新樹少做了一個舊樹刻意加上去的優化**。從外面看，「少了一個優化」和「多了一個問題」在所有平均值上長得一模一樣，**只有在尾巴上才分得出來**。
+
+**兩類已判定為正當過時的**（掃過確認，不要再補）：AHB 時代的匯出補償（`mImageExportBroken` 等，`ExternalMemory::Mode::OpaqueFd` 讓成因消失）、以及 `zcModCreateInfo` 裡剝 AHB 位元那一半（上游的 `transformExternalMemoryHandleTypeFlags_tohost` 系統性地做了同一件事）。
+
+**下次移植的具體做法**：先 `git grep` 本地標記字串（`gfxstream-zerocopy` / `DroidVM` / 專案特有的識別字）數出兩邊的計數差，再**按符號而非按標記**逐條核對——標記數會因為重寫註解而失真（本例 39→15，實際 pVM 主體一項未缺）。**診斷要和修正一樣進清單**：漏掉診斷的代價不是功能壞掉，是重新發現一個已經被記載過的問題。
+
 ### 驗收方法上值得留著的東西
 
 - **gfxstream 的 log 在 Android 上進 logcat（tag `GFXSTREAM`），不是 crosvm stderr。** 舊樹註解說「crosvm 把 log level 拉高所以 warning/error 都不見」很可能是誤判 —— 訊息一直都在 logcat，只是沒人往那裡看，那批改用 raw `fprintf` 的診斷程式碼理由有一半建立在這個誤判上
