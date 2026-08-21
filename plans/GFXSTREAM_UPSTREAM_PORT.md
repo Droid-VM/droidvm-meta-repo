@@ -1031,3 +1031,56 @@ the two in-place sweeps the old tree still performs after `AddPendingGarbage()` 
 paths. `GFXSTREAM_DEVICE_OP_POLL_MS=5` is therefore a life-or-death test of the hypothesis, not a
 candidate fix -- it makes the queue short by sweeping often, where the old tree kept it short by
 sweeping in place.
+
+### Three lines closed, and what the survivor looks like (2026-08-22)
+
+**Queue depth: dead, and the section above it was wrong.** Measured on the device the queue holds
+5 to 48 entries and every sweep leaves nothing:
+
+    OLD500   2900 sweeps   5 ops each   1 queued
+    NEW500    300 sweeps   9-48 ops     0 queued
+    NEW5    33400 sweeps   0 ops        0 queued
+
+"single digits in practice" was correct. `CompleteOpsForSignalledFences` is what *keeps* the queue
+short -- it drains on the `vkResetFences` path far more often than the sweeper runs -- so it was
+the drain, not the victim, and half a second of submissions never accumulates. Forcing the queue
+emptier than the old tree's recovered nothing. The O(n^2) change written on the strength of that
+mistaken premise has been reverted; a divergence from upstream resting on a false premise does not
+earn its place, harmless or not.
+
+Worth keeping from that round: with the same 500ms interval the old tree sweeps 2900 times to the
+new tree's 300. The two in-place sweeps in the destroy paths really do run. The mechanism exists,
+is measurable, and does not matter -- which is a stronger statement than reading the source.
+
+**The fence: dead.** `RESETFENCE_TRACE`, both trees:
+
+| | N calls | M pending | K signalled | M/N | K/M | per call |
+|---|---|---|---|---|---|---|
+| old | 52634 | 34951 | 34951 | 66.4% | 100% | 11us |
+| new | 8807 | 5712 | 5712 | 64.9% | 100% | 8us |
+
+Both ratios match and the re-port's call is *cheaper*. The fences were never unsignalled, so the
+whole chain built on "the host blocks waiting for a fence" is void.
+
+**`lastop`: no attributive power.** `vkResetFences` is simply the last synchronisation point in
+the frame loop, so a wait caused by anything at all is recorded against it. The 95.7% is where
+stalls happen, not why. The probe is finished. (`badops` also came back at 48-50% in *both* trees,
+so the out-of-range values are a shared decoding issue, not memory being clobbered in the
+re-port -- worth fixing separately, not a lead.)
+
+**What survives.** Per frame, both sides burn more CPU at once -- host consumer 5.94x, guest vCPU
+3.85x -- while the round-trip count is unchanged (`batches/opcode` 0.615 vs 0.623). Same guest
+binary, same workload. Counts steady and both sides burning means each round-trip got slower and
+both ends are spinning while they wait for the other.
+
+Three amplifiers on that path are now known, and all three are **byte-identical in both trees**,
+so none is the difference and any of them can turn a small difference into a large one:
+
+1. the guest pinging a host that is already looking (fixed, +72%, diagnostic only);
+2. the guest's `writeFully` spinning on `maxOutstanding = 3` with no yield, no backoff, no ping;
+3. `RingStream::commitBuffer`, the host's reply path, spinning on `sched_yield()` for
+   `kBackoffIters = 10000000` turns before it sleeps even 10us.
+
+The third was uninstrumented, so a host blocked on a guest that is slow to read its answer looked
+identical to a host with nothing to do. `ASGWRITE` now counts it -- raw counts and a duration
+histogram, because every mean tonight has been silent and every tail has not.
