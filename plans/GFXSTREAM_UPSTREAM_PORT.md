@@ -982,3 +982,52 @@ Three measurements, cheapest first, none needing a rebuild:
    earlier instruction to watch `K/M` (already-signalled) was an incomplete criterion: this
    hypothesis predicts `K/M` near 100% in both trees, since the fences really are done, and the
    difference showing up in `M/N` instead.
+
+### No consumer ever looks at another ring (2026-08-22)
+
+Worth stating because several arguments here quietly assumed otherwise. A `RingStream` holds one
+`struct asg_context` (`ring_stream.h:88`), and every read in `readRaw` touches only
+`mContext.to_host` or `mContext.to_host_large_xfer`. There is no traversal of other contexts, no
+work stealing, no cross-ring scheduling of any kind. A consumer does not know whether any other
+ring has data, so it cannot yield in favour of one.
+
+`ring_buffer_yield()` is `sched_yield()`, which is undirected: it says "run someone else" and the
+OS chooses. Worse for a spin loop, the yielding thread stays runnable, so on a busy core it is
+scheduled straight back to spin again. It is not "sleep until data arrives", it is "repeatedly
+give up and take back".
+
+### cpu7, measured with the window aligned (2026-08-22)
+
+| | cpu7 busy | gpuworker | everyone else | FPS |
+|---|---|---|---|---|
+| old | 75% | 50% | 25% | 3473-3994 |
+| new | 80% | 61% | 18% | 948-1292 |
+
+Both trees have exactly two hot threads and neither saturates the core.
+
+**This reverses the contention line.** If the re-port were being starved by other tenants of cpu7,
+its share would fall; it rises, 50% to 61%, and theirs falls, 25% to 18%. The re-port is taking
+*more* of the core and producing *fewer* frames. That is positive evidence, unlike the PSR
+sampling that failed to catch `kgsl_hwsched` -- which remains not-evidence either way -- so the
+kgsl-contention hypothesis is demoted on direction, not on absence.
+
+Per-frame consumer CPU from this run is 3.96x, against 5.94x from the earlier per-task run: a
+different window, build, day and calculation, agreeing in magnitude and direction. Two independent
+measurements pointing the same way, for the first time tonight.
+
+It also fits the sweep-interval hypothesis specifically, which predicts exactly this shape -- lock
+contention and an O(n) scan are CPU the process burns *itself*, so it shows up as more core and
+fewer frames, and needs no shortage of cores to happen.
+
+**Two corrections to the previous section.** The scan to blame is
+`CompleteOpsForSignalledFences`, not the sweep: `PollAndProcessGarbage` swaps the queue out from
+under the lock before entering the driver, so "holds the global lock while asking the driver" is
+false for it. And the scan is worse than linear -- it erases matches from the middle of a
+`std::deque`, which is itself O(n), making it O(n^2) when many entries match. Queue depth hurts
+quadratically, not linearly.
+
+Also: both trees default the sweep interval to 500ms. The difference is not the interval, it is
+the two in-place sweeps the old tree still performs after `AddPendingGarbage()` in the destroy
+paths. `GFXSTREAM_DEVICE_OP_POLL_MS=5` is therefore a life-or-death test of the hypothesis, not a
+candidate fix -- it makes the queue short by sweeping often, where the old tree kept it short by
+sweeping in place.
