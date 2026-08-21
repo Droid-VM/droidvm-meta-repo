@@ -614,6 +614,42 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 
 **一個重要的量測限制**：**吞吐量指標在這台機器上的跨輪變異是 2.1 倍**（同一顆 `.so`、同配置量到 447 和 938），而**計數類指標的變異是 4%**。所有靠吞吐量分辨的實驗（自旋掃描、cpuset、asgbuf）都受此限制；**能用計數回答的問題就不要用吞吐量問。**
 
+### 退步 A 的形狀：偶發的虛假喚醒迴圈（08-22 深夜，個案級證據）
+
+**A 不是任何形式的持續變慢。** 封包間隔的分布是雙峰的：
+
+```
+              <10     <50     <100    <500    <5k     5k+
+舊樹         13.5%   40.0%   29.2%   16.3%   0.5%    0.1%
+新樹         16.7%   62.4%   12.8%    5.1%   1.4%    1.2%
+```
+
+**多數封包到得比舊樹更快（眾數左移），但約 1.2% 要等超過 5 毫秒，而那 1.2% 吃掉至少 4 秒（10 秒窗口）。** 眾數左移＋尾巴變厚 = **分布形狀改變，不是位移**——那代表多了一個新的偶發阻塞事件，而不是既有路徑變慢。舊樹那一端是 0.1%，**幾乎不存在**。
+
+**停頓探針抓到的個案**（`spins == 500` 觸發，正常等待只有個位數）：
+
+```
+begin: spins=500  write=272 read=272 avail=0
+end:   parked after 1452us, spins=3001  write=272 read=272 avail=0
+begin: spins=500  write=272 read=272 avail=0      ← write 一個位元組都沒動
+end:   parked after 1349us ...
+（同一個 write 位置，連續五組，時間戳背靠背）
+```
+
+**消費者追上（read == write）→ 轉 3000 圈 → park → 被喚醒 → 發現 ring 仍是空的 → 再轉 3000 圈 → park……連續五次。** 「正好五次」在前十名的 write 位置上都成立。
+
+每圈實測 0.45us（`sleepUs == 0` 走 `ring_buffer_yield()`，**每圈一個系統呼叫**），一週期約 1.4ms，**五次約 7ms——正是那條尾巴**。而所有消費者共用 cpu7。
+
+**`spins/packet` 的梯度**：vkmark 3.54→64.27（18.2x）、kwin 37.61→71.62（1.9x）、plasmashell 209→247（1.2x）——**流量越密集的 ring 受影響越大**。
+
+**還沒證實的一步**：park 之後是誰把它叫醒的。時間戳顯示「park 到下次自旋達 500」約 0.8ms，**而 guest `backoff()` 的 `usleep` 上限正好是 1000us**——如果成立，機制是**雙方互相叫醒對方去看一個空的 ring**：guest 在等回覆、每 1ms 醒一次、看到 host 不是 RENDERING 就 ping、host 醒來發現沒東西、再 park。
+
+**guest 端已找到一個條件放寬的 ping 點**（`AddressSpaceStream.cpp:387`）：其他 ping 點都是 `!= CAN_CONSUME && != RENDERING`，**只有這一處是 `!= RENDERING`**——而 host 在自旋階段正是 `CAN_CONSUME`。
+
+**待驗**：`ASGSTALL` 加上 `wakeups=N`（停頓期間 host 收到幾次 `ASG_NOTIFY_AVAILABLE`）。≥1 就是 guest 在空 ring 上反覆 ping；0 則是 park 被別的東西打斷，完全不同的問題。
+
+**順帶記一條和七項缺口方向相反的**：`ring_buffer_copy_contents` 在 `v == NULL` 分支（**正是這條路走的**）計算 `available_at_end` 時，**舊樹用 `write_pos`、新樹用 `read_pos`**。拷貝從 `read_pos` 開始，所以新樹是對的；**舊樹在 `read_pos` 接近緩衝區尾端而 `write_pos` 尚未繞回時會讀過尾端**。這是唯一一項「上游修掉我們的 bug」。
+
 ### 驗收方法上值得留著的東西
 
 - **gfxstream 的 log 在 Android 上進 logcat（tag `GFXSTREAM`），不是 crosvm stderr。** 舊樹註解說「crosvm 把 log level 拉高所以 warning/error 都不見」很可能是誤判 —— 訊息一直都在 logcat，只是沒人往那裡看，那批改用 raw `fprintf` 的診斷程式碼理由有一半建立在這個誤判上
@@ -634,3 +670,4 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 - **移植時漏掉診斷的代價，是重新發現一個已經被記載過的問題。** 這一輪漏掉的 `RING-VIEW` 和 `PARK-STATE` 都不是功能，但它們原本能在一輪之內回答我們花了好幾輪推論的事。**診斷和修正一樣要進移植清單**
 - **一個測量沒有涵蓋的狀態，很容易被當成它排除了那個狀態。** profiler 量的是 dispatch 時間，自旋不算在裡面——於是「host 只忙 3.8%」被讀成「host 在 park」，而它同樣可能是「host 忙著自旋」。這條和「診斷沒印出來不是證據」同源，但更難察覺，因為這裡**有**數字，只是那個數字不涵蓋你要問的狀態
 - **分母不是你以為的那個。** `DECODERPROF` 的報告視窗固定 10 秒，但工作負載只佔其中一部分，而且跑得慢的那一輪佔比更小——於是所有 `n=/s` 的速率被稀釋了**不同的倍數**，「opcodes/s 少 8.9 倍」「host dispatch 少 7 倍」全是假象。**用一個每幀必然發生一次的事件當幀標記正規化之後，每幀的量兩邊全部相同（4% 以內）。** 任何 per-second 的比較，先確認兩邊的分母是同一段時間
+- **共用工作樹是移動目標。** 一邊為了編另一棵樹而 `git checkout`，另一邊同時在 `grep host/` —— 結果是「拿舊樹跟自己比」而毫無察覺。而 Soong 是邊跑邊讀檔案的，所以 build 進行中切分支會編出混合樹。**兩條規則：讀別棵樹一律用 `git show <branch>:<path>` 從物件庫讀，不碰工作樹；build 進行中不切分支。** 前者比「記得先講一聲」可靠，因為它不依賴任何人的記憶
