@@ -510,6 +510,28 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 
 **這個決定要由實驗結果拍板，不是由「舊樹本來就這樣」拍板。** 目標是最小化與上游的分歧；世界 A 的代價（生成檔 patch）很高，只有在世界 B 真的不可行時才值得。
 
+### R↔B 的狀態（08-22 深夜，未結）
+
+補回的兩顆修正讓顏色在多數輪次正確，**但穩定性測試推翻了「已修好」的說法**：fix2 同一顆 `.so` 連續開機五次，guest 挑的 scanout 格式**三次 AB24、兩次 AR24**。所以那兩顆沒有把選擇釘住。
+
+**缺的關鍵一格：fix2 挑到 AB24 那一輪的顏色從來沒有被量過。** 所有量過顏色的 fix2 輪次事後查 label 都是 AR24，也就是「fix2 顏色正確」目前只在一半的情況下被驗證過。這一格決定能不能出貨：
+
+| fix2 選 AB24 那輪的顏色 | 意義 |
+|---|---|
+| 正確 | fix2 讓 content 跟著 label 走，可出貨 |
+| 反 | fix2 只是讓 AR24 比較常出現，出貨阻斷 |
+
+**一個結構性的觀測缺陷，值得單獨記**：`VIEW-FORMAT` / `COPY-FORMAT` 那兩個零，是在「只有一種 1400x1050 格式存在」的輪次量到的——而 guest 只有在挑 AB24 時才會同時建 `B8G8R8A8` 和 `R8G8B8A8` 兩顆同尺寸 image。**跨格式的 copy 和跨格式的 view 在那兩輪裡結構上不可能出現**，所以那兩個零沒有測到要測的東西，不能拿來排除任何機制。
+
+這是「診斷沒印出來不是證據」的更隱蔽變體：**不是診斷沒跑、也不是路徑沒走到，是那一輪的狀態讓被找的現象無法成立。** 加一層檢查：除了「診斷有跑嗎」，還要問「這一輪的條件允許它發生嗎」。
+
+還活著的機制候選（診斷已備，待在 AB24 輪次量）：
+
+- **兩顆同尺寸不同格式的 image 綁同一塊記憶體**（`BIND-ALIAS:`）——AB24 輪次同時存在兩種格式，正是它的前提
+- **sampler view 的通道 swizzle**（`VIEW-FORMAT: +SWIZZLED`）——完全合法、恆定、兩側 format 都正確，所有只比 format 的診斷都會是零。zink 的 render target view 一律 identity（`zink_surface.c` 把那段註解掉了），會設 swizzle 的是 sampler view，所以要找的那條在**被取樣的紋理**上，不在 scanout 上
+
+**那個開關實際切換的東西**（`ResourceTracker.cpp:7718`）：模擬開啟時 guest **自己捏造**一份 modifier 能力表（只有 `DRM_FORMAT_MOD_LINEAR`，feature bits 寫死）；關閉時把 host 的真實清單原樣交出去——那份就是舊樹註解描述的「只有 QCOM-tiled、只給 BGRA8、拒絕 COLOR_ATTACHMENT」。**所以它不是在切換畫素怎麼寫，是在切換 mesa 拿到什麼樣的 format×modifier 能力表**，而 mesa 在能力表不足時的標準做法正是「換一個支援的格式 + 加 swizzle 補償」。
+
 ### 驗收方法上值得留著的東西
 
 - **gfxstream 的 log 在 Android 上進 logcat（tag `GFXSTREAM`），不是 crosvm stderr。** 舊樹註解說「crosvm 把 log level 拉高所以 warning/error 都不見」很可能是誤判 —— 訊息一直都在 logcat，只是沒人往那裡看，那批改用 raw `fprintf` 的診斷程式碼理由有一半建立在這個誤判上
@@ -524,3 +546,5 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 - **收集工具會靜默丟資料，而那比丟掉一輪嚴重——它讓你以為自己有資料。** vkmark 的逐場景 `FPS:` 行被 grep pattern 濾掉，留下的 `===` 分隔線還被拿來論證「兩輪場景數相同」。原始輸出一律全留，過濾只在讀的時候做
 - **設計測試的人和使用測試的人都要做那條檢查。** 「image 宣告的格式」被當成「shader 寫進去的值」的證據，設計的人沒做，收到的人也沒做就轉發出去了
 - **觀測手段本身是一個變因，而且它可能剛好蓋住你要找的差異。** 這一輪出現四次：`GPU_SCANOUT_TRACE` 把桌面推去零拷貝路徑、force-cpu 蓋住中介拷貝的效能代價、vkmark 收集腳本的 grep 濾網丟掉逐場景數字、診斷的 fprintf 走 crosvm stderr pipe 本身會壓低分數（一輪 vkmark 6622 行）。量效能前先問：這個配置有沒有把我要量的東西改掉
+- **工具失效有兩類，後一類更危險。** 「觀測手段改變被觀測物」（`GPU_SCANOUT_TRACE` 換掉資料路徑、force-cpu 蓋住差異）至少留下可疑的資料；「觀測手段回報假的成功」（`; echo "EXIT=$?"` 把編譯失敗蓋成 0，於是把上一顆殘留輸出當成新 build 推出去；部署腳本拿沒變的 md5 當通過）連可以懷疑的對象都不留。推送二進位後一律回讀比對 md5，不信任工具自己的回報
+- **零筆結果要問三層，不是一層。** (1) 診斷跑了嗎（正控制）(2) 那條路徑走到了嗎 (3) **這一輪的條件允許被找的現象發生嗎**。第三層最隱蔽：跨格式的 copy 在一個只存在單一格式的輪次裡結構上不可能出現，那個零看起來和「已排除」一模一樣
