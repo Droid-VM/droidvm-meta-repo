@@ -1483,3 +1483,73 @@ had: console logs are cut per boot, and fast and slow runs live inside one boot.
 the same stream as the probe output is the prerequisite -- without it, no within-boot comparison is
 possible at all, which is also why the pool-miss and format checks could not have answered this
 even had they been non-zero.
+
+## The four-configuration result, and why the bisect could not run (2026-08-22, late)
+
+The problem is not "the re-port is slower". Measured at pinned clocks, three of four
+configurations are fine and one is not:
+
+| | fps | gpuworker CPU | fps per tick |
+|---|---|---|---|
+| new, 2 cores | 1332 | 1284t | 1.04 |
+| old, 2 cores | 1372 | 1281t | 1.07 |
+| old, 1 core | 1291 | 669t | 1.93 |
+| **new, 1 core** | **438** | 746t | **0.59** |
+
+**None of the four saturates its cpuset** -- the highest is 73% of one core. So the failing
+configuration is not starved of CPU; it has a quarter of the core idle and produces a third of the
+frames. On two cores the trees are within 3% on frame rate and 0.2% on CPU.
+
+Comparisons across core counts are meaningless here, because spinning expands to fill whatever is
+available: the old tree uses 669t on one core and 1281t on two for the same frame rate. Only
+same-core-count comparisons carry information, and those say: identical on two, 3.3x apart on one.
+
+**Everything else is equal.** Per-frame packets 91.x, per-frame GPU wake-ups (one regression line
+through both trees, residuals under 1%), thread structure (exactly two hot kwin consumers in both,
+CPU split evenly), swapchain images 3, and 91-95% of all gfxstream CPU is on kwin's ring in every
+configuration.
+
+### Why bisection could not answer it
+
+Both directions are closed, with evidence:
+
+- **Forward** (check out a mid-port commit): #13 hangs at the same point in boot, #14 hangs
+  identically, #20 crashes crosvm. Three intermediate points, three failures, two distinct modes.
+  The port is a coherent sequence; its intermediate states are not working trees.
+- **Backward** (revert one port commit from the full tree): four of six sampled conflict, because
+  later port commits edit the same regions.
+
+So the port cannot be bisected. And the upstream side barely helps: of the commits in
+`7e9d595b0..c00cd03a3` whose diffs touch wait/notify/park at all, one is an Nvidia EGL deadlock fix
+that this route never executes, and the other two are 83-file and 32-file restructures that do not
+revert.
+
+The one transport-path upstream change large enough to matter -- `1553bbd798`, which made both ring
+cursors sequentially consistent where each side used to read its own plainly -- **reverts cleanly,
+was built, measured, and is BAD**. Cleared by direct evidence rather than inference.
+
+### What that leaves
+
+Possibly no single causing commit. The evidence for a threshold rather than a cause: the spin
+ladder's knee sits at 200 turns, the old tree waits 10 turns per episode and the new one 86, and
+the same ladder therefore helps one tree (+72%) and harms the other (-30%). Two systems on opposite
+sides of one curve, which is also why two cores erases the difference entirely and one core splits
+it into two non-overlapping groups with a 348-fps gap between them.
+
+That is a hypothesis with a falsifiable test, now running: sweep the old tree's clock **down** and
+the new tree's **up**. A threshold predicts a cliff, not a slope -- and the position of the cliff
+would measure how much baseline latency the re-port has to spare, which is a number that can be
+taken back to the code.
+
+### Two mistakes worth keeping
+
+**Proposing a mitigation the user had already rejected.** "Give gfxstream two cores" was put forward
+as a shippable answer after the user had twice said, in plain terms, that it is not parity but half
+the performance at twice the resources. Re-packaging a rejected option as a new proposal is not
+descoping, it is routing around a decision. Descoping is the user's to make and has to be asked,
+not arrived at.
+
+**A profiler was on the device the whole time.** `simpleperf` is in `/system/bin`. Every CPU
+measurement tonight asked *how much*, none asked *where* -- including a linear fit built to separate
+per-packet cost from per-second cost, which is what a profiler answers directly. Nobody checked
+whether the tool existed before building a substitute for it.
