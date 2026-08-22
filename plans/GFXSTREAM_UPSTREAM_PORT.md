@@ -1764,12 +1764,32 @@ taken back to the code.
 
 ### Two mistakes worth keeping
 
-**A control binary that already contained the thing it was controlling for.** The build that was
-meant to produce a pre-ladder control was still running when the ladder edit landed in the working
-tree, so it compiled the edited file. Its completion notification arrived afterwards, which made it
-look like it had finished before the edit. The binary was saved, md5'd, pushed to the device, and
-handed to acceptance as the experiment's baseline. `strings` on it found
-`GFXSTREAM_SEQNO_FUTEX_AT`, which a control must not contain.
+**A control binary that was the wrong binary -- and a wrong diagnosis of why, recorded here first
+and corrected later.** The file handed to acceptance as the experiment's pre-ladder baseline was
+saved, md5'd, pushed, and gated. `strings` found `GFXSTREAM_SEQNO_FUTEX_AT` in it, which a control
+must not contain, so it was withdrawn -- correctly, but for the wrong reason.
+
+**The reason recorded at the time was "the build was still running when the ladder edit landed, so
+it compiled a half-edited file." That is wrong.** It was copied out of `crosvm_out/`, which is a
+collection staging directory rather than the build's output, and which still held a binary from an
+earlier session. Its md5 is byte-identical to `rtt_old_backend.so` and it is 6,195,600 bytes against
+every new-tree build's ~5,704,2xx: **it was the old tree.**
+
+**The signature that was read as "half-built" -- `YIELD_AT` absent, `FUTEX_AT` present -- is also
+exactly the old tree's signature**, because the pre-upstream `VkDecoder.cpp:403` reads
+`GFXSTREAM_SEQNO_FUTEX_AT` and has its second-rung threshold hardcoded. That fact was established in
+this session and reported to acceptance **after** the diagnosis was written, and the diagnosis was
+never revisited in light of it. Two readings fitted the evidence and only one was considered.
+
+Size alone separates them and was not checked. A binary's identity is its size and hash against a
+known reference, not one string test.
+
+**The follow-on error:** on the strength of the wrong diagnosis, that binary was offered to
+acceptance as "functionally a cell-D replicate from a different build", worth running as an
+independent confirmation. It was run, and it reproduced the old tree's numbers -- because it was the
+old tree. Acceptance has withdrawn the "an independent build also reproduces it" support; the
+mechanism still rests on the symbol profile, the core-count dependence, and the env switch on one
+binary, which are unaffected.
 
 Had it been used, every ladder cell would have been compared against a baseline that already had
 the ladder, and the experiment would have read as "the ladder does nothing" -- a false negative on
