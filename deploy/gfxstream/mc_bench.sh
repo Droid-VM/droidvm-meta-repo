@@ -85,7 +85,20 @@ cpu_line() {
 }
 
 kgsl_read() { $A "su -c 'cat $KGSL/$1'" 2>/dev/null | tr -d '\r'; }
-cat_temp() { $A "su -c 'cat /sys/class/thermal/thermal_zone0/temp'" 2>/dev/null | tr -d '\r'; }
+# The hottest GPU thermal zone, found by type rather than by number. thermal_zone0 is not the GPU
+# on every phone -- on 5567 it reads nothing at all, which made the temperature condition in
+# cool_for_pin vacuously true and let a pin be taken while the part was still hot. A check that
+# cannot fail is worse than no check, because it reports success. The GPU zones there are
+# gpuss-0..7, at zone41..48.
+GPU_TZ=""
+cat_temp() {
+    if [ -z "$GPU_TZ" ]; then
+        GPU_TZ=$($A "su -c 'for z in /sys/class/thermal/thermal_zone*; do case \$(cat \$z/type 2>/dev/null) in *gpu*|*GPU*) echo \$z;; esac; done'" 2>/dev/null | tr -d '\r' | tr '\n' ' ')
+        [ -z "$GPU_TZ" ] && GPU_TZ="none"
+    fi
+    [ "$GPU_TZ" = none ] && return 1
+    $A "su -c 'cat $GPU_TZ/temp'" 2>/dev/null | tr -d '\r' | sort -n | tail -1
+}
 kgsl_write() { $A "su -c 'echo $2 > $KGSL/$1'" 2>/dev/null; }
 
 # Wait out the thermal cap before pinning: with thermal_pwrlevel non-zero the pin lands on a
@@ -104,7 +117,14 @@ cool_for_pin() {
         local thr max temp
         thr=$(kgsl_read thermal_pwrlevel); max=$(kgsl_read devfreq/max_freq)
         temp=$(cat_temp)
-        if [ "${thr:-9}" = 0 ] && [ "${max:-0}" -ge "$want_khz" ] && [ "${temp:-99999}" -lt 50000 ]; then
+        if [ -z "$temp" ] || [ "$temp" = 0 ]; then
+            echo "    WARNING: no GPU thermal zone readable; pinning without the temperature check"
+            temp=0
+            if [ "${thr:-9}" = 0 ] && [ "${max:-0}" -ge "$want_khz" ]; then
+                echo "    cap clear after $((i*10))s (max_freq=$max, temp unknown)"
+                return 0
+            fi
+        elif [ "${thr:-9}" = 0 ] && [ "${max:-0}" -ge "$want_khz" ] && [ "$temp" -lt 50000 ]; then
             echo "    cool after $((i*10))s (max_freq=$max temp=$((temp/1000))C)"
             return 0
         fi
@@ -116,15 +136,37 @@ cool_for_pin() {
 
 if [ "$gpu_mhz" != 0 ]; then
     hz=$(( gpu_mhz * 1000000 ))
-    $A "su -c 'grep -qw $hz $KGSL/devfreq/available_frequencies'" 2>/dev/null \
-        || { echo "$gpu_mhz MHz is not an available frequency" >&2; exit 1; }
+    # Snap to the nearest step the GPU actually offers, exactly as cpu_pin does for each cluster
+    # and for the same reason: an off-step value leaves the governor to round it somewhere
+    # unstated. It does not round to the nearest step -- writing 660MHz on a part whose steps are
+    # 903/834/770/720/680/629/... is accepted into min_freq and then runs at 231MHz, the bottom of
+    # the table, which is the opposite of what was asked for.
+    #
+    # The step tables differ per phone, so a fixed default cannot be assumed to exist: 660 is a
+    # step on 5568 and not on 5567, where the nearest is 680. Snap and say so, rather than
+    # refusing to run at all.
+    steps=$(kgsl_read devfreq/available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n)
+    [ -n "$steps" ] || { echo "cannot read GPU frequency steps" >&2; exit 1; }
+    want=$(echo "$steps" | awk -v t="$hz" '{d=$1>t?$1-t:t-$1; if(best==""||d<best){best=d;v=$1}} END{print v}')
+    if [ "$want" != "$hz" ]; then
+        echo "==> ${gpu_mhz}MHz is not a step on this GPU; nearest is $((want/1000000))MHz"
+        hz=$want
+        gpu_mhz=$((want/1000000))
+    fi
     echo "==> pinning GPU at ${gpu_mhz}MHz"
     cool_for_pin
     # max first: min_freq above the current max is rejected.
     kgsl_write devfreq/max_freq "$hz"
     kgsl_write devfreq/min_freq "$hz"
+    # Read back. A write to min_freq/max_freq is accepted whether or not it can be honoured, so
+    # the only evidence the pin took is the clock itself.
     got=$(kgsl_read devfreq/cur_freq)
-    [ "$got" = "$hz" ] || echo "    WARNING: cur_freq=$got, wanted $hz"
+    if [ "$got" != "$hz" ]; then
+        echo "    ERROR: cur_freq=$got, wanted $hz -- the pin did not take, measurements from this"
+        echo "           run are not comparable with any other" >&2
+        exit 1
+    fi
+    echo "    verified cur_freq=$got"
     echo "    restore with: min_freq=160000000 max_freq=1100000000"
 fi
 
