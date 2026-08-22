@@ -1617,6 +1617,35 @@ needs 17-84ms of continuous spinning. The hypothesis predicts waits of one times
 0.05x-0.60x of the threshold. **Under the hypothesis it prints nothing, so silence is a prediction,
 not evidence against.** If it ever does print, that is a worse defect than this one.
 
+**The profile came back and the candidate survives it.** `simpleperf` on the host render threads,
+one-core configuration, unstripped symbols on both trees:
+
+                                        NEW          OLD
+    VkDecoder::Impl::decode           17.58%       0.28%
+    arm_smccc_1_2_hvc                 64.28%      67.83%
+    do_sched_yield + sched_yield       7.96%      11.98%
+    RingStream::readRaw                0.31%       0.29%
+    samples                            62606       52467
+    fps                                    61        1324
+
+Absolute samples in `decode`: 11006 against 147, while the new tree processes a twenty-second of the
+frames. Per frame that is 180.4 samples against 0.111 -- **1625x**, or **396x** if the new tree is
+credited with its median 250 fps rather than the 61 this instrumented cell produced. `readRaw` is
+identical, so this is not "decoding is slower"; it is time spent inside `decode` and not decoding.
+
+**17.58% is a floor on the impact, not a ceiling.** The obvious objection -- 17.58% of one core
+cannot account for a 5x throughput loss -- misreads where the cost lands. A spinning thread's own
+CPU share is not its cost; its cost is the timeslice it denies to the thread that must advance the
+very counter it is waiting for. The core measured 62.3% busy with 38% of the time having nothing
+runnable on it at all, which is what "the thread that should run is blocked elsewhere" looks like,
+not what an idle machine looks like.
+
+Acceptance's pre-written second criterion for this cell -- decode share high **and** the core near
+saturation -- was withdrawn by acceptance on the grounds that saturation is not the right signature
+for a burst-spin mechanism, and that per-packet normalisation resolves the inlining ambiguity the
+criterion existed to guard against, at much higher resolution. That is the right call for the right
+reason, and it retires the "73% is not saturated" objection recorded above.
+
 **Two tests.** A profile of the host render threads under the one-core configuration, read together
 with that core's saturation -- neither alone separates "decode is the hot symbol" from "decode is
 spinning", since the loop inlines. And decisively, a build with the second and third rungs restored,
