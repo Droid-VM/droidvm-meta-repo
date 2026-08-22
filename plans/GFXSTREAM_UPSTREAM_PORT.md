@@ -1673,6 +1673,26 @@ taken back to the code.
 
 ### Two mistakes worth keeping
 
+**A control binary that already contained the thing it was controlling for.** The build that was
+meant to produce a pre-ladder control was still running when the ladder edit landed in the working
+tree, so it compiled the edited file. Its completion notification arrived afterwards, which made it
+look like it had finished before the edit. The binary was saved, md5'd, pushed to the device, and
+handed to acceptance as the experiment's baseline. `strings` on it found
+`GFXSTREAM_SEQNO_FUTEX_AT`, which a control must not contain.
+
+Had it been used, every ladder cell would have been compared against a baseline that already had
+the ladder, and the experiment would have read as "the ladder does nothing" -- a false negative on
+the strongest candidate found all night, produced by a file nobody had reason to doubt.
+
+**The general form: md5 verifies transport, not identity.** Both sides matching proves the bytes
+survived the copy; it proves nothing about whether those bytes are the artefact intended. Every
+binary in an A/B now carries a content assertion -- a string that must be present in one arm and
+absent in the other -- checked on the device, not on the machine that built it.
+
+**A build's completion notification is not a fence.** Nothing may edit a source tree while a build
+of it is in flight; the notification can arrive well after the compiler has already read the file.
+
+
 **Proposing a mitigation the user had already rejected.** "Give gfxstream two cores" was put forward
 as a shippable answer after the user had twice said, in plain terms, that it is not parity but half
 the performance at twice the resources. Re-packaging a rejected option as a new proposal is not
