@@ -1445,13 +1445,21 @@ a two-core measurement showing per-iteration cost identical between the trees. T
 read frame rate at all -- it is a cost per iteration -- so the spread does not touch it. **The
 hypothesis is not revived; it drops from two supporting arguments to one.**
 
-Re-testing is still right, because that surviving argument is now carrying alone a claim about **the
-only genuine transport-path difference in the whole upstream diff**, and leaving a load-bearing
-conclusion on a single support is the exact shape of every error in this section. The binary still
-exists (`rbrevert`, md5 `d17b7c7e5994b72182b474b2a9f2645a`). Acceptance has queued four interleaved
-cells, `NEW-a / RBREV-a / NEW-b / RBREV-b`, six runs each within one boot, criteria written first:
-**RBREV median >800 means SEQ_CST is causal; <600 means the falsification stands, this time with
-N=6 behind it.**
+**Re-measured, and the falsification holds.** Four interleaved cells, six runs each within one
+boot, md5 checked per cell, criteria written before the run (>800 causal, <600 falsified):
+
+    NEW-a    median 212   (137 153 358 218 206 308)
+    RBREV-a  median 236   (188 229 243 185 323 296)
+    NEW-b    median 291   (203 268 385 302 280 335)
+    RBREV-b  median 276   (185 212 410 396 339 206)
+
+Reverting the change and leaving it in produce the same distribution. **`1553bbd798` is cleared --
+this time on N=6 interleaved medians rather than a single reading, and with both original arguments
+intact.**
+
+That run also puts a better number on the spread: **within-boot spread on the new tree reaches
+2.61x**, worse than the 1.74x quoted above. Every single-reading new-tree comparison in this
+document should be read against 2.6x, not 1.7x.
 
 **What this spread does and does not kill.** It kills every new-tree-vs-new-tree kill-switch cell
 decided on a single fps reading. It does **not** kill counter-based results (`MISS`=0,
@@ -1561,9 +1569,9 @@ revert.
 The one transport-path upstream change large enough to matter -- `1553bbd798`, which made both ring
 cursors sequentially consistent where each side used to read its own plainly -- **reverts cleanly and
 was built**. It was recorded here as measured BAD and cleared; **that verdict is retracted** (see
-RETRACTIONS): it rested on a single new-tree fps reading, and within-boot spread on the new tree is
-1.74x. A second, fps-independent argument against the hypothesis still stands, so it is **thinly
-supported rather than cleared**, and is being re-measured at N=6.
+RETRACTIONS): it rested on a single new-tree fps reading, against a within-boot spread of up to
+2.61x. **Re-measured at N=6 interleaved and cleared properly** -- medians 212/236/291/276 across
+`NEW-a / RBREV-a / NEW-b / RBREV-b`, the two conditions indistinguishable.
 
 ### What that leaves
 
