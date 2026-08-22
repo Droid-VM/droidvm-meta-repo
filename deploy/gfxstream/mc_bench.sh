@@ -49,9 +49,18 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-# One representative CPU per cluster; scaling_max_freq is per-policy, so writing one core in each
-# cluster covers all of them.
-CPUS="0 4 7"
+# One representative CPU per cluster: scaling_max_freq is per-policy, so writing one core in each
+# policy covers the rest of it.
+#
+# Enumerated from the device, never hardcoded. A hardcoded list is wrong the moment a phone groups
+# its cores differently, and it fails silently -- the clusters it names get pinned, the one it
+# misses runs free, and every number from that run is taken with one core at its own clock. On 5567
+# the policies are {0,1} {2,3,4} {5,6} {7}, and the list this used to carry, "0 4 7", missed {5,6}
+# entirely: cpu6 stayed unpinned at up to 2.57GHz while cpu7 sat at 1.36GHz. A cpuset experiment
+# that widened from cpu7 to cpu6-7 was therefore not measuring a second equivalent core.
+CPUS=$($A "su -c 'for p in /sys/devices/system/cpu/cpufreq/policy*; do cut -d\  -f1 \$p/related_cpus; done'" 2>/dev/null | tr -d '\r' | tr '\n' ' ')
+[ -n "$CPUS" ] || { echo "cannot enumerate cpufreq policies" >&2; exit 1; }
+echo "==> cpufreq policies represented by: $CPUS"
 cpu_read() { $A "su -c 'cat /sys/devices/system/cpu/cpu$1/cpufreq/$2'" 2>/dev/null | tr -d '\r'; }
 cpu_write() { $A "su -c 'echo $3 > /sys/devices/system/cpu/cpu$1/cpufreq/$2'" 2>/dev/null; }
 cpu_pin() {
@@ -66,14 +75,29 @@ cpu_pin() {
         steps=$(cpu_read "$c" scaling_available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n)
         want=$(echo "$steps" | awk -v t="$hz" '{d=$1>t?$1-t:t-$1; if(best==""||d<best){best=d;v=$1}} END{print v}')
         [ -z "$want" ] && want=$hz
-        cpu_write "$c" scaling_min_freq "$want"
+        # Order matters and it is not symmetric. Writing min first is rejected whenever the
+        # target is above the current max, and the rejection is silent -- what it leaves behind is
+        # min > max, a state the governor honours by doing something unstated, and which survives
+        # into every later run on that core. Drop the floor, move the ceiling, then raise the
+        # floor: valid at every step regardless of which direction the clock is moving.
+        local lo
+        lo=$(cpu_read "$c" cpuinfo_min_freq)
+        [ -n "$lo" ] && cpu_write "$c" scaling_min_freq "$lo"
         cpu_write "$c" scaling_max_freq "$want"
+        cpu_write "$c" scaling_min_freq "$want"
+        local gotmin gotmax
+        gotmin=$(cpu_read "$c" scaling_min_freq); gotmax=$(cpu_read "$c" scaling_max_freq)
+        if [ "$gotmin" != "$want" ] || [ "$gotmax" != "$want" ]; then
+            echo "    ERROR: cpu$c pin did not take (min=$gotmin max=$gotmax, wanted $want)" >&2
+            exit 1
+        fi
     done
 }
 cpu_unpin() {
     for c in $CPUS; do
         local hi lo
         hi=$(cpu_read "$c" cpuinfo_max_freq); lo=$(cpu_read "$c" cpuinfo_min_freq)
+        # Floor down before ceiling up, for the same reason as cpu_pin.
         [ -n "$lo" ] && cpu_write "$c" scaling_min_freq "$lo"
         [ -n "$hi" ] && cpu_write "$c" scaling_max_freq "$hi"
     done
