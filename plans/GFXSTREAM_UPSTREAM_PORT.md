@@ -1146,3 +1146,64 @@ branches to build the old tree. Both sessions read the wrong tree through it ton
 `git -C gfxstream show <ref>:<path>`, or use the fixed worktrees `gfx-old` and `gfx-old-instr` --
 never that path. The signature of having been fooled is old and new agreeing at identical line
 numbers.
+
+### The host is starved, not busy (2026-08-22)
+
+`commitBuffer` is innocent, and the classification of it as a third shared amplifier is withdrawn.
+Measured, `iters` equals `writes` exactly -- 150000 on the old tree, 34000 on the new, `spun=0`
+both -- so every reply went out on the first turn and the ten-million-`sched_yield` loop was never
+entered a second time.
+
+That is the same mistake as the queue-depth one, run in the opposite direction. There it was
+"byte-identical, therefore excluded"; here it was "byte-identical, therefore entered equally
+often". **Identical code supports neither conclusion.** What was missing both times is the same
+measurement: how often the path is actually taken.
+
+With the probe labelling rings by thread, the stalls separate into something qualitative:
+
+| | stalls | got data | parked | park p50 |
+|---|---|---|---|---|
+| old | 6029 | 91% | 9% | 19.4ms |
+| new | 4449 | 43% | 57% | 4.8ms |
+
+Per ring: the old tree's vkmark ring parked on 8 of 1139 stalls (0.7%); the re-port's two vkmark
+rings park on 73% and 79%. "Parked" means the consumer spun its full three thousand turns, about
+1.3ms, and still had nothing. The re-port's park median of 4.8ms is the same order as its own
+frame time, and runs of consecutive stalls at an unchanged write position went from 2 to 187.
+
+The guest is not writing. And the guest vCPU burns 3.85x more CPU per frame. **Busy, and not
+producing** -- which is the one thing none of the host-side probes can explain, because all of
+them are on the host.
+
+### Instrumenting the guest (2026-08-22)
+
+Eight places a guest thread can wait on this path. Seven go through `backoff()`, which spins fifty
+million turns before it sleeps at all, and whose own comment records a previous incident in these
+terms: *observed after a stream corruption, gnome-shell burned 580% sys in backoff()*. That is the
+same symptom recorded on a different guest, written down before any of tonight's data existed.
+
+The eighth reaches `backoff()` never. `type1Write` throttles on the consumer's read position with
+a bare loop -- no backoff, no yield, no ping -- until outstanding transfers drop below
+`maxOutstanding`, which at the shipped 1MB/256KB is three. Under the original plan of counting
+`backoff()` call sites, that loop would have been the single wait the probe could not see, and it
+is the one most suspected. It is timed at the loop itself.
+
+Each site also records the largest outstanding count seen on entry, because a hit at the throttle
+otherwise says the thread waited without saying why it believed it had to -- and with the host
+measured as starved, waiting while nothing is outstanding is a different bug from waiting because
+three transfers really are in flight.
+
+**What this can and cannot settle.** The guest binary is shared, so whatever it finds is an
+amplifier, not the cause; the cause has to be something on the host making the re-port enter these
+waits more often. Its value is that four of the sites -- `specRead`, `consumerFin`, `type1Fin`,
+`type3Fin` -- each correspond to a different host response, so whichever site's tail thickens says
+which host response got slower.
+
+### Must be reverted before the final comparison
+
+Two mesa commits, both diagnostic, both on a shared guest binary:
+
+- `8c7d7ccc8ed` -- the ping condition (worth +72%, evidence about a mechanism, not a shipping figure)
+- `e8deecb0497` -- the wait profile
+
+Installing either writes into the qcow2 overlay, so a graceful shutdown has to follow.
