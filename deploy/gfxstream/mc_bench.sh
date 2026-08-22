@@ -101,6 +101,27 @@ cat_temp() {
 }
 kgsl_write() { $A "su -c 'echo $2 > $KGSL/$1'" 2>/dev/null; }
 
+# Re-check the pin after the work, not only before it. The thermal governor lowers the cap under a
+# pin during a run, so a clock verified at the start says nothing about the rest -- and a run at an
+# unknown clock is not comparable with any other, which is the whole point of pinning. Call it
+# after every measurement, not just at the end, or a clock that fell says only that it fell some
+# time in the last however-many runs.
+#
+# Compares against the snapped target GHZ, not the requested gpu_mhz: those differ whenever the
+# request was not a real step, and comparing against the request reports a false INVALID every time.
+GHZ=""
+clocks_ok() {
+    [ -n "$GHZ" ] || return 0
+    local mn mx cur
+    mn=$(kgsl_read devfreq/min_freq); mx=$(kgsl_read devfreq/max_freq)
+    cur=$(kgsl_read devfreq/cur_freq)
+    if [ "$mn" != "$GHZ" ] || [ "$mx" != "$GHZ" ] || [ "$cur" != "$GHZ" ]; then
+        echo "*** INVALID: the clock was taken from under the pin (min=$mn max=$mx cur=$cur, wanted $GHZ) -- this run is not comparable with any other"
+        return 1
+    fi
+    return 0
+}
+
 # Wait out the thermal cap before pinning: with thermal_pwrlevel non-zero the pin lands on a
 # ceiling the hardware has already lowered, and the run measures the heat of the previous run.
 # Unpin first -- a pin left over from the previous run keeps min_freq at the target, the thermal
@@ -161,12 +182,34 @@ if [ "$gpu_mhz" != 0 ]; then
     # Read back. A write to min_freq/max_freq is accepted whether or not it can be honoured, so
     # the only evidence the pin took is the clock itself.
     got=$(kgsl_read devfreq/cur_freq)
+    GHZ=$hz
     if [ "$got" != "$hz" ]; then
         echo "    ERROR: cur_freq=$got, wanted $hz -- the pin did not take, measurements from this"
         echo "           run are not comparable with any other" >&2
         exit 1
     fi
     echo "    verified cur_freq=$got"
+
+    # A pin at or above the thermal ceiling verifies on a cold part and then loses the clock as
+    # soon as the run heats it -- the same "check that cannot fail at the start" the temperature
+    # condition above used to be. thermal_pwrlevel indexes the frequency table, which the driver
+    # lists highest first, so pwrlevel N means the hardware has already capped at the Nth step.
+    #
+    # 660MHz snapped to 680 on 5567 lands on pwrlevel 4, which was the cap at 37C idle -- exactly
+    # on the ceiling, with nowhere to go once the load starts.
+    thr=$(kgsl_read thermal_pwrlevel)
+    if [ -n "$thr" ] && [ "$thr" -gt 0 ] 2>/dev/null; then
+        cap=$(kgsl_read devfreq/available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$' | sed -n "$((thr+1))p")
+        if [ -n "$cap" ] && [ "$hz" -ge "$cap" ]; then
+            echo "    WARNING: thermal_pwrlevel=$thr caps this GPU at $((cap/1000000))MHz and the pin"
+            echo "             is at $((hz/1000000))MHz -- at or above the ceiling. It will verify now"
+            echo "             and be taken away once the run heats the part. Pick a lower step:"
+            kgsl_read devfreq/available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$' \
+                | awk -v c="$cap" '$1 < c {printf "               %d MHz\n", $1/1000000}' | head -4
+        fi
+    fi
+
+
     echo "    restore with: min_freq=160000000 max_freq=1100000000"
 fi
 
