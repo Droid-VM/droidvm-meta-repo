@@ -1573,6 +1573,62 @@ RETRACTIONS): it rested on a single new-tree fps reading, against a within-boot 
 2.61x. **Re-measured at N=6 interleaved and cleared properly** -- medians 212/236/291/276 across
 `NEW-a / RBREV-a / NEW-b / RBREV-b`, the two conditions indistinguishable.
 
+### The decoder's sequence-number wait: a three-rung ladder ported one rung deep
+
+Found by comparing the trees file by file along the transport path rather than commit by commit --
+the port cannot be bisected, but the files can.
+
+Every Vulkan packet carries a sequence number, and a decoder thread whose packet is not next waits
+for the counter to reach it. The pre-upstream tree waits in three stages:
+
+    spins <= 4096            __asm__ __volatile__("yield")     ARM pipeline hint; keeps the core
+    4096 < spins < 65536     std::this_thread::yield()         releases the core to the scheduler
+    spins >= 65536           futex WAIT on the counter word    sleeps
+                             + FUTEX_WAKE in advanceSeqno()
+
+`host/vulkan/vk_decoder.cpp:238` in this tree has **only the first rung, and no upper bound**. It
+spins on the ARM `yield` hint forever. That instruction is a pipeline hint, not a syscall: it does
+not release the core.
+
+**The port carried the comment that explains the ladder without carrying the ladder.** The block
+above the loop here is near-verbatim from the old tree -- "YIELD is the ARM counterpart of PAUSE and
+is what belongs there" -- so the code reads as though the fix is complete. That is why file-level
+comparison found it and commit-level review did not.
+
+**Why the shape fits.** On one core with two hot render threads, a thread waiting on the counter
+holds the core until the scheduler preempts it, and the thread that must advance that very counter
+cannot run until then. A wait that should cost microseconds costs a timeslice. With a core each,
+the producer runs regardless and the missing rungs never show. That is the one-core-only signature,
+and it also predicts the scheduler-tick rate (guest arch_timer 3.5x), the context-switch increase,
+and the 2.6x run-to-run spread, which is what scheduling luck looks like.
+
+**What is not yet established: how often the loop is entered.** No probe counts entries, so this is
+a candidate, not a conclusion. The old tree's own note says real waits here are "microseconds -- the
+value is one or two packets away", which says the wait is routine rather than exceptional, but that
+was measured on the tree that has the ladder.
+
+**The one measurement that does not obviously fit** is host CPU never exceeding 73% of the core. A
+thread spinning in userspace should saturate. Acceptance is re-measuring that directly from the
+core's idle ticks, because the 73% figure's denominator was never verified -- if it is a share of
+all cores, then under a one-core cpuset it is near-saturation and the objection dissolves.
+
+**`SEQNO-STUCK` cannot speak to this.** It prints every 0xFFFFFF spins, which at 1-5ns per iteration
+needs 17-84ms of continuous spinning. The hypothesis predicts waits of one timeslice, 4-10ms, i.e.
+0.05x-0.60x of the threshold. **Under the hypothesis it prints nothing, so silence is a prediction,
+not evidence against.** If it ever does print, that is a worse defect than this one.
+
+**Two tests.** A profile of the host render threads under the one-core configuration, read together
+with that core's saturation -- neither alone separates "decode is the hot symbol" from "decode is
+spinning", since the loop inlines. And decisively, a build with the second and third rungs restored,
+with `GFXSTREAM_SEQNO_FUTEX_AT` exposing the sleep threshold so one binary can sweep it.
+
+**Related, and dropped from the same mechanism:** the new tree compares `seqno - seqnoPtr->load()`
+in **unsigned** arithmetic. The old tree used a signed delta on purpose, because a counter left
+*ahead* -- which is exactly what a recycled context id produces -- makes the unsigned difference
+enormous rather than negative, so the wait never ends. The old tree's deficit repair (forward-only,
+after seconds of no movement) is also absent. Those are correctness fixes, tracked separately from
+the throughput question.
+
 ### What that leaves
 
 Possibly no single causing commit. The evidence for a threshold rather than a cause: the spin
