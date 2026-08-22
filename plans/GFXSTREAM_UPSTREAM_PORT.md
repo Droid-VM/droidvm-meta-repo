@@ -1428,6 +1428,30 @@ Sections above state findings that later measurement killed. They are left in pl
 reasoning that produced them is worth reading, but **nothing in them should be cited**. Each died
 to evidence, listed here so the document cannot be quoted against itself.
 
+**The `1553bbd798` SEQ_CST revert, "measured and BAD" -- retracted, and this one matters most.**
+Acceptance measured within-boot spread on the new tree, same VM, same binary, conditions identical:
+
+    new tree, four runs, one boot   201 / 350 / 265 / 299   -> 1.74x spread
+    old tree, same protocol         1503 / 1499             -> 0.3%
+
+**A single new-tree fps reading carries an error bar of about +/-40%.** The `rbrevert` verdict was
+one such reading, and the number behind it was never even written down here. It cannot support
+"BAD", and it certainly cannot support the sentence it was used to justify -- *"Cleared by direct
+evidence rather than inference"*.
+
+That change is **the only genuine transport-path difference in the whole upstream diff**, so it goes
+back on the list rather than into the graveyard. The binary still exists (`rbrevert`, md5
+`d17b7c7e5994b72182b474b2a9f2645a`); re-testing needs N>=4 runs within one boot, per condition.
+
+**What this spread does and does not kill.** It kills every new-tree-vs-new-tree kill-switch cell
+decided on a single fps reading. It does **not** kill counter-based results (`MISS`=0,
+`CB-EXPORT`=0, `commitBuffer` spun=0, K/M=100%, 91.x packets per frame, 58-142 iters per backoff
+episode), which do not read fps at all; nor the primary finding, where the new tree's best single
+run (350) and the old tree's worst (1499) are 4.3x apart -- far outside the spread.
+
+**And the spread is itself a symptom.** The old tree is stable to 0.3% under the same protocol. Run
+to run instability is something only the new tree does.
+
 **The AB24 swizzle, 2.26x -- retracted, sign reversed.** Re-run under two boots per condition:
 
     original (one boot per condition)   ON 291   OFF 659   -> OFF higher by 2.26x
@@ -1525,8 +1549,10 @@ that this route never executes, and the other two are 83-file and 32-file restru
 revert.
 
 The one transport-path upstream change large enough to matter -- `1553bbd798`, which made both ring
-cursors sequentially consistent where each side used to read its own plainly -- **reverts cleanly,
-was built, measured, and is BAD**. Cleared by direct evidence rather than inference.
+cursors sequentially consistent where each side used to read its own plainly -- **reverts cleanly and
+was built**. It was recorded here as measured BAD and cleared; **that verdict is retracted** (see
+RETRACTIONS): it rested on a single new-tree fps reading, and within-boot spread on the new tree is
+1.74x. It is untested, not cleared.
 
 ### What that leaves
 
