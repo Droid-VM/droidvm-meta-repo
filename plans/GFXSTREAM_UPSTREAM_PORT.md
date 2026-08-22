@@ -1773,6 +1773,45 @@ the size of the change, not by throughput**, and should not be described as a sp
 
 Final shape: 3 files, +61 lines, no deletions, of which four lines are code.
 
+### simplefb under a protected VM: what it actually is
+
+Measured on 5567 under `--protected-vm-without-firmware --simplefb width=1400,height=1050`:
+
+    dmabuf fds held by crosvm                 0
+    memfd                                     memfd:crosvm_guest  x1
+    separate mapping the size of the fb       none -- guest RAM is one mapping, the fb an offset
+
+**The region is a slice of the guest's own memfd.** On Gunyah it takes the swiotlb sharing path:
+`lend=false`, so `set_user_memory_region` leaves the host with read access; `create_shm_node=true`,
+so RM builds a memparcel and the guest gets its stage-2 mapping. `aarch64/src/lib.rs` said this all
+along; the comment above the display-bridge thread in `src/crosvm/sys/linux.rs` claimed a DMA-heap
+DMA-BUF shared via `map_cma_region`, and has been corrected (`crosvm b2444fd86`, comment only).
+
+**Why a stale comment was worth a commit.** Read the old one, and a GPU import of this region looks
+free because an fd already exists. It does not. An importable fd means building a udmabuf over the
+memfd, the way `resource_create_blob` already does for the guest pool. Anyone sizing "simplefb via
+GPU blit into a hardware encoder" off that comment would size it wrong.
+
+**simplefb works under pwf, and the inference that it could not is the part worth keeping.** The
+reasoning was: a protected VM does not let the host read guest memory, so a host-side display bridge
+cannot work. That is wrong -- the region has its own `MemoryRegionPurpose::SharedFramebuffer` with
+`lend=false`, which is exactly the exception. **The error came from reading a truncated `grep` of
+the purpose enum and treating the visible part as the whole list; `SharedFramebuffer` was in the
+part that scrolled off.** Writing down only "simplefb is shared" would not stop the next person
+making the same inference, so the inference is recorded with it.
+
+**The guest maps it `ioremap_wc()`, so it is write-combining.** Visibility of guest writes to a GPU
+reader is **a live question here, not a formality** -- the same family as the pool path's
+`linear_verified` checks. Any design that has the GPU read this region has to answer it.
+
+DT shape confirmed: `framebuffer@157a00000` plus `reserved-memory/simplefb_reserved@157a00000`,
+driver `simpledrmdrmfb`. That satisfies the rule that every SHARE'd parcel needs a `/reserved-memory`
+node whose `reg` matches.
+
+**Scope:** this was measured with `--gpu virglrenderer` present, so simplefb ran through `GpuDevice`
+(ExternalScanout) rather than as its own sink. The memory findings do not depend on that, but the
+standalone-sink path is untested.
+
 ### What that leaves
 
 Possibly no single causing commit. The evidence for a threshold rather than a cause: the spin
