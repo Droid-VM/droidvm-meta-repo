@@ -1717,6 +1717,24 @@ enormous rather than negative, so the wait never ends. The old tree's deficit re
 after seconds of no movement) is also absent. Those are correctness fixes, tracked separately from
 the throughput question.
 
+### Closed: the shipping form, and what acceptance signed off on
+
+    single core   yieldonly 1692 (1377-1749)   old tree 1499-1512   current new tree 234
+    dual core     yieldonly 1574 (1433-1819)   yield stage disabled 1562 -- 0.8% apart
+    spread        2.80x -> 1.27x
+    profile       decode 19.12% -> 0.20% (old tree 0.28%), do_sched_yield 4.88% -> 8.59%
+                  decode samples per frame 15.4 -> 0.0089 (old tree 0.0111)
+
+Both pre-written mechanism predictions hit and the "fps rose but decode did not fall" warning branch
+did not fire. Content gates (`YIELD=1 / FUTEX=0`), `crosvm environ`, and clocks were checked on every
+cell. The dual-core control says the yield stage neither helps nor harms with two cores, so the ASG
+spin-ladder precedent -- a knob with opposite signs on two configurations -- did not repeat.
+
+`yieldonly` vs the futex build is +3.4%, inside the spread: **dropping `advanceSeqno` is justified by
+the size of the change, not by throughput**, and should not be described as a speedup.
+
+Final shape: 3 files, +61 lines, no deletions, of which four lines are code.
+
 ### What that leaves
 
 Possibly no single causing commit. The evidence for a threshold rather than a cause: the spin
