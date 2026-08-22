@@ -1421,3 +1421,65 @@ aggregated:
 Neither is assumed. The point is that the run-to-run difference is the first question tonight that
 is not blocked by the two trees sharing code: same binary, same boot, same clock, 1.9x apart, so
 whatever differs is runtime state.
+
+## RETRACTIONS (2026-08-22, late)
+
+Sections above state findings that later measurement killed. They are left in place because the
+reasoning that produced them is worth reading, but **nothing in them should be cited**. Each died
+to evidence, listed here so the document cannot be quoted against itself.
+
+**The AB24 swizzle, 2.26x -- retracted, sign reversed.** Re-run under two boots per condition:
+
+    original (one boot per condition)   ON 291   OFF 659   -> OFF higher by 2.26x
+    re-run (two boots per condition)    ON 505   OFF 276   -> ON higher by 1.83x
+
+A real effect does not change sign. The original compared one boot against another, and same-config
+boot-to-boot spread was measured at 1.7x -- enough to manufacture the whole result. It also agrees
+with direct evidence that was available at the time: `POOL-SCANOUT#` = 0, so **that swizzle never
+executed**. Everything built on it goes with it: AB24 as a shared root cause for the colour swap
+and the regression, the per-frame 5.6MB byte swap as the missing 2.9ms, and the claim that one fix
+would settle both.
+
+**How it survived as long as it did.** The design flaw was named by acceptance in the same session,
+one round earlier -- "three runs in one boot are not three independent samples" -- and then not
+applied to the next round. And when acceptance raised the ceiling worry, this session answered that
+the intervention had already proved it and needed no second confirmation. That sentence closed the
+door that would otherwise have caught it. An interventional result is not immune to a broken
+comparison design; it only removes the correlational objection.
+
+**Per-frame GPU time 2-2.6x -- retracted.** It came from `gpu_busy_percentage`, a duty-cycle
+sampled after vkmark exited, including background. Fitting `ifpc = a x fps + b` across all 18 runs
+gives one line through both trees (slope 3.53, intercept 1217) with residuals under 25 against
+magnitudes of 2000-5700 -- **per-frame GPU wake-ups are identical between the trees**. Fitting the
+trees separately gives wildly different slopes, but the old tree's runs span only 61 fps, so that
+comparison is worthless and was flagged as such before it could be quoted.
+
+**The clock-collapse feedback loop -- retracted.** Pinned, the gap is still there on a GPU held at
+500MHz and 10% busy.
+
+**The half-applied AHB pair -- retracted.** `CB-EXPORT` counted 0 across four boots, with the probe
+verified in the binary, the channel verified by positive controls in the same log segment
+(`FLUSH-ROUTE` 12, `GFXPOOL` 4), and the kill switch making no difference to frame rate. crosvm's
+`export_blob` fails at `resource.handle == None` in both trees, so the pair is inert at both ends
+rather than doing wasted work at one.
+
+**Pool fragmentation -- retracted.** `GFXPOOL-MISS` = 0 across the same six boots, each carrying a
+positive control line, and both branches of its emit condition print, so zero cannot have been
+swallowed by the guard.
+
+### What survives
+
+1. The re-port is 2-3.5x slower. Pinned clocks, many boots, direction never once inverted.
+2. Its host consumers park on 57% of stalls with a 4.8ms median; the old tree's park on 0.7%.
+3. **It carries an endogenous instability the old tree does not.** At pinned clocks, within one
+   boot: new 235-580 across six runs, old 1212-1273. Not clocks, not boot luck, not the guest wait
+   path (per-frame waits are 56.3/57.3/59.6 across runs of 280/456/523 fps), not GPU wake-ups.
+
+Item 3 is the only unexplained one, and a thing that makes per-frame cost swing 2.5x would average
+out to exactly item 1. It is the main line now.
+
+**The measurement that can finally ask it** needs per-run log slicing, which nothing so far has
+had: console logs are cut per boot, and fast and slow runs live inside one boot. A run marker in
+the same stream as the probe output is the prerequisite -- without it, no within-boot comparison is
+possible at all, which is also why the pool-miss and format checks could not have answered this
+even had they been non-zero.
