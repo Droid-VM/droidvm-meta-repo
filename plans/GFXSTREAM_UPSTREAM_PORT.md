@@ -512,6 +512,20 @@ zink 的 `nullDescriptor` force-enable（`VulkanRobustness`）、udmabuf 的啟�
 
 ### 真正的決定：兩個世界選一個
 
+> ⚠️ **【已由 `687df86cd` 拍板，而且結果推翻了本節的前提】** 本節把「host 藏不藏 modifier
+> extension」寫成一個待決的選擇，並說「R↔B 在世界 B 裡」。**那個選擇已經做了：`687df86cd`
+> (08-22)「hide VK_EXT_image_drm_format_modifier from the guest again」把它藏了回去，所以新樹
+> 現在在世界 A，和舊樹相同。**
+>
+> **關鍵在於 R↔B 在那之後仍然以約 11% 的比率發生。** 所以 modifier extension 的暴露**不是**
+> R↔B 的成因，本節「代價是目前 R↔B 在這個世界裡」那句已被證偽。這條線是死的，不要再拿它
+> 排實驗。
+>
+> （新舊樹的清單仍有差異，但無關：舊樹另外藏了 `VK_KHR_maintenance9` 和 `VK_KHR_robustness2`，
+> 因為它的 cereal 表無法 (un)marshal 那些結構；上游 host 解得動，所以留著可見。）
+>
+> 以下保留，因為它記錄了當時為什麼認為這是個選擇。
+
 盤點完之後，這不是一份「補漏清單」，是一個選擇：
 
 **世界 A（舊樹）**：host 藏 modifier extension → guest 走 LINEAR 模擬 → host 需要 B 那整組接住它。代價是要在生成檔上長期維護 patch。
