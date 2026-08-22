@@ -1268,3 +1268,64 @@ strong lead -- present fences sit directly on the guest's wait path, and a host 
 extension in one tree and not the other would make one guest binary behave two ways. It does not:
 those functions are present in both, having moved between files in the re-port. A file-scoped
 comparison said "missing"; a tree-scoped one said "moved".
+
+### Pinning the GPU on 5567, and a hypothesis it raises about the regression (2026-08-22)
+
+Pinning turned out to be three problems stacked, each only visible once the one above it was
+fixed.
+
+**The tool had no nearest-step snap for the GPU**, though `cpu_pin` has always had one and its
+comment gives the reason. 5567's steps are 903/834/770/720/680/629/578/500/422/366/310/231, with
+no 660 -- the default. Writing an off-step value into `devfreq/min_freq` is *accepted*, reads back
+correctly, and then runs the part at 231MHz, the bottom of the table. Not the nearest step: the
+bottom.
+
+**Snapped to 680, the pin lands exactly on the thermal ceiling.** `thermal_pwrlevel` indexes the
+frequency table highest-first, and it read 4 -- which is 680 -- at 37C idle. So the pin verifies
+on a cold part and is taken away as soon as the run heats it. Same mechanism as the comment above
+`cool_for_pin` describes, arrived at from the other side: not pinned while hot, but pinned cold at
+a frequency the part cannot hold.
+
+**And on this driver `devfreq/min_freq` is not the effective control at all.** Pinned at 500 it
+reads back 500, then during a run `cur_freq` sits at 231 -- below the floor that was set. What
+moves is only `cur`; `min_freq` and `max_freq` stay where they were written. And `cur` oscillates
+between exactly two values, 231 and 500, never the steps in between. 231 is `default_pwrlevel`.
+
+That shape is a reset returning to a default, not a governor floating freely, and `idle_timer=80`
+supplies the trigger: the GPU powers off after 80ms idle and comes back at its default level.
+Something also rewrites `max_freq` back to 903 when the VM starts -- nothing in this repo writes
+GPU frequency except the benchmark script itself, so that is Android's own power HAL boosting on
+app launch or context creation.
+
+The real controls are KGSL's `min_pwrlevel` / `max_pwrlevel`, and separately `default_pwrlevel`.
+Those are different kinds of thing: the first two are an allowed interval, the third is where a
+reset lands. Setting only the interval leaves any platform that resets free to leave it.
+
+**The hypothesis this raises.** If the GPU drops to 231MHz whenever it idles for 80ms, then a tree
+that stalls more idles the GPU more, and every stall is paid for twice -- once in the wait and
+again in a clock that collapsed while waiting, taking time to climb back. The re-port parks its
+vkmark rings on 73-79% of stalls against the old tree's 0.7%, with a park median of 4.8ms, which is
+well past 80ms in aggregate between frames.
+
+That predicts something checkable: **pinned clocks should compress the old-versus-new gap
+substantially**, and by more than pinning alone would explain. If they do, part of what has been
+called regression A is a clock-collapse feedback loop rather than a difference in the graphics
+path -- and it would be a real mechanism, not a measurement artefact. If the gap survives pinning
+intact, that loop is not contributing and the measurements simply become trustworthy.
+
+Either result is worth having, and it is the first prediction tonight that pinning can settle
+rather than merely enable.
+
+### Status of the numbers (2026-08-22)
+
+Four rounds of pinning work have produced no citable performance figure -- two unpinned, one at
+680 that was invalid, one at 500 that did not hold. That is the expected cost of fixing the
+harness, but it should be stated plainly: **we are less certain how much slower the re-port is than
+we were six hours ago**, because the earlier multiples are void and the replacements do not exist
+yet.
+
+What is solid: the direction, supported by roughly a dozen interleaved unpinned runs across four
+metrics with zero inversions; and the structural facts, each measured inside a single run rather
+than across two -- `spun=0` with `iters` equal to `writes`, `K/M=100%` on both trees, queue depth
+5-48 with nothing left queued, the host starved rather than busy, and the long list of
+byte-identical diffs.
