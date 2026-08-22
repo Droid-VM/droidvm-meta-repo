@@ -109,14 +109,16 @@ kgsl_write() { $A "su -c 'echo $2 > $KGSL/$1'" 2>/dev/null; }
 #
 # Compares against the snapped target GHZ, not the requested gpu_mhz: those differ whenever the
 # request was not a real step, and comparing against the request reports a false INVALID every time.
-GHZ=""
+GHZ=""; GLVL=""
 clocks_ok() {
-    [ -n "$GHZ" ] || return 0
+    [ -n "$GLVL" ] || return 0
     local mn mx cur
-    mn=$(kgsl_read devfreq/min_freq); mx=$(kgsl_read devfreq/max_freq)
-    cur=$(kgsl_read devfreq/cur_freq)
-    if [ "$mn" != "$GHZ" ] || [ "$mx" != "$GHZ" ] || [ "$cur" != "$GHZ" ]; then
-        echo "*** INVALID: the clock was taken from under the pin (min=$mn max=$mx cur=$cur, wanted $GHZ) -- this run is not comparable with any other"
+    mn=$(kgsl_read min_pwrlevel); mx=$(kgsl_read max_pwrlevel); cur=$(kgsl_read devfreq/cur_freq)
+    # devfreq is deliberately not checked: the power HAL rewrites max_freq at app foreground on
+    # this platform and that is expected, not a lost pin. What must hold is the pwrlevel interval,
+    # and cur_freq, which is the clock actually run.
+    if [ "$mn" != "$GLVL" ] || [ "$mx" != "$GLVL" ] || [ "$cur" != "$GHZ" ]; then
+        echo "*** INVALID: the clock was taken from under the pin (min_pwrlevel=$mn max_pwrlevel=$mx cur=$cur, wanted level $GLVL at $GHZ) -- this run is not comparable with any other"
         return 1
     fi
     return 0
@@ -166,51 +168,72 @@ if [ "$gpu_mhz" != 0 ]; then
     # The step tables differ per phone, so a fixed default cannot be assumed to exist: 660 is a
     # step on 5568 and not on 5567, where the nearest is 680. Snap and say so, rather than
     # refusing to run at all.
-    steps=$(kgsl_read devfreq/available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -n)
-    [ -n "$steps" ] || { echo "cannot read GPU frequency steps" >&2; exit 1; }
-    want=$(echo "$steps" | awk -v t="$hz" '{d=$1>t?$1-t:t-$1; if(best==""||d<best){best=d;v=$1}} END{print v}')
-    if [ "$want" != "$hz" ]; then
-        echo "==> ${gpu_mhz}MHz is not a step on this GPU; nearest is $((want/1000000))MHz"
-        hz=$want
-        gpu_mhz=$((want/1000000))
+    #
+    # The list is highest-first, and its index is the pwrlevel -- which is what the pin below is
+    # actually written in terms of.
+    desc=$(kgsl_read devfreq/available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$')
+    [ -n "$desc" ] || { echo "cannot read GPU frequency steps" >&2; exit 1; }
+    hz=$(echo "$desc" | awk -v t="$hz" '{d=$1>t?$1-t:t-$1; if(best==""||d<best){best=d;v=$1}} END{print v}')
+    lvl=$(echo "$desc" | awk -v w="$hz" '$1==w {print NR-1; exit}')
+    [ -n "$lvl" ] || { echo "cannot map $hz to a pwrlevel" >&2; exit 1; }
+    if [ "$hz" != "$(( gpu_mhz * 1000000 ))" ]; then
+        echo "==> ${gpu_mhz}MHz is not a step on this GPU; nearest is $((hz/1000000))MHz"
+        gpu_mhz=$((hz/1000000))
     fi
-    echo "==> pinning GPU at ${gpu_mhz}MHz"
+
+    # Pinned through pwrlevel, not devfreq. On this driver devfreq/min_freq is a suggestion: it is
+    # accepted, reads back, and does not stop cur_freq sitting below it. What does hold is KGSL's
+    # own pwrlevel arbitration, and the two are separately owned -- Android's power HAL rewrites
+    # devfreq/max_freq back to the top the moment the app comes to the foreground (staged probe:
+    # it changes at foreground, not at VM start, and nothing in this repo writes GPU frequency),
+    # and it does not touch pwrlevel at all.
+    #
+    # default_pwrlevel matters as much as the interval and is a different kind of thing: min/max
+    # are what is allowed, default is where a reset lands. Setting only the interval leaves any
+    # platform that resets free to leave it -- cur_freq was seen oscillating between exactly the
+    # pinned step and the default one, never the steps between, which is a reset returning home
+    # rather than a governor floating.
+    #
+    # devfreq is written too. It is not what holds here, but it is harmless and is the effective
+    # control on parts where pwrlevel is not.
+    echo "==> pinning GPU at ${gpu_mhz}MHz (pwrlevel $lvl)"
     cool_for_pin
-    # max first: min_freq above the current max is rejected.
-    kgsl_write devfreq/max_freq "$hz"
+    kgsl_write max_pwrlevel "$lvl"
+    kgsl_write min_pwrlevel "$lvl"
+    kgsl_write default_pwrlevel "$lvl"
+    kgsl_write devfreq/max_freq "$hz"   # max first: min_freq above the current max is rejected
     kgsl_write devfreq/min_freq "$hz"
-    # Read back. A write to min_freq/max_freq is accepted whether or not it can be honoured, so
-    # the only evidence the pin took is the clock itself.
-    got=$(kgsl_read devfreq/cur_freq)
-    GHZ=$hz
-    if [ "$got" != "$hz" ]; then
-        echo "    ERROR: cur_freq=$got, wanted $hz -- the pin did not take, measurements from this"
-        echo "           run are not comparable with any other" >&2
+
+    # Read back all three. A write to any of these is accepted whether or not it can be honoured,
+    # so the values themselves are the only evidence the pin took. force_clk_on was written during
+    # investigation and silently did not stick -- had that not been read back, it would have gone
+    # into this script as a necessary step when it does nothing.
+    GLVL=$lvl; GHZ=$hz
+    gmin=$(kgsl_read min_pwrlevel); gmax=$(kgsl_read max_pwrlevel); got=$(kgsl_read devfreq/cur_freq)
+    if [ "$gmin" != "$lvl" ] || [ "$gmax" != "$lvl" ] || [ "$got" != "$hz" ]; then
+        echo "    ERROR: min_pwrlevel=$gmin max_pwrlevel=$gmax cur_freq=$got, wanted level $lvl" >&2
+        echo "           at $hz -- the pin did not take, and measurements from this run are not" >&2
+        echo "           comparable with any other" >&2
         exit 1
     fi
-    echo "    verified cur_freq=$got"
+    echo "    verified pwrlevel=$lvl cur_freq=$got"
 
     # A pin at or above the thermal ceiling verifies on a cold part and then loses the clock as
     # soon as the run heats it -- the same "check that cannot fail at the start" the temperature
-    # condition above used to be. thermal_pwrlevel indexes the frequency table, which the driver
-    # lists highest first, so pwrlevel N means the hardware has already capped at the Nth step.
+    # condition above used to be. thermal_pwrlevel is an index into the same list, and a larger
+    # index is a slower step, so the pin is safe only when its level is numerically greater.
     #
-    # 660MHz snapped to 680 on 5567 lands on pwrlevel 4, which was the cap at 37C idle -- exactly
-    # on the ceiling, with nowhere to go once the load starts.
+    # 660MHz snapped to 680 on 5567 is pwrlevel 4, and thermal_pwrlevel read 4 at 37C idle --
+    # exactly on the ceiling, with nowhere to go once the load starts.
     thr=$(kgsl_read thermal_pwrlevel)
-    if [ -n "$thr" ] && [ "$thr" -gt 0 ] 2>/dev/null; then
-        cap=$(kgsl_read devfreq/available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$' | sed -n "$((thr+1))p")
-        if [ -n "$cap" ] && [ "$hz" -ge "$cap" ]; then
-            echo "    WARNING: thermal_pwrlevel=$thr caps this GPU at $((cap/1000000))MHz and the pin"
-            echo "             is at $((hz/1000000))MHz -- at or above the ceiling. It will verify now"
-            echo "             and be taken away once the run heats the part. Pick a lower step:"
-            kgsl_read devfreq/available_frequencies | tr ' ' '\n' | grep -E '^[0-9]+$' \
-                | awk -v c="$cap" '$1 < c {printf "               %d MHz\n", $1/1000000}' | head -4
-        fi
+    if [ -n "$thr" ] && [ "$thr" -gt 0 ] 2>/dev/null && [ "$lvl" -le "$thr" ]; then
+        echo "    WARNING: thermal_pwrlevel=$thr caps this GPU at pwrlevel $thr and the pin is at"
+        echo "             $lvl -- at or above the ceiling. It verifies now and will be taken away"
+        echo "             once the run heats the part. Slower steps that are actually below it:"
+        echo "$desc" | awk -v t="$thr" 'NR-1 > t {printf "               %d MHz (pwrlevel %d)\n", $1/1000000, NR-1}' | head -4
     fi
 
-
-    echo "    restore with: min_freq=160000000 max_freq=1100000000"
+    echo "    restore with: min_pwrlevel=$(( $(echo "$desc" | wc -l) - 1 )) max_pwrlevel=0 default_pwrlevel=$(( $(echo "$desc" | wc -l) - 1 ))"
 fi
 
 if [ "$cpu_mhz" != 0 ]; then
