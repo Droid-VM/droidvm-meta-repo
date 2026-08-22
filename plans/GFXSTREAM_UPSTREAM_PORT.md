@@ -1439,9 +1439,19 @@ one such reading, and the number behind it was never even written down here. It 
 "BAD", and it certainly cannot support the sentence it was used to justify -- *"Cleared by direct
 evidence rather than inference"*.
 
-That change is **the only genuine transport-path difference in the whole upstream diff**, so it goes
-back on the list rather than into the graveyard. The binary still exists (`rbrevert`, md5
-`d17b7c7e5994b72182b474b2a9f2645a`); re-testing needs N>=4 runs within one boot, per condition.
+**But only half the falsification died, and this retraction was first written too broadly.** The
+SEQ_CST hypothesis was killed by two independent arguments, not one: the `rbrevert` fps reading, and
+a two-core measurement showing per-iteration cost identical between the trees. The second does not
+read frame rate at all -- it is a cost per iteration -- so the spread does not touch it. **The
+hypothesis is not revived; it drops from two supporting arguments to one.**
+
+Re-testing is still right, because that surviving argument is now carrying alone a claim about **the
+only genuine transport-path difference in the whole upstream diff**, and leaving a load-bearing
+conclusion on a single support is the exact shape of every error in this section. The binary still
+exists (`rbrevert`, md5 `d17b7c7e5994b72182b474b2a9f2645a`). Acceptance has queued four interleaved
+cells, `NEW-a / RBREV-a / NEW-b / RBREV-b`, six runs each within one boot, criteria written first:
+**RBREV median >800 means SEQ_CST is causal; <600 means the falsification stands, this time with
+N=6 behind it.**
 
 **What this spread does and does not kill.** It kills every new-tree-vs-new-tree kill-switch cell
 decided on a single fps reading. It does **not** kill counter-based results (`MISS`=0,
@@ -1552,7 +1562,8 @@ The one transport-path upstream change large enough to matter -- `1553bbd798`, w
 cursors sequentially consistent where each side used to read its own plainly -- **reverts cleanly and
 was built**. It was recorded here as measured BAD and cleared; **that verdict is retracted** (see
 RETRACTIONS): it rested on a single new-tree fps reading, and within-boot spread on the new tree is
-1.74x. It is untested, not cleared.
+1.74x. A second, fps-independent argument against the hypothesis still stands, so it is **thinly
+supported rather than cleared**, and is being re-measured at N=6.
 
 ### What that leaves
 
