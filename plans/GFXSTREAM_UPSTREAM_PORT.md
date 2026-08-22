@@ -1329,3 +1329,52 @@ metrics with zero inversions; and the structural facts, each measured inside a s
 than across two -- `spun=0` with `iters` equal to `writes`, `K/M=100%` on both trees, queue depth
 5-48 with nothing left queued, the host starved rather than busy, and the long list of
 byte-identical diffs.
+
+### The first trustworthy numbers (2026-08-22)
+
+Pinned at pwrlevel 7 (500MHz GPU) and 1400MHz CPU, two boots per tree, three runs per boot, clocks
+re-checked after every run, zero INVALID:
+
+| | median | range | dispersion |
+|---|---|---|---|
+| old fifo | 117.0 | 111-117 | 5.1% |
+| new fifo | 56.0 | 49-62 | 23.2% |
+| old immediate | 1367.5 | 1315-1403 | 6.4% |
+| new immediate | 390.0 | 300-598 | 76.4% |
+
+**immediate gives 3.51x**; fifo's 2.09x remains a lower bound, since the old tree is against the
+panel. `gpu_busy` was 15-22% on the old tree and 6-14% on the new.
+
+**The ceiling worry is dead.** Both trees are nowhere near GPU saturation, so pinning at 500MHz did
+not compress the gap by holding the old tree back, and a second pin frequency is unnecessary.
+
+**And the clock-collapse feedback prediction is dead with it.** If the re-port's problem were
+stalls idling the GPU down to its default level, pinning the clock would have largely restored it.
+Pinned, it is still 3.51x, on a GPU held at 500MHz and busy 10% of the time. The GPU is not the
+bottleneck in either tree. That loop may well have amplified the *variance* while clocks were free
+-- it accounts for a 7.5x spread across boots of one configuration -- but it does not account for
+the gap.
+
+**What replaced it is better.** Pinning stabilised the old tree and did not stabilise the new one:
+6.4% dispersion against 76.4%, the latter still swinging 300-598 with the clock fixed, the CPU
+fixed, and within a single boot. So the re-port carries an **endogenous** source of instability
+that the old tree does not have -- a qualitative difference, and the first one found that is not a
+ratio. It agrees with the stall data: millisecond-scale waits that come and go, on 57% of stalls
+with a 4.8ms median, are exactly what produces run-to-run spread of that size, and the old tree's
+0.7% supplies no such source.
+
+**One anomaly held back deliberately.** The new tree has 1/3.5 the frame rate but 1/2 the GPU busy,
+so per frame it appears to occupy the GPU *longer* -- for identical per-frame work, since it is the
+same vkmark scene. That would be a GPU-side per-frame difference, which nothing else tonight
+points at. It is not being read yet, because the busy figure was sampled after vkmark exited rather
+than across it. `bench_one.sh` already has the aligned instrument: `gpu_sample_start` /
+`gpu_sample_stop` run the sampling loop on the phone rather than one adb round trip per sample,
+because a round trip is ~100ms and would miss most of the window.
+
+If it survives that, one hypothesis covers three symptoms at once. Identical draw commands taking
+longer on the GPU points at format, tiling or modifier -- and R<->B is already a format problem,
+with the guest's scanout format choice known to vary per boot (3x AB24, 2x AR24 across five boots).
+A per-boot format choice would also supply exactly the endogenous instability just measured, and a
+tree that always lands on the same format would be stable. Not asserted -- only that one mechanism
+would explain the colour swap, the per-frame GPU time, and the run-to-run spread together. The
+`CB-RESOURCE:` and `GUEST-IMAGE:` diagnostics print the formats, so this costs no extra run.
