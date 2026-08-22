@@ -1646,6 +1646,24 @@ for a burst-spin mechanism, and that per-packet normalisation resolves the inlin
 criterion existed to guard against, at much higher resolution. That is the right call for the right
 reason, and it retires the "73% is not saturated" objection recorded above.
 
+**Measured, and the ladder is the cause.** Same binary, same boot, one core, only the environment
+changed between cells:
+
+    B  bare spin (YIELD_AT=max, FUTEX_AT=max)   113 222 232 235 240 316    median  234   spread 2.80x
+    D  full ladder (4096 / 65536)              1345 1417 1662 1694 1695 1704  median 1678   spread 1.27x
+    old tree baseline                                                      1499 - 1503
+
+**7.2x, and the restored ladder lands above the old tree rather than merely level with it.** Both
+halves of the pre-written criterion hit: D above 800, B inside the new tree's existing 212-291 band.
+B sitting inside that band also means `advanceSeqno()`'s per-packet cost does not show up at this
+resolution -- the wake check is not paying for itself out of throughput.
+
+**The run-to-run spread is a symptom of the same defect, not a measurement obstacle.** It collapses
+from 2.80x to 1.27x across the same two cells. A spin whose length is decided by when the scheduler
+happens to preempt it produces exactly that: results distributed by scheduling luck. Removing the
+spin removes the luck. Every "reversed finding" earlier in this document was read against a spread
+this defect was generating.
+
 **Two tests.** A profile of the host render threads under the one-core configuration, read together
 with that core's saturation -- neither alone separates "decode is the hot symbol" from "decode is
 spinning", since the loop inlines. And decisively, a build with the second and third rungs restored,
