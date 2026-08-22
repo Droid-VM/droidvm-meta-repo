@@ -1207,3 +1207,64 @@ Two mesa commits, both diagnostic, both on a shared guest binary:
 - `e8deecb0497` -- the wait profile
 
 Installing either writes into the qcow2 overlay, so a graceful shutdown has to follow.
+
+### Every performance magnitude measured tonight is unpinned (2026-08-22)
+
+`deploy/gfxstream/mc_bench.sh` has been in this repo the whole time. It pins clocks to 660MHz GPU
+and 1400MHz CPU, which is exactly what the A/B measurements in `e94583f9c` and `e4c7ca4d3` were
+taken at -- both commits say so in their messages -- and its header records why:
+
+> the same code measured three times came back 127, 58 and 56 fps purely from where the clock was
+
+That is 2.3x from clock position alone, and tonight's "unusable metric" figures are the same order:
+4.0x on a null control, 3.8x on immediate, 7.5x across boots on the same configuration. Not one
+measurement tonight was taken with clocks pinned.
+
+A repeat test separates where the variance lives:
+
+| | within one boot (3 runs) | between boots, same config |
+|---|---|---|
+| fifo | 8.9% | 36% |
+| immediate | 22% | 380% |
+
+Between-boot state, not measurement noise. Which is what makes pinning a testable fix rather than
+a hope -- had within-boot been equally unstable, pinning could not have helped.
+
+**What this costs and what it does not.** Every *magnitude* comparing the trees is suspect: 4x,
+5.94x consumer CPU per frame, 3.85x guest vCPU, 3.96x, the 1.3x fifo floor. All were taken across
+unpinned boots.
+
+The *direction* survives. Across roughly a dozen runs on four metrics the re-port was slower every
+single time; random clock placement would have produced at least one inversion and produced none.
+So: the re-port is slower, by an amount not yet known.
+
+What also survives is everything measured within a single run rather than across two: `spun=0` with
+`iters` exactly equal to `writes`; `K/M = 100%` on both trees; queue depth 5-48 with `queued=0`;
+and every byte-identical diff. Those are structural facts, not rates.
+
+The tooling already handles three traps worth not rediscovering: frequency steps are snapped to the
+*nearest* available, not the highest at-or-below (the prime cluster's next step down is 1209600, so
+rounding down runs it 14% slow); an old pin must be released before waiting for temperature, or
+`min_freq` holds the clock up, the thermal governor cannot step down, and `thermal_pwrlevel` stays
+high forever; and vkmark has to run as the desktop user on Wayland, since as root with `DISPLAY=:0`
+it builds an instance and exits without printing a score, which reads as a benchmark failure rather
+than a login one. Acceptance has added a fourth: re-check the clocks *after* the run, because a pin
+can be taken away by thermal mid-run and checking only at the start misses it.
+
+The earlier A/B work also used **guest submits per second** rather than a benchmark score. That is
+a directly counted quantity, and `ASGSPIN` already counts packets.
+
+### The marshalling layer is a header bump (2026-08-22)
+
+The last surface flagged as unexamined. Normalised, `goldfish_vk_marshaling.cpp` differs by 12620
+lines, `goldfish_vk_transform.cpp` by 6868, `goldfish_vk_deepcopy.cpp` by 5715 -- but the function
+sets explain it: 36 exist only in the re-port and 16 only in the old tree, and the 16 are the EXT
+spellings of extensions the new Vulkan headers promoted to KHR (`Robustness2FeaturesEXT` ->
+`...KHR`, `SwapchainMaintenance1FeaturesEXT` -> `...KHR`). Both trees still carry the EXT names;
+the re-port carries both.
+
+Checked because `VkSwapchainPresentFenceInfoEXT` appearing only on the old side would have been a
+strong lead -- present fences sit directly on the guest's wait path, and a host that advertises the
+extension in one tree and not the other would make one guest binary behave two ways. It does not:
+those functions are present in both, having moved between files in the re-port. A file-scoped
+comparison said "missing"; a tree-scoped one said "moved".
