@@ -1827,6 +1827,24 @@ taken back to the code.
 
 ### Two mistakes worth keeping
 
+**A capability probe that answered with a trait default instead of a fact.** `DisplayVnc` does not
+implement `import_resource`, so every dmabuf import against it fails. It also did not override
+`is_dmabuf_import_supported`, and the trait's default is `true` -- so the probe reported the
+opposite of the truth, and virtio-gpu learned the real answer only by paying a real export plus a
+refused import for every resource, then caching the CpuFallback.
+
+**This is the hardest member of tonight's family to catch, because it produces no suspicious output
+at all.** The other variants at least emit something a reader can question: a zero that has two
+meanings, a truncated list that looks complete, a number measured on the wrong target. A trait
+default emits a confident, well-formed, plausible answer to a question nobody answered. Nothing in
+the log, the counter, or the return value hints that the value was never computed.
+
+**The general form: an unimplemented override is indistinguishable from a deliberate one.** When a
+default carries semantic weight -- "yes, this backend supports that" -- silence means assent, and
+assent is the wrong default for a capability claim. Where the answer matters, it should be
+overridden explicitly on every implementor, even to restate the default.
+
+
 **A control binary that was the wrong binary -- and a wrong diagnosis of why, recorded here first
 and corrected later.** The file handed to acceptance as the experiment's pre-ladder baseline was
 saved, md5'd, pushed, and gated. `strings` found `GFXSTREAM_SEQNO_FUTEX_AT` in it, which a control
