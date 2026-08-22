@@ -1378,3 +1378,46 @@ A per-boot format choice would also supply exactly the endogenous instability ju
 tree that always lands on the same format would be stable. Not asserted -- only that one mechanism
 would explain the colour swap, the per-frame GPU time, and the run-to-run spread together. The
 `CB-RESOURCE:` and `GUEST-IMAGE:` diagnostics print the formats, so this costs no extra run.
+
+### A check that looks in the wrong place (2026-08-22)
+
+The guest probe verification reported the string absent from an installed package that contained
+it: the check read `/usr/lib/aarch64-linux-gnu/` and the ICD installs to
+`/usr/local/lib/aarch64-linux-gnu/`. Extracting the .deb directly showed the probe, the environment
+variable name, and all seven site names present.
+
+Worth recording next to the "a check that cannot fail is worse than no check" note, because it is
+the same defect with the sign flipped. One says "present" when nothing is there; the other says
+"absent" when everything is. What they share is an answer unrelated to the fact. Had the run
+started, a zero result would have sent the investigation to "was the path taken" and "did
+conditions allow it" while the probe was in place the whole time.
+
+Cheap hardening: ask the package manager where it put the file (`dpkg -L`) instead of remembering
+the path.
+
+### What the within-boot spread is not (2026-08-22)
+
+Three runs of the re-port in one boot at pinned clocks: 465, 318, 598. Slowest in the middle,
+fastest last.
+
+**Not accumulation.** Pool fragmentation, or anything else that builds up run over run, predicts a
+monotonic decline. There is no direction here.
+
+The shape that fits is something that either forms or does not at each vkmark start and then holds
+for that run. Each invocation is a new process, so new ASG contexts and new host render threads,
+all landing in the same single-core cpuset where only two of them are hot -- and the phase
+relationship between those two on one core is settled at startup. A convoy, on a lock or simply on
+scheduling quanta, would form or not per run and sustain itself once formed.
+
+That predicts something `GUESTWAIT` can separate, which is why the per-run data must not be
+aggregated:
+
+- a convoy concentrates: one site's `episodes` and tail counts rise sharply on the slow run while
+  the others do not, and `detailmax` is unchanged, because a convoy alters how long a wait takes
+  and not whether it was warranted;
+- a uniform slowdown spreads: every site scales together, which points below this layer entirely --
+  allocation placement, TLB, cache partitioning -- and is a much harder problem.
+
+Neither is assumed. The point is that the run-to-run difference is the first question tonight that
+is not blocked by the two trees sharing code: same binary, same boot, same clock, 1.9x apart, so
+whatever differs is runtime state.
