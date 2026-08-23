@@ -1898,6 +1898,27 @@ What distinguishes them is the artefact being newer than every source it claims 
 working rule adopted with acceptance: **once a build is requested, the sources are frozen until the
 md5 comes back**, and if one has to change, the artefact is void rather than reconciled.
 
+**And one gate more, because every gate above is single-round.** md5, the symbol gate, and the
+before/after source stamp all ask "is this build what this round's edit produced". None of them asks
+whether an *earlier* round's fix is still present. Stacked edits on one file is exactly where a
+silent revert survives every per-round check: the round that drops it passes its own gates
+perfectly, because the thing it dropped was never part of that round's claim.
+
+Acceptance added the missing column, on a build carrying two rounds of fixes:
+
+    vnc_server_composite    417 -> 403   must change    (this round's removal landed)
+    vnc_server_has_clients    9 ->   9   must not       (same file, untouched)
+    vnc_server_resize        57 ->  57   must persist   (**last** round's fix, still there)
+
+The third is the cross-round check, and it belongs in the handover format next to provenance.
+
+**A related habit worth naming: a control that runs on both arms answers questions nobody asked
+it.** The known-answer cell existed to test the resize regression, and it ran on the old binary as
+well as the new. That incidentally pinned the bandwidth floor -- old's post-resize reconnect also
+cost 1.8 MB, and old has no banded path, so 1.8 MB is one full frame under tight rather than
+anything banding costs. Without it, the new tree's 1.8 MB had two readings implying opposite answers
+to "what is banding worth", and nothing on hand to separate them.
+
 
 **Proposing a mitigation the user had already rejected.** "Give gfxstream two cores" was put forward
 as a shippable answer after the user had twice said, in plain terms, that it is not parity but half
