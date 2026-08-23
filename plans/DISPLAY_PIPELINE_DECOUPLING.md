@@ -21,7 +21,7 @@
 - 匯出端（NativeDisplay / VNC）綁在**螢幕**上，不是綁在 VM 上；app 端就是把螢幕列出來讓人選
 - 資料傳輸方式由能力協商決定，不是使用者設定的一個軸
 - pull 來源（simplefb）用 watcher 轉成與 push 來源相同的模型（§3.4）
-- zero-copy 留好路徑並標 TODO，不新增設定列舉
+- zero-copy 留好路徑並標 TODO，不新增設定列舉——邊協定已設計（§4.7），排在最後
 
 **非目標**
 
@@ -295,6 +295,7 @@ app 也不需要列舉服務——**名字是 app 自己取的**（§1.4），�
              geometry_fixed   simplefb=true（DT 定死）  virtio-gpu=false（guest 執行期可改）
 
     格式     fourcc           simplefb 從 DT 讀（§2）  virtio-gpu 從 scanout_data 讀
+                              （legacy SET_SCANOUT 沒有 scanout_data → 視為 XR24＝正規 BGRX，§4.4）
 
     能力     frame_boundaries simplefb=false  virtio-gpu=true
              backpressure     simplefb=false  virtio-gpu=true
@@ -384,7 +385,11 @@ host 端寫保護取 fault——guest 直接 stage-2 映射，沒有 trap 點。
 
 - **匯出端接上時強制送一張完整畫格**，即使內容一個 byte 沒變
   （`simplefb_feed_loop` 已經有這個概念，別在搬過去時掉了）
-- **沒有匯出端時整個不要 poll**，不只是跳過複製。這是這個模型最大的一筆省
+- **沒有匯出端時降到 liveness 頻率，不是完全停**：~1 Hz、只算雜湊、只更新 `last_changed_at`，
+  不產畫格（≈6 MB/s 的讀，可忽略）。**不能完全停的理由是自洽性**：§1.1 拿 `last_changed_at`
+  回答「使用者怎麼知道哪個螢幕是活的」，而他最需要這個值的時刻正是**還沒接上**匯出端的時候——
+  完全停了它就在那一刻是舊的。全速輪詢只在有匯出端時發生，那仍是這個模型最大的一筆省。
+  （virtio-gpu 螢幕不受此影響：它的 `last_changed_at` 由 flush 事件免費更新）
 
 **驗證這件事有它自己的界線，見 §9**——結構論證擋得住設計錯誤，擋不住差一錯誤。
 
@@ -437,8 +442,12 @@ VNC 也還在對客戶端廣告舊游標。這正是既有的缺口：
     CPU copy    無約束，永遠可退回（下界）
        ↑ 加：來源能匯出 dmabuf  ＋  匯出端能 import
     GPU copy    仍有轉換機會（Vulkan blit 順便換通道順序）
-       ↑ 加：格式必須直接相符（沒有 blit 可以轉換）
-    Zero copy
+       ↑ 加：格式必須一開始就對  ＋  邊的方向反轉（§4.7）
+    Zero copy   ＝ Direct：sink 出借 render target，內容不過邊
+
+**約束的階梯成立，但第三階的機制不是「sink 直接呈現來源的 dmabuf」**——
+那個 import 方向在這個平台上不存在（gralloc 不收捐贈，§4.7 查證），
+第三階是方向反轉的 Direct。
 
 **GPU copy 與 Zero copy 的差別不是快慢，是「有沒有一個可以做格式轉換的步驟」：**
 
@@ -485,16 +494,18 @@ simplefb 今天產出的 AR24 **正好就是管線的正規 BGRX**（§4.4），
 
 ### 4.2 解耦方式：各層只宣告自己的能力
 
-    螢幕宣告        我能產出：Cpu | Dmabuf(fourcc, modifier)
-    匯出端宣告      我能吃：  Cpu | Dmabuf-可blit轉換 | Dmabuf-需格式相符
+    螢幕宣告        我能產出：Cpu | Dmabuf(fourcc, modifier)；以及能否落在外部 render target 上（§4.7）
+    匯出端宣告      我能吃：  Cpu | Dmabuf-可blit轉換；以及能否出借 render target（provide_render_targets，§4.7）
     邊上協商        取交集的最高階
 
 **沒有一層需要知道對方是誰。** 新增一個渲染器不必動任何 sink，
 新增一個 sink 不必動任何渲染器。
 
-**Zero-copy 的 TODO 標在匯出端的能力宣告上**（「我能直接呈現這些 fourcc 的 dmabuf」），
-不標在設定、也不標在螢幕上。**今天所有 sink 都宣告「不能」，所以它永遠不會被選中
+**Zero-copy 的 TODO 標在匯出端的 `provide_render_targets` 宣告上**，
+不標在設定、也不標在螢幕上。**今天沒有 sink 宣告它，所以 Direct 永遠不會被選中
 ——路徑留著但不啟用。**
+（上一版把這個 TODO 寫成「我能直接呈現這些 fourcc 的 dmabuf」——
+那是 import 方向，已被 §4.7 否證；能力的形狀是「出借」，不是「收下」。）
 
 ### 4.3 目前各端的能力（實測）
 
@@ -597,7 +608,99 @@ sink 不再無條件 swap，改成照宣告的 fourcc 選 VkFormat。
 **只能往下限制，不能往上要求。** 「要求 GPU copy」在來源匯不出 dmabuf 時無法滿足，
 那時只有靜默降級（壞）或明確失敗（吵）兩種行為；**做成上限就沒有這個問題，任何值都一定可滿足。**
 
-### 4.7 傳輸不依賴裝置層
+### 4.7 Zero-copy：方向反轉的邊（設計；§6 第 14 步，排最後）
+
+**Zero-copy 不是同一條流的第三階，它把邊的方向反過來：**
+
+    Copy 模式     內容向前流。來源產畫格 → sink 消費；呈現 buffer 是 sink 自己的，
+                  最後畫進呈現 buffer 的都是 host（CPU memcpy 或 host GPU blit）
+    Direct 模式   buffer 向前借。sink 出借畫布（AHB）→ guest 驅動的渲染直接落在上面；
+                  acquire fence 向前（內容好了）、release fence 向後（compositor 讀完了）
+                  **內容不過邊**
+
+對外它仍顯示成階梯的第三階（§4.6 面板不變）；對內它是另一種邊協定。
+能力宣告因此加一個方向（§4.2 原本只有「能吃什麼」）：
+
+    sink 宣告      我能出借：provide_render_targets { fourcc: [AB24/XB24], usage, 幾何 }
+                   只有 NativeDisplay 會宣告；VNC 要讀像素，永不
+    來源宣告       can_target_external_buffer（per route，見下表）
+
+**方向由物理決定，不是設計選擇：AHB 只能由 host gralloc 配置，包不了 guest 記憶體。**
+
+反方向（「從 guest shared region 挖一塊 → 包成 AHB → app 呈現 → guest 直畫」）查過，不成立：
+
+    AHardwareBuffer_allocate()           記憶體是 gralloc 給的，不能自帶
+    AHardwareBuffer_createFromHandle()   收的是 native_handle，且要裝置 mapper 認得——
+                                         QTI mapper 驗自家 private_handle_t，udmabuf 包的
+                                         手工 handle 過不了 importBuffer；偽造 handle 正是
+                                         「Skia abort → surfaceflinger 崩 → 軟重啟」的領域（§2）
+    今天樹裡所有 AHB                      全部來自 dequeueBuffer → getHardwareBuffer
+                                         （cpp:1678/1718），沒有一個不是 gralloc 鑄的
+
+**gralloc 是唯一的鑄幣者，而它不收捐贈。**那條管線四段裡三段其實成立
+（udmabuf ✓、turnip 吃 raw dmabuf ✓、guest renderer 照畫 ✓），只有「SF 呈現 guest 記憶體」
+沒有入口——把那格換成一次 GPU blit，它就是第 10 步的 GPU copy：
+零次 CPU 複製、一次 GPU 複製，host GPU 直接取樣 guest 記憶體。**這就是 guest-memory-backed
+來源（pool scanout、simplefb）的天花板**，與 §4.1 的決定一致。
+
+**而正方向比看起來便宜：過邊的是 handle，不是記憶體。**
+三條 GPU route 的渲染都在 host GPU 上執行，guest 只發命令——Direct 模式下
+guest 只需要 resource_id 這個把手，AHB 的位元組不需要映射進 guest，
+Gunyah memparcel／映射數量上限都不用碰
+（除非 guest 要 CPU 存取＝`BLOB_FLAG_USE_MAPPABLE`，合成器對 scanout 不會要）。
+
+**guest 不需要知道（決定）。** 不加新的握手協定；guest 收到的「能」就是它已經收到的東西：
+
+    plane 清單已收斂 AB24（§2）           → 告訴合成器該產什麼格式
+    blob resource + SET_SCANOUT_BLOB      → guest 本來的初始化流程，一個位元組不改
+
+變的是 host 的配置策略：邊協商到 Direct 時，合格的 scanout blob 在
+`resource_create_blob` 就配成 AHB-backed；否則 heap。
+**guest 永遠不會和一個它看不見的能力失同步**，edk2 與舊 guest 自動留在 Copy。
+
+**模式是「當前綁著的 scanout 資源合格嗎」的函數，每次綁定事件重新評估：**
+
+    edk2 / 開機前期    2D transfer 資源，不合格          → Copy（host 搬圖）
+    桌面起來           合成器綁 AB24 blob（AHB-backed）  → 升級 Direct
+    ctrl+alt+2         fbcon 綁 XR24 / 非 blob           → 降級 Copy
+    renderer 消失      KMS 回 fbcon 或 scanout unbound   → 降級 Copy
+    OS 交接            device reset（mod.rs:1630 那個）  → 重新評估
+
+**觸發器和被刪掉的仲裁同一個形狀**——「每次綁定重新評估，判定依據是協定事實不是啟發式」
+（§1.1 的原話）。仲裁死了，它的觸發器以每條邊的模式切換重生；沒有 timer、沒有猜。
+降級永遠可行，因為 CPU copy 是無條件下界（§4.1）。
+
+**host 實作三件事，兩件已存在：**
+
+    呈現       ASurfaceTransaction_setBuffer(ahb, acquire_fence)
+               —— 已存在（cpp:1808-1826），今天 fence 傳 -1；Direct 要把 route 的
+               完成 fence 接上（gfxstream/venus：host Vk fence；drm2kgsl：kgsl timestamp）
+    回壓       take_flip_completion_fence 的契約一字不差就是 release fence
+               （"signals when the display is done reading, i.e. when the guest may
+               safely render into it again"，lib.rs:258）→ 完成 virtio flip fence
+               → guest KMS 才重用 buffer。register/complete_flip_fences 機制現成
+    新東西     resource_id → AHB 的配置與綁定（per route，見下表）
+
+**Event 不會消失**——四條 route 的呈現都走 virtio-gpu 的 scanout 協定，flip/flush 就是
+present 事件；zero-copy 拿掉的是複製點，不是事件。真正的角落是「綁一次就不再 flush 的
+front-buffer 直渲 guest」：那個 scanout 就是 pull 來源，`frame_boundaries=false` + watcher
+（§3.4）——模型已經有這個槽，不需要新機制；watcher 的產出從「複製」變成「戳 compositor 重合成」。
+
+per-route 可行性：
+
+| route | 怎麼落在 AHB 上 | 距離 |
+|---|---|---|
+| gfxstream | host renderer，colorbuffer 綁 AHB（cuttlefish 先例） | 最近 |
+| venus | swapchain image 要 AHB-backed（turnip AHB import，同 §7 MediaCodec 那條假設） | 中 |
+| drm2kgsl | 今天 scanout BO 在 guest pool＝guest 記憶體，**永不合格**；要先改成 host 提供的 blob，kgsl 再 import AHB 的 dmabuf | 最遠 |
+| 2D | 沒有 guest 渲染能落在外部 buffer 上 | 永不 |
+
+**設定面不變**（§4.6）：Direct 顯示成「Zero copy（協商）」，唯讀。
+但模式是 per-bind 的，所以矩陣每格記錄的是「觀察到的模式集合」，不是單一值。
+換匯出端 = 通道重初始化（§5.3）→ mode-set → 合成器重建 scanout buffer → 新配置策略生效，
+所以配置策略和模式不會失同步。
+
+### 4.8 傳輸不依賴裝置層
 
 **最容易搞錯的一點**：simplefb 和 virtio-gpu 都可能產出 dmabuf
 （simplefb 透過 udmabuf over memfd，§7）。**所以傳輸能力屬於螢幕與匯出端，
@@ -671,8 +774,8 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 | 1 | ~~VNC / simplefb：沒有消費者就短路~~ | **已實作，未 commit**（`:571`、`simplefb_display.rs:243`）。價值範圍見 §1.3.1，量測判準見 §9 |
 | 2 | ~~驗 simplefb + 原生顯示的顏色~~ | **已由觀測回答：正確**（Windows simplefb-only）。原因見 §4.4——BGRX 不變式；推論錯在哪見 §8（七） |
 | 3 | 原生 sink 實作 `has_consumer` | 離開顯示畫面後 simplefb 迴圈不再讀 guest 記憶體（`simpleperf` 分「在看／不在看」兩格） |
-| 4 | 引入 `Screen` 定義 + `ScanoutFrame`（含 fourcc 與 damage），兩個來源都改用 | **純重構**：對 sink 收到的 buffer 逐幀取雜湊，改動前後序列相同 |
-| 5 | simplefb watcher：分塊雜湊取代無條件複製（§4.5） | 靜止畫面每拍寫入為零、下游零推送；`last_changed_at` 會動；接上匯出端時立刻收到完整畫格；**判準雙向，見 §9** |
+| 4 | 引入 `Screen` 定義 + `ScanoutFrame`（含 fourcc 與 damage），兩個來源都改用 | **純重構**：對 sink 收到的 buffer 逐幀取雜湊，改動前後序列相同（此步 damage 恆為全幀，否則比不了） |
+| 5 | simplefb watcher：分塊雜湊取代無條件複製（§4.5） | 靜止畫面每拍寫入為零、下游零推送；`last_changed_at` 會動；接上匯出端時立刻收到完整畫格；無匯出端時降到 liveness 頻率仍更新 `last_changed_at`（§3.4）；**判準雙向，見 §9** |
 | 6 | **匯出端 per-screen**：`display_backends` 從 fallback 清單改成 per-screen 綁定；`VncConfig` 變 list；android service name per-screen。**app 端同步 list 化** | VNC + 原生同時開時兩個都活（今天 VNC 靜默贏，§1.4）；單螢幕行為不變 |
 | 7 | 刪掉仲裁（§3.3 那一整組） | 行為不變；`external_scanout.rs` 整檔移除 |
 | 8 | 游標變螢幕定義的欄位（§3.5）+ `move_cursor` 改用 `scanout_id` | 游標只出現在 virtio-gpu 螢幕；切到 simplefb 後**游標消失而不是留在畫面上** |
@@ -681,6 +784,7 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 | 11 | VNC 實作 GPU 半邊 | VNC 能吃 dmabuf；畫面與顏色不變；**guest vblank 不隨 VNC 客戶端有無而變**（§7） |
 | 12 | VNC sink 內部切 encoder / transport | **純重構**：錄 RFB 位元組流比對 |
 | 13 | `HwEncoder`（MediaCodec）+ H.264 側通道 | 新功能，不影響既有 RFB 客戶端；**對遠端價值大得多**（§1.3.1） |
+| 14 | Direct scanout（zero-copy，§4.7），gfxstream 先行 | 協商到 Direct 時桌面畫面與顏色不變；ctrl+alt+2 降級、切回升級，肉眼無縫；拔掉 app Surface 降級不卡 guest；矩陣記錄該格觀察到的**模式集合** |
 | — | **多 scanout 啟用** | **使用者決定先不做**；第 6 步做完後阻礙只剩 AIDL 的 serviceName list |
 
 **優先度**：第 3 步便宜且直接影響今天的使用者（原生是 app 的兩個顯示模式之一）；
@@ -702,6 +806,9 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 | CPU watcher 的 idle 成本（推算 176 MB/s 讀） | 第 5 步；以及要不要考慮 §4.5 的融合 | 量了再決定，不要先優化 |
 | simplefb 獨佔 sink（無 GPU）那條路 | 第 6、10 步 | 目前所有 simplefb 觀測都在有 `--gpu` 之下，走的是 `GpuDevice` |
 | MediaCodec input Surface 能否由 Vulkan 餵 | 第 13 步 | `createTargetImage(AHardwareBuffer*)` 吃任意 AHB，機制上可行，未驗 |
+| gfxstream colorbuffer 能否 AHB-backed | 第 14 步整條 | cuttlefish 有先例；本樹未驗 |
+| kgsl 能否 import gralloc dmabuf 當 render target | 第 14 步 drm2kgsl 那格 | `IOCTL_KGSL_GPUOBJ_IMPORT`；未驗 |
+| Direct 下 SF 的 release fence 會不會把 guest vblank 綁得更死 | 第 14 步 | Copy 路已有「guest vblank 跟面板」的耦合；Direct 讓 release fence 直接成為 gate，螢幕暗/低刷新率時的行為要實測 |
 
 ---
 
