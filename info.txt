@@ -1,0 +1,53 @@
+以下是開源 code，和裝置 vender 版本可能不同，做為參考用:
+/root/gitrs/gunyah-hypervisor
+/root/gitrs/gunyah-resource-manager
+/root/gitrs/DroidVM/GKI_6.6.118_Feb_26  GKI_6.1-2025-12_r10 GKI_6.12-2025-12_r20 GKI_6.18-2026-06_r11
+
+以下是實際的 code:
+/root/gitrs/DroidVM/DroidVM_3daccel_gfxstream/crosvm
+/root/gitrs/DroidVM/DroidVM_3daccel_gfxstream/build_crosvm.sh 可以編譯 crosvm
+
+UEFI:
+/root/gitrs/DroidVM/DroidVM_3daccel_gfxstream/edk2-gunyah
+編譯: ./build.sh -DPCI_CAM_MODE=FALSE
+
+/root/gitrs/DroidVM/gh-hugepage-reserve 大頁保留模組
+原理: 系統剛開機還沒碎片化，先搶一堆大頁
+然後 hook order-9 alloc， 當有任意 process 需要 order-9 alloc 時，從池子中提供大頁給 crosvm 使用。
+不然碎片化，拿不到足夠大頁，VM 無法開機。因為 gunyah 有映射數量上限， 4k 條目太多，用 2M 大頁映射才能開機
+
+/root/gitrs/DroidVM/DroidVM_3daccel_gfxstream/gunyah_host_mod host 需要的模組，含 host_share(相關 hypercall, stock kernel 未提供，配合 guest_share 做 share-unshare), kvcalloc(6.1 stock 無法開超過 2GB VM)
+
+/root/gitrs/DroidVM/DroidVM_3daccel_gfxstream/droidvm-guest-additions guest 需要的模組，含 virtio-gpu 補丁和 guest_share 模組(配合 host_share 做 accept/release)
+
+DroidVM 本體:
+/root/gitrs/DroidVM/DroidVM_3daccel_gfxstream/DroidVM
+
+專案產物:
+用 1~9 .sh 逐步構建所有需要的檔案
+包含 host 端 apk + guest 端 .deb*2
+
+
+172.22.74.2 是 openwrt ，轉發了這些
+172.22.74.2:5566 -> 192.168.66.87(手機,host):5566 adb 控制手機
+172.22.74.2:5567 -> 192.168.66.82(手機,host):5567 adb 控制手機
+172.22.74.2:5568 -> 192.168.66.83(手機,host):5568 adb 控制手機
+
+app daemon 啟動會載入 kmod + 拉起 br-wifi (已經設定好，如果遇上損毀要重設)
+br-wifi 是基於 pseudo-bridge-rs ，vm ip 可以用 root@DevVM2 ~# adb -s 172.22.74.2:5566 shell "ip addr show wlan0"
+27: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc htb state UP group default qlen 3000
+    link/ether 9c:aa:5d:dd:de:1d brd ff:ff:ff:ff:ff:ff
+    inet 192.168.66.87/24 brd 192.168.66.255 scope global wlan0
+       valid_lft forever preferred_lft forever
+    inet6 2a0e:b107:1953:cc:9138:274e:b4c7:cdc9/64 scope global temporary dynamic
+       valid_lft 3598sec preferred_lft 1798sec
+    inet6 2a0e:b107:1953:cc:bd6e:47fe:f7a5:3675/64 scope global dynamic mngtmpaddr stable-privacy
+       valid_lft 3598sec preferred_lft 1798sec
+    inet6 fe80::40ce:4f31:4d5b:ae6c/64 scope link stable-privacy
+       valid_lft forever preferred_lft forever
+root@DevVM2 ~# VM 沒開機，這裡沒有
+
+看到，nodad 就是 pseudo-bridge 代理上去的
+
+所有 repo 分之用本 meta-repo 分支同名的分支，mesa 則是加上 suffix 給各路線各產一個 .deb
+
