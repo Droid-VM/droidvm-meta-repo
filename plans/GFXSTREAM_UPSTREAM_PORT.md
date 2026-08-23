@@ -1884,6 +1884,20 @@ absent in the other -- checked on the device, not on the machine that built it.
 **A build's completion notification is not a fence.** Nothing may edit a source tree while a build
 of it is in flight; the notification can arrive well after the compiler has already read the file.
 
+**It happened again in the other direction, and that time it was caught before delivery.** A peer
+edited `vnc_server_bridge.c` at 08:17:47 while a build of it was running; that build had compiled
+the file into `libvnc_server_bridge.a` at 08:15:25 and finished cleanly afterwards. The result was a
+binary that built with exit 0, had a computable md5, and **passed its symbol gate** -- because the
+gated symbol existed in both versions. The only thing that separated it from a correct build was the
+artefact's mtime against the source's.
+
+**So build provenance belongs in the handover, not just the hash.** For a binary crossing between
+sessions, md5 proves the bytes survived the copy and a symbol gate proves a feature is present;
+neither can tell a current build from a stale one, because a stale build is internally consistent.
+What distinguishes them is the artefact being newer than every source it claims to contain. The
+working rule adopted with acceptance: **once a build is requested, the sources are frozen until the
+md5 comes back**, and if one has to change, the artefact is void rather than reconciled.
+
 
 **Proposing a mitigation the user had already rejected.** "Give gfxstream two cores" was put forward
 as a shippable answer after the user had twice said, in plain terms, that it is not parity but half
