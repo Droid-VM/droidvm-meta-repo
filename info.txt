@@ -44,7 +44,9 @@ root@DevVM2 ~# VM 沒開機，這裡沒有
 
 看到，nodad 就是 pseudo-bridge 代理上去的
 
-所有 repo 分之用本 meta-repo 分支同名的分支，mesa 則是加上 suffix 給各路線各產一個 .deb
+所有 repo 分之用本 meta-repo 分支同名的分支
+mesa 已融合成單一 wip/3d-accel（2026-08-25 起）：不再分 mesa-venus / mesa-gfxstream / mesa-drm2kgsl 三個 fork
+舊的 wip/3d-accel-{venus,gfxstream,drm2kgsl} 遠端分支只是存檔，不再更新
 
 !! 編譯步驟請看我，apk/crosvm/edk2 等等
 要按順序 1~9 的 .sh 逐步構建所有需要的檔案，後面的 sh 會拉前面 sh 的產物(編譯 crosvm 後，prepare apk 把 crosvm 拉入 app 專案，ship 出去)
