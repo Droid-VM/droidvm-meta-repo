@@ -796,9 +796,9 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 | 0 | ~~VNC 的 `is_dmabuf_import_supported()` → `false`~~ | **已收：`crosvm 0b2680cba`** |
 | 1 | ~~沒有消費者就短路~~ | **已收：`crosvm 0b2680cba`，且範圍修正**——閘只在 simplefb 迴圈（timer 生產者）；VNC flush 路的短路被刻意拿掉（§3.4「掉格需要再供給」）。同 commit 額外給 VNC sink 32-row band damage（8gen3 實測）。價值範圍見 §1.3.1 |
 | 2 | ~~驗 simplefb + 原生顯示的顏色~~ | **已由觀測回答：正確**（Windows simplefb-only）。原因見 §4.4——BGRX 不變式；推論錯在哪見 §8（七） |
-| 3 | 原生 sink 實作 `has_consumer` | 離開顯示畫面後 simplefb 迴圈不再讀 guest 記憶體（`simpleperf` 分「在看／不在看」兩格） |
-| 4 | 引入 `ScanoutFrame`（含 fourcc 與 damage），`present_frame` 收攏三個 CPU 複製點（simplefb 迴圈、`present_external`、flush 的 CPU 退路）；儀器先行一個 commit（兩個 sink 原生層的 env-gated 幀雜湊，放在重構線以下） | **純重構**：sink 原生層收到的位元組逐幀雜湊，A/B 兩顆 binary 在靜態畫面（edk2 選單）上穩定值相同（此步 damage 恆為全幀，否則比不了）。GPU import/flip_to 路不動 |
-| 5 | `Screen` 定義（§3.2，長到本步消費的欄位為止）+ simplefb watcher：分塊雜湊取代無條件複製（§4.5） | 靜止畫面每拍寫入為零、下游零推送；`last_changed_at` 會動；接上匯出端時立刻收到完整畫格；無匯出端時降到 liveness 頻率仍更新 `last_changed_at`（§3.4）；**判準雙向，見 §9**。Screen 定義不預埋沒有消費者的欄位——它在本步才有第一個消費者，所以挪到本步 |
+| 3 | ~~原生 sink 實作 `has_consumer`~~ | **程式碼已收**：`Virtualization a049e2a` + `crosvm 0a1deb731`（非阻塞 predicate，避開 `waitForNativeSurface` 的停等）。**裝置驗收待做**：`simpleperf` 分「在看／不在看」兩格 |
+| 4 | ~~引入 `ScanoutFrame`，`present_frame` 收攏三個 CPU 複製點~~ | **程式碼已收**：儀器 `Virtualization 1213db9` + `crosvm 0208302e8`（`CROSVM_DISPLAY_HASH_FRAMES=1`，兩 sink 原生層 FNV-1a，重構線以下）；重構 `crosvm a2508bea8`。**裝置 A/B 待做**（A=`step4-A`、B=`step4-B` 於 scratchpad）。**已知條件**：site 1 原本是 flat memcpy，gralloc stride 有 padding 時會漸進剪切（潛伏 bug）——B 修掉它，所以 A/B 只在 stride 相等的路（VNC、simplefb sink）逐位元組相同；simplefb→原生（未觀測過的配置，§7）上 hash 不同是修 bug 不是回歸 |
+| 5 | `Screen` 定義（§3.2，長到本步消費的欄位為止）+ simplefb watcher：分塊雜湊取代無條件複製（§4.5）+ **輪詢率變設定**（今天是 `simplefb_display.rs:90` 的 `const DEFAULT_FPS=30`，硬編碼；改成 `--simplefb ...,poll-hz=N`，預設 30） | 靜止畫面每拍寫入為零、下游零推送；`last_changed_at` 會動；接上匯出端時立刻收到完整畫格；無匯出端時降到 liveness 頻率仍更新 `last_changed_at`（§3.4，liveness 頻率是簿記不是設定項）；`poll-hz` 設多少實測就是多少；**判準雙向，見 §9**。Screen 定義不預埋沒有消費者的欄位——它在本步才有第一個消費者，所以挪到本步 |
 | 6 | **匯出端 per-screen**：`display_backends` 從 fallback 清單改成 per-screen 綁定；`VncConfig` 變 list；android service name per-screen。**app 端同步 list 化** | VNC + 原生同時開時兩個都活（今天 VNC 靜默贏，§1.4）；單螢幕行為不變 |
 | 7 | 刪掉仲裁（§3.3 那一整組） | 行為不變；`external_scanout.rs` 整檔移除 |
 | 8 | 游標變螢幕定義的欄位（§3.5）+ `move_cursor` 改用 `scanout_id` | 游標只出現在 virtio-gpu 螢幕；切到 simplefb 後**游標消失而不是留在畫面上** |
