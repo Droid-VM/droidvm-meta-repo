@@ -23,11 +23,6 @@ UEFI:
 DroidVM 本體:
 /root/gitrs/DroidVM/DroidVM_3daccel_gfxstream/DroidVM
 
-專案產物:
-用 1~9 .sh 逐步構建所有需要的檔案
-包含 host 端 apk + guest 端 .deb*2
-
-
 172.22.74.2 是 openwrt ，轉發了這些
 172.22.74.2:5566 -> 192.168.66.87(手機,host):5566 adb 控制手機
 172.22.74.2:5567 -> 192.168.66.82(手機,host):5567 adb 控制手機
@@ -51,3 +46,6 @@ root@DevVM2 ~# VM 沒開機，這裡沒有
 
 所有 repo 分之用本 meta-repo 分支同名的分支，mesa 則是加上 suffix 給各路線各產一個 .deb
 
+!! 編譯步驟請看我，apk/crosvm/edk2 等等
+要按順序 1~9 的 .sh 逐步構建所有需要的檔案，後面的 sh 會拉前面 sh 的產物(編譯 crosvm 後，prepare apk 把 crosvm 拉入 app 專案，ship 出去)
+包含 host 端 apk + guest 端 .deb*2
