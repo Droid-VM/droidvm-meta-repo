@@ -121,10 +121,13 @@
 
 ### 1.3 匯出端的成本
 
-**VNC**（`vnc_server_bridge.c` 的 `vnc_server_composite`）：每幀 `memcpy` 整張 +
-`rfbMarkRectAsModified(0,0,w,h)`，**沒有 damage 追蹤**。
-libvncserver 的 `rfbMarkRegionAsModified`（`main.c:412`）逐一走訪已連線客戶端，
-**零客戶端時迴圈不執行 → 編碼不發生，但複製照做**（已修，見 §6 第 1 步）。
+**VNC**（`vnc_server_bridge.c` 的 `vnc_server_composite`）：原本每幀 `memcpy` 整張 +
+`rfbMarkRectAsModified(0,0,w,h)`。**`crosvm 0b2680cba` 起 sink 自帶 damage**：
+32-row band 對 `last_clean` 比對，只複製、只標記變了的 band——8gen3 實測，
+靜止桌面 12 秒 banded <0.1 MB、舊版 1.7–14 MB（不引比值，因為基線不是穩定量，§9）。
+同 commit 修掉 resize 使 `last_clean` 失效的黑屏洞與 `restore_rect` 的越界寫。
+零客戶端的複製浪費：**閘只放在 simplefb 迴圈（timer 生產者）**，
+VNC flush 路的短路被刻意拿掉——理由見 §3.4 的「掉格需要再供給」規則。
 
 **simplefb**（`simplefb_display.rs`）：固定 `DEFAULT_FPS = 30` 無條件輪詢。
 兩條迴圈行為不同，這是個坑：
@@ -391,7 +394,20 @@ host 端寫保護取 fault——guest 直接 stage-2 映射，沒有 trap 點。
   完全停了它就在那一刻是舊的。全速輪詢只在有匯出端時發生，那仍是這個模型最大的一筆省。
   （virtio-gpu 螢幕不受此影響：它的 `last_changed_at` 由 flush 事件免費更新）
 
+**「掉格需要再供給機制」（`crosvm 0b2680cba` 實測得到的規則）**：
+「沒消費者就跳過」只在**生產者是 timer** 時安全——下一拍會重新供給，消費者回來最多晚 33 ms。
+flush 驅動的畫格掉了就**永遠不會再來**：實測客戶端跨解析度變更斷開再連 → 永久黑屏 0 bytes/s。
+所以 `has_consumer` 的閘只准放在 pull/watcher 側；push 側要跳過，先要有
+「消費者到場時重新呈現」的機制（sink 已留著 `last_clean`，缺的是 newClientHook 那條線）——
+**這和上面「匯出端接上時強制送完整畫格」是同一個需求的兩面**，做第 6 步時一起收。
+
+**sink 側 band 比對與來源側 watcher damage 是疊加不是重複**：
+來源 damage 省掉的是它上游的讀與複製（sink 根本不被叫醒）；
+sink 比對照顧的是不帶 damage 的來源（virtio-gpu flush 今天送整張），兩層都留。
+
 **驗證這件事有它自己的界線，見 §9**——結構論證擋得住設計錯誤，擋不住差一錯誤。
+§9 那套判準已有一個活例：`0b2680cba` 的量測（每臂四次開機、交錯排序、
+基線不穩就不引比值、地板由舊 binary 自己的 reconnect 格獨立釘住）。
 
 ### 3.5 游標是螢幕定義的一個欄位
 
@@ -770,8 +786,8 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 
 | # | 動作 | 驗收條件（含儀器） |
 |---|---|---|
-| 0 | ~~VNC 的 `is_dmabuf_import_supported()` → `false`~~ | **已實作，未 commit**（`gpu_display_vnc.rs:563`） |
-| 1 | ~~VNC / simplefb：沒有消費者就短路~~ | **已實作，未 commit**（`:571`、`simplefb_display.rs:243`）。價值範圍見 §1.3.1，量測判準見 §9 |
+| 0 | ~~VNC 的 `is_dmabuf_import_supported()` → `false`~~ | **已收：`crosvm 0b2680cba`** |
+| 1 | ~~沒有消費者就短路~~ | **已收：`crosvm 0b2680cba`，且範圍修正**——閘只在 simplefb 迴圈（timer 生產者）；VNC flush 路的短路被刻意拿掉（§3.4「掉格需要再供給」）。同 commit 額外給 VNC sink 32-row band damage（8gen3 實測）。價值範圍見 §1.3.1 |
 | 2 | ~~驗 simplefb + 原生顯示的顏色~~ | **已由觀測回答：正確**（Windows simplefb-only）。原因見 §4.4——BGRX 不變式；推論錯在哪見 §8（七） |
 | 3 | 原生 sink 實作 `has_consumer` | 離開顯示畫面後 simplefb 迴圈不再讀 guest 記憶體（`simpleperf` 分「在看／不在看」兩格） |
 | 4 | 引入 `Screen` 定義 + `ScanoutFrame`（含 fourcc 與 damage），兩個來源都改用 | **純重構**：對 sink 收到的 buffer 逐幀取雜湊，改動前後序列相同（此步 damage 恆為全幀，否則比不了） |
