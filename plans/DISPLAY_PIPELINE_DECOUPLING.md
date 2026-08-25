@@ -589,12 +589,20 @@ sink 不再無條件 swap，改成照宣告的 fourcc 選 VkFormat。
   （要嘛序列化「要不要呈現」的決定，要嘛再欠一幀延遲），而且排在 udmabuf 之後才可用
 - **退回 CPU 傳輸時仍需要 CPU 版**，所以 GPU watcher 是多一份實作，不是換掉一份
 
-**迴圈形狀（第 5 步照抄）**：每拍逐 tile「hash → 沒變就跳 → 變了馬上 copy（tile 還在 cache）→
+**迴圈形狀（第 5 步照抄）**：每拍逐 **32-row band**「hash → 沒變就跳 → 變了馬上 copy（還在 cache）→
 存**copy 出來的位元組**的 hash → 記 damage」，掃完 damage 非空才呼叫 present_frame——
 沒有事件匯流排，「發事件」就是這一個呼叫；空 damage 的一拍下游完全不動。
+（原寫 64×64 tile；改 band 的理由：粒度的唯一消費者是「要不要跳過」這個決定，
+band 讓雜湊順著記憶體走，而且和 VNC sink 自己的 banding 同構。）
 存 copy-bytes 的 hash 而非第一次算的：guest 並發寫、無同步，hash 與 copy 之間內容可能又變，
 存前者會讓下一拍誤判重 copy（不漏、但多做工，症狀是動態畫面頻寬比預期高）；存後者自愈。
 最壞情況（全畫面在動）成本 ≈ 舊的無條件複製 + 一趟 cache 內的雜湊運算，不反噬。
+
+**damage 非空時 present 的是完整畫格，不是只有變的 band**：原生 sink 的 buffer 會輪替
+（沒有 buffer-age 追蹤），窄複製會留下舊區塊。**「跳過」才是贏的地方，「窄複製」是陷阱**；
+窄複製要等 buffer-age（或 setDamageRegion 那類真正的 rect 消費者）才合法。
+watcher 這邊靠 `read_buf` 跨拍持久解掉同一個問題：沒變的 band 留著上次的內容，
+所以 guest 記憶體只讀變了的部分，present 卻永遠是完整畫格。
 
 **一個要誠實記下的張力**：`cpu watcher × cpu copy` 這一格可以融合成一遍
 （讀一次，同時算雜湊、同時把變動的塊寫進 sink 的 buffer），省掉對 guest 記憶體的第二次讀。
@@ -798,8 +806,8 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 | 2 | ~~驗 simplefb + 原生顯示的顏色~~ | **已由觀測回答：正確**（Windows simplefb-only）。原因見 §4.4——BGRX 不變式；推論錯在哪見 §8（七） |
 | 3 | ~~原生 sink 實作 `has_consumer`~~ | **程式碼已收**：`Virtualization a049e2a` + `crosvm 0a1deb731`（非阻塞 predicate，避開 `waitForNativeSurface` 的停等）。**裝置驗收待做**：`simpleperf` 分「在看／不在看」兩格 |
 | 4 | ~~引入 `ScanoutFrame`，`present_frame` 收攏三個 CPU 複製點~~ | **程式碼已收**：儀器 `Virtualization 1213db9` + `crosvm 0208302e8`（`CROSVM_DISPLAY_HASH_FRAMES=1`，兩 sink 原生層 FNV-1a，重構線以下）；重構 `crosvm a2508bea8`。**裝置 A/B 待做**（A=`step4-A`、B=`step4-B` 於 scratchpad）。**已知條件**：site 1 原本是 flat memcpy，gralloc stride 有 padding 時會漸進剪切（潛伏 bug）——B 修掉它，所以 A/B 只在 stride 相等的路（VNC、simplefb sink）逐位元組相同；simplefb→原生（未觀測過的配置，§7）上 hash 不同是修 bug 不是回歸 |
-| 5 | `Screen` 定義（§3.2，長到本步消費的欄位為止）+ simplefb watcher：分塊雜湊取代無條件複製（§4.5）+ **輪詢率變設定**（今天是 `simplefb_display.rs:90` 的 `const DEFAULT_FPS=30`，硬編碼；改成 `--simplefb ...,poll-hz=N`，預設 30） | 靜止畫面每拍寫入為零、下游零推送；`last_changed_at` 會動；接上匯出端時立刻收到完整畫格；無匯出端時降到 liveness 頻率仍更新 `last_changed_at`（§3.4，liveness 頻率是簿記不是設定項）；`poll-hz` 設多少實測就是多少；**判準雙向，見 §9**。Screen 定義不預埋沒有消費者的欄位——它在本步才有第一個消費者，所以挪到本步 |
-| 6 | **匯出端 per-screen**：`display_backends` 從 fallback 清單改成 per-screen 綁定；`VncConfig` 變 list；android service name per-screen。**app 端同步 list 化** | VNC + 原生同時開時兩個都活（今天 VNC 靜默贏，§1.4）；單螢幕行為不變 |
+| 5 | simplefb watcher：band 雜湊取代無條件複製（§4.5）+ **輪詢率變設定**（今天是 `simplefb_display.rs` 的 `const DEFAULT_FPS=30`，硬編碼；改成 `--simplefb ...,poll-hz=N`，預設 30） | 靜止畫面每拍寫入為零、下游零推送（裝置訊號：FRAMEHASH 行停止）；接上匯出端時立刻收到完整畫格；無匯出端時降到 liveness 頻率仍更新 `last_changed_at`（§3.4，liveness 頻率是簿記不是設定項；此值本步只是 watcher 內部記錄，外部讀者在第 6 步）；`poll-hz` 設多少實測就是多少；**判準雙向，見 §9** |
+| 6 | **匯出端 per-screen**：`display_backends` 從 fallback 清單改成 per-screen 綁定；`VncConfig` 變 list；android service name per-screen；**`Screen` 定義在此落地**（§3.2——第一個消費者是綁定與 app 清單，所以從第 5 步再挪到這裡，不預埋）。**app 端同步 list 化** | VNC + 原生同時開時兩個都活（今天 VNC 靜默贏，§1.4）；單螢幕行為不變 |
 | 7 | 刪掉仲裁（§3.3 那一整組） | 行為不變；`external_scanout.rs` 整檔移除 |
 | 8 | 游標變螢幕定義的欄位（§3.5）+ `move_cursor` 改用 `scanout_id` | 游標只出現在 virtio-gpu 螢幕；切到 simplefb 後**游標消失而不是留在畫面上** |
 | 9 | 每螢幕「啟用輸入裝置」屬性（§5.3） | 關閉時該通道無絕對裝置；UI 明講需要重啟 VM |
