@@ -24,6 +24,13 @@ if [ -f crosvm_out/crosvm ]; then
     cp -f crosvm_out/crosvm "$MB/usr/bin/crosvm"
     for so in crosvm_out/*.so; do cp -f "$so" "$MB/usr/lib/"; done
 fi
+# The overlay only ever adds, so a lib that stops being built lingers from older payloads --
+# and a lingering PLATFORM lib is not dead weight, it is a shadow: the daemon launches crosvm
+# with LD_LIBRARY_PATH pointing here, so a stale libgui.so with the wrong Surface overloads
+# made /system/lib64/libmediandk.so undlopenable and killed the H.264 encoder on every device,
+# invisibly to every manual test that sets its own library path. Same class 2_build already
+# strips (libaaudio, libbinder_ndk); strip them here too so an old payload cannot resurrect one.
+rm -f "$MB/usr/lib/libgui.so" "$MB/usr/lib/libaaudio.so" "$MB/usr/lib/libbinder_ndk.so"
 
 # EDK2 firmware (built separately in edk2-gunyah: ./build.sh -DPCI_CAM_MODE=FALSE)
 if [ -f edk2-gunyah/edk2-gunyah.fd ]; then
