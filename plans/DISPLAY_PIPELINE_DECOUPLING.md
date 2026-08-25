@@ -820,8 +820,9 @@ VNC 的兩個 GPU 階（隨 11/13 步落地啟用）。預設＝當下最高可�
 
 **選單跟著匯出端、不跟裝置（2026-08-25 使用者釐清）**：兩塊的匯出端各自獨立、
 都能選 VNC；選了 VNC 就出現 VNC 的三階（含硬編），與這塊是 virtio-gpu 還是 simplefb 無關。
-未來註腳：simplefb＋原生的 Zero Copy 依 §4.1 永無資格——zero-copy 落地後那格對此組合維持停用，
-天花板語意下即使誤選也無害。
+**simplefb＋原生沒有 Zero Copy 這個選項**（使用者定；§4.1/§4.7 的結構論證：guest-memory-backed，
+AHB 包不了 guest 記憶體）——不是停用，是**不出現**，該格選單就兩階 CPU Copy / GPU Copy。
+完整矩陣：virtio-gpu＋原生 = CPU/GPU/Zero*；simplefb＋原生 = CPU/GPU；任一塊＋VNC = CPU/GPU*/硬編*。
 
 **VNC 的「GPU」不是只做 blit——是 blit 進 MediaCodec 硬編 H.264**：第 11 步（VNC GPU 半邊）
 與第 13 步（HwEncoder）因此是同一條路的兩段，H.264 的交付方式（RFB Open H.264 encoding 50
