@@ -793,17 +793,18 @@ Windows 下則反過來（simplefb 才是那個輸出）。
         顯示設定            解析度 / 輪詢率（poll-hz，即它的「刷新率」；DT 無 DPI）
         匯出設定            同上
 
-**「啟用顯示設備」與「渲染器」在 Virtio-GPU 塊內是兩個獨立軸**：
-渲染器選了、顯示關了 ＝ 零 scanout 的純 3D 加速裝置（guest 看不到 virtio-gpu output，
-桌面自然落在 simplefb）——這正是修掉「dormant scanout 勾走 Linux 桌面」問題的表達方式。
+**「啟用顯示設備」＝整個裝置的開關（2026-08-25 使用者二次定版）**：
+Virtio-GPU 塊關掉 → `--gpu` 參數整個消失（含渲染器），只剩 `--simplefb`。
+**零 scanout 純加速的狀態不存在**——使用者實測那個模式下 guest 桌面根本起不來，
+它從來不是可用配置；一度提議的 `no-scanout` 旗標與「移除預設 scanout 退路」都作廢。
+渲染器 section 是**裝置內的設定**（2D＝無加速、Virgl/GfxStream＝加速），不是獨立軸；
+舊 `gpu_enabled` 布林折進遷移（gpu_enabled 而顯示關 → 裝置關，本來就沒在動的組合）。
 
-**crosvm 側的表達（2026-08-25 使用者定版，取代一度提議的 `no-scanout=true` 旗標）：
-「定義了就存在」**。`--gpu` 沒給 `displays=` ＝ 零 scanout（**內建預設 1280×1024 scanout
-的退路移除**）；`--simplefb` 沒給 ＝ 沒有這個裝置。virtio-gpu 顯示與 simplefb 因此真平級：
-各自定義了才存在，沒有旗標、沒有互斥驗證，設定本身就是事實。
-（相容性後果：手動 cmdline 裸 `--gpu` 不再自帶螢幕——launch reference 要更新。）
+**「定義了就存在」落在旗標層**：`--gpu` 定義了＝裝置存在且有 scanout（app 一律連
+`displays=` 一起發）；`--simplefb` 定義了＝那個裝置存在。沒定義＝沒有。
 **CLI 形狀已確認（使用者選定）**：維持 `--gpu` 與 `--simplefb` 兩個旗標、語意與內部結構平級——
-不做「--gpu 可重複、simplefb 當一種 type」的統一旗標家族。
+不做「--gpu 可重複、simplefb 當一種 type」的統一旗標家族。crosvm 側唯一要動的是
+無綁定時的 Stub 靜音（ERROR 垃圾 → 一行 INFO）。
 
 **UI 命名**：匯出設定裡的傳輸控制叫「**傳輸管線**」（值與 §5.4 上限語意不變；
 CLI 鍵維持 `transport-cap`）。
