@@ -872,7 +872,16 @@ fourcc 宣告 ✓（TianoCore 橘 `(255,85,0)` 兩路逐位元組相同，R↔B 
 library path 所以看不見）——已修（meta `44de01d` 疊層剝除守衛 + prebuilt-root `f653df3`）並以
 正式配置重驗：DVH2、Qualcomm 硬編、NAL 正確、暫停語意成立。**後續強化清單**（非本輪）：
 側通道無讀取逾時/心跳（stall 凍結 console 且 RFB 仍被抑制）；退回後不再重探 H.264；
-首圖前的拒絕對使用者無提示；`input keyevent` 不達 guest；PresentationActivity 無 H.264 路 |
+首圖前的拒絕對使用者無提示；`input keyevent` 不達 guest；PresentationActivity 無 H.264 路
+
+**強化輪（2026-08-25 使用者核准 1/2/3；14 與多 scanout 維持排除）**：
+1. **側通道 liveness 契約**：心跳＝u32 長度 0 的幀，host 端 3s 無資料即發（drain 側計時）、
+   寫逾時 10s 斷停滯客戶端（`set_write_timeout`）；app 端 `soTimeout=10s`，逾時＝死亡→退回 RFB；
+   console 關閉必須關 socket + 收 reader 執行緒（修 E2E 抓到的洩漏）。舊 app 遇心跳＝退回 RFB（良性，兩側同 APK 出貨）。
+2. **DVHX 理由 token 化**：`no-encoder`（app 放棄重探＋顯示不可用註記）/`busy`（退避重試 5→10→15s cap）/
+   其他（退避重試）；退回後在 console 存活期間持續重探；首圖前被拒也給狀態註記（不再 gate 在 wasLive）。
+3. **鍵盤事件**：VMVncDisplayActivity 接 `dispatchKeyEvent`（實體/注入鍵→RFB keysym，重用既有映射；
+   系統鍵 BACK/HOME/音量留本地）；**PresentationActivity 補 H.264 路**（一個 TextureView + place() 鏡像）。 |
 | 11 | ~~VNC 的 GPU Copy 階~~ | **已收＋雙 tier PASS**：crosvm `f9b09f59a` + Virtualization `2a661d2`。headless blit ctx（`ensureTarget` 是唯一知道目標用途的成員——13 換成 MediaCodec input 即可）；stride 決策=packed 時映射即 offer（零複製）、padded 才重排，12 的縫不動；**顏色**：來源 fourcc 紅藍交換宣告讓 `vkCmdBlitImage` 免費換通道，首張全幀 md5 跨 2 開機×2 傳輸全同；**§7 vblank CONFIRMED**：30s 窗 406-416 offers，客戶端有無/傳輸種類皆不動 guest flush 率（一個 0→677 暫態被重複實驗排除）。fence=None 顯式覆寫。**兩個 app 阻塞待修**：`applyDisplayBlitEnv` 不認 VNC 綁定（env 不設 → ctx 起不來）；`isImplemented(VNC,GPU)`=false → 一律 cap CPU（放開即可，crosvm 零改動——gpu 天花板本來就不發旗標） |
 | 14 | Direct scanout（zero-copy，§4.7），gfxstream 先行 | 協商到 Direct 時桌面畫面與顏色不變；ctrl+alt+2 降級、切回升級，肉眼無縫；拔掉 app Surface 降級不卡 guest；矩陣記錄該格觀察到的**模式集合** |
 | — | **多 scanout 啟用** | **使用者決定先不做**；第 6 步做完後阻礙只剩 AIDL 的 serviceName list |
