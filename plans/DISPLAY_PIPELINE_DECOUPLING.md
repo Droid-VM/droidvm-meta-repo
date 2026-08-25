@@ -808,10 +808,14 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 **UI 命名**：匯出設定裡的傳輸控制叫「**傳輸管線**」（值與 §5.4 上限語意不變；
 CLI 鍵維持 `transport-cap`）。
 
-**傳輸選項維持 §4.6 的上限語意**（選了就一定可滿足），且**按匯出端分歧**（2026-08-25 使用者定）：
+**傳輸管線選單定版（2026-08-25 使用者定，取代先前的 自動/上限 寫法）**：
+選項本身就是階梯、**選的是天花板**（§5.4 上限語意），最高階即「自動」，不設獨立自動項：
 
-    原生顯示    自動 / 上限 GPU（blit）/ 上限 CPU
-    VNC        自動 / GPU（硬體編碼）/ CPU（傳統 RFB 軟編）
+    原生顯示    CPU Copy / GPU Copy / Zero Copy
+    VNC        CPU Copy / GPU Copy / GPU Copy(硬體編碼)
+
+未實作的階顯示但停用（標「未實作」）：原生的 Zero Copy（本輪排除）、
+VNC 的兩個 GPU 階（隨 11/13 步落地啟用）。預設＝當下最高可用階（原生=GPU Copy、VNC=CPU Copy）。
 
 **VNC 的「GPU」不是只做 blit——是 blit 進 MediaCodec 硬編 H.264**：第 11 步（VNC GPU 半邊）
 與第 13 步（HwEncoder）因此是同一條路的兩段，H.264 的交付方式（RFB Open H.264 encoding 50
