@@ -798,7 +798,15 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 桌面自然落在 simplefb）——這正是修掉「dormant scanout 勾走 Linux 桌面」問題的表達方式，
 需要 crosvm 的零 scanout 能力配合。
 
-**傳輸選項維持 §4.6 的上限語意**（自動／上限 GPU／上限 CPU；選了就一定可滿足），
+**傳輸選項維持 §4.6 的上限語意**（選了就一定可滿足），且**按匯出端分歧**（2026-08-25 使用者定）：
+
+    原生顯示    自動 / 上限 GPU（blit）/ 上限 CPU
+    VNC        自動 / GPU（硬體編碼）/ CPU（傳統 RFB 軟編）
+
+**VNC 的「GPU」不是只做 blit——是 blit 進 MediaCodec 硬編 H.264**：第 11 步（VNC GPU 半邊）
+與第 13 步（HwEncoder）因此是同一條路的兩段，H.264 的交付方式（RFB Open H.264 encoding 50
+vs 側通道）是第 13 步的設計題。`transport-cap` 枚舉屆時對 VNC 綁定加 `gpu` 值（加法擴充，
+不影響已釘的 `auto|cpu` 契約）。
 **Zero-copy 不在本次重構範圍**（§4.7 設計保留，第 14 步另議）。
 
 - **app 開啟該顯示時可選**
