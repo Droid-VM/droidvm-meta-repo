@@ -818,6 +818,17 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 | 14 | Direct scanout（zero-copy，§4.7），gfxstream 先行 | 協商到 Direct 時桌面畫面與顏色不變；ctrl+alt+2 降級、切回升級，肉眼無縫；拔掉 app Surface 降級不卡 guest；矩陣記錄該格觀察到的**模式集合** |
 | — | **多 scanout 啟用** | **使用者決定先不做**；第 6 步做完後阻礙只剩 AIDL 的 serviceName list |
 
+**第 6-9 步的收官驗證（2026-08-25，5567，真實 daemon 路徑）**：遷移正確（七個 legacy 鍵折進 `screens`，
+值保留；檔案重寫延遲到下次 UI 儲存是設計）；發射逐旗標對；**抓到一個硬阻斷並修掉**：
+per-screen socket 路徑爆 `SUN_LEN`——舊命名 106/107 只剩 1 字元餘裕，任何 screen 後綴都溢出，
+且 daemon 的 `bind()` 靜默截斷自報成功而 crosvm 正確拒絕（app `e5fda33` 修：socket 檔名是水管不載身分，
+縮成 `dvmin_<uuid>[_sc]_<ch>.sock` worst case 90，bind 前有響亮的長度檢查）。修後預設配置端到端：
+開機到 login、四路輸入接通、`(screen,channel)` routing 拒絕錯誤螢幕、乾淨停機。
+**部署程序陷阱**（進記憶）：APK 升級不殺 root daemon，舊 daemon 續跑舊碼——裝完必須 `kill -INT` 重啟。
+**遷移的一個可見後果**：legacy `display_backend=SIMPLEFB` + `gpu_enabled` 的 Linux VM 折成綁 simplefb，
+但桌面在 gpu-0 上——舊仲裁會把桌面搬過來、新模型要使用者自己把匯出端綁到 gpu-0（一次設定）。
+guest OS 決定正確答案（Windows 反之），遷移時不可判定，所以折 UI 所示、由使用者裁決。
+
 **優先度**：第 3 步便宜且直接影響今天的使用者（原生是 app 的兩個顯示模式之一）；
 第 6 步修掉「VNC + 原生同時開 → 原生永遠空白」；第 5、10 步影響 Windows guest 的桌面成本（§1.3）。
 
