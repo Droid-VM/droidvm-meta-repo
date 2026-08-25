@@ -1051,3 +1051,37 @@ damage 追蹤有一個乾淨的結構論證：「判斷粒度和複製粒度是�
 **建置協作**：請對方建置後、拿到 md5 前不改那些檔。
 建置飛行中改檔會編出改動前的版本，而失敗的外觀完全正常
 （exit 0、md5 算得出來、符號閘也過）。**唯一查得出來的是「產物 mtime vs 原始碼 mtime」。**
+
+## 10. 觸控斷觸：Windows contact aging（2026-08-26，已修）
+
+**症狀**（5568 w11 原生 console，touchscreen 模式）：長按一次，touchscreentest.com 計 4+ 個
+touchdown；按住不動會斷、拖動不斷；「按下→極小移動→斷，再移動多→正常」；press-and-hold
+右鍵永遠觸發不起來；Windows 觸控指示圈會時不時縮小。
+
+**切割過程**（每層都拿到實據才放行）：
+- 硬體 getevent：27.1s 單一不中斷 contact → 數位板無罪
+- app view/wire 兩層 log：每次長按都是乾淨的一對 DOWN...UP（最長 13.9s 零 CANCEL）→
+  ColorOS 防誤觸、app 手勢層、encoder 全部無罪（TOUCH 模式本來就 bypass
+  PointerGestureTranslator，面板自己沒有右鍵邏輯）
+- 但同一時段 guest 收到 ~36 個 touchdown（5 次乾淨長按）→ 斷點在 app 以下
+- daemon 轉發（blocking 整包 write）、crosvm socket source（純轉發無過濾）讀碼排除
+- vioinput HidTablet.c 狀態機讀碼排除（identifiable MT 路徑對 MOVE 流不會產生 lift）
+
+**定罪實驗**：`input motionevent DOWN → sleep 3 → MOVE(+5px) → UP` 同一格計 **2**；
+對照組同距離連續 swipe 計 **1**。→ 根因是 **Windows 觸控堆疊把「報告停止」的 contact
+當壞硬體殘留自動抬起**。真觸控硬體手指壓著時以掃描率持續回報（值不變也報）；我們的鏈
+是事件驅動，Android 只在座標變化時發 MOVE，手指靜止＝整條線靜默＝老化抬起，下一次微抖
+＝新的 touchdown。全部症狀由此一機制導出：拖動不斷（持續報告）、`input swipe` 長按不斷
+（注入器每幀發同座標 MOVE，等效硬體掃描——這也是為什麼合成重現不了）、Android Chrome
+正常（Android 無老化概念）、右鍵湊不滿 hold 門檻。
+
+**修法**（app 端，commit 5619406）：InputForwarder worker 改 scheduled executor；TOUCH 模式
+有 contact 期間每 50ms 重送所有 live contact 的最後座標（EvdevEncoder.encodeTouchKeepalive，
+= 一個安靜掃描週期本來會發的幀）。鏈在最後一指抬起時自然終止；成本 ~20 幀/s 六筆記錄，
+僅觸摸期間。Linux guest 的 input core 會濾掉同值 ABS，無感。
+
+**驗證**：修正前 2 / 修正後 1；8 秒兩段靜默長按也是 1。真手指驗證待使用者確認。
+
+**教訓**：兩個模型的斷層——「事件驅動（只在變化時發）」和「掃描驅動（存在期間持續發）」
+——在中間任何一層都看不見，只有最下游（Windows）對缺席的報告有意見。合成注入器本身
+是掃描驅動的，所以它天生重現不了這個 bug：這次「合成不能重現」本身就是關鍵線索。
