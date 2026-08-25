@@ -802,6 +802,8 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 的退路移除**）；`--simplefb` 沒給 ＝ 沒有這個裝置。virtio-gpu 顯示與 simplefb 因此真平級：
 各自定義了才存在，沒有旗標、沒有互斥驗證，設定本身就是事實。
 （相容性後果：手動 cmdline 裸 `--gpu` 不再自帶螢幕——launch reference 要更新。）
+**CLI 形狀已確認（使用者選定）**：維持 `--gpu` 與 `--simplefb` 兩個旗標、語意與內部結構平級——
+不做「--gpu 可重複、simplefb 當一種 type」的統一旗標家族。
 
 **UI 命名**：匯出設定裡的傳輸控制叫「**傳輸管線**」（值與 §5.4 上限語意不變；
 CLI 鍵維持 `transport-cap`）。
