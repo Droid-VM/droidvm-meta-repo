@@ -894,7 +894,16 @@ presentation overlay 過。**keyevent 結案：ROM 產物**——ColorOS 不把�
 **附帶抓到並修掉**：編輯器首開必炸（`currentTransport` 守 ISE 但真 widget 未 configure 拋 NPE；
 `6f5bf13` 改自追蹤 menu-built 旗標）——躲過所有檢查因為單元測試不 inflate 真 widget、
 裝置驗證全走 IPC 沒人開過編輯 UI（教訓入 memory：每輪交付前 am start 掃主要 Activity）。
-**已知小項**：已退回 RFB 註記約 6.5s 後被下一次 probe 的 wasLive=false 清掉（外觀性）。 |
+**已知小項**：已退回 RFB 註記約 6.5s 後被下一次 probe 的 wasLive=false 清掉（外觀性）。
+
+**simplefb GPU-copy OOM（2026-08-26 使用者回報 5568，已根治：crosvm `d4bb3f9c5`）**：
+SHARE 區域的頁以 order-0 shmem fault 進來（udmabuf GUP / watcher 讀），大頁模組只攔 order-9
+→ 繞池、落 CMA；GKI 6.6 udmabuf 是 ref 不是 pin → guest fault 時 gunyah 的 longterm pin
+遷不動 → `-12` vcpu 死。CPU copy 無長期 ref 所以沒事；5567 全綠是壓力不足的位置運氣。
+**修＝統一到池行為**（使用者定）：golden window 對 `SharedFramebuffer` 跑 LEND 同款
+populate+COLLAPSE（`mthp::fold_mapped_range` 重用），order-9 進池；udmabuf 只在
+「100% 覆蓋 **且** pin-probe 過」才建（collapse 成功≠池頁——§9 教訓的應用），否則退 CPU 帶理由。
+證據：重現 5/5、池帳本 1918 頁全屬 LEND 零屬 FB、修後 Win11 gpu-blit 221s 無 -12、cap 對照不變。 |
 | 11 | ~~VNC 的 GPU Copy 階~~ | **已收＋雙 tier PASS**：crosvm `f9b09f59a` + Virtualization `2a661d2`。headless blit ctx（`ensureTarget` 是唯一知道目標用途的成員——13 換成 MediaCodec input 即可）；stride 決策=packed 時映射即 offer（零複製）、padded 才重排，12 的縫不動；**顏色**：來源 fourcc 紅藍交換宣告讓 `vkCmdBlitImage` 免費換通道，首張全幀 md5 跨 2 開機×2 傳輸全同；**§7 vblank CONFIRMED**：30s 窗 406-416 offers，客戶端有無/傳輸種類皆不動 guest flush 率（一個 0→677 暫態被重複實驗排除）。fence=None 顯式覆寫。**兩個 app 阻塞待修**：`applyDisplayBlitEnv` 不認 VNC 綁定（env 不設 → ctx 起不來）；`isImplemented(VNC,GPU)`=false → 一律 cap CPU（放開即可，crosvm 零改動——gpu 天花板本來就不發旗標） |
 | 14 | Direct scanout（zero-copy，§4.7），gfxstream 先行 | 協商到 Direct 時桌面畫面與顏色不變；ctrl+alt+2 降級、切回升級，肉眼無縫；拔掉 app Surface 降級不卡 guest；矩陣記錄該格觀察到的**模式集合** |
 | — | **多 scanout 啟用** | **使用者決定先不做**；第 6 步做完後阻礙只剩 AIDL 的 serviceName list |
