@@ -45,7 +45,7 @@ GFXSTREAM_LOG_LEVEL=info GFXSTREAM_ARENA_MB=2048 $CROSVM_ROOT/crosvm --log-level
   --prepare-lend-mthp-mode chunked \         # ★mlock guest RAM(不加 → host reclaim guest 頁 → SIGBUS/隨機掛)
   --no-balloon \
   --protected-vm-without-firmware \          # protected VM,direct-kernel(無 EDK2)
-  --hypervisor "gunyah[blob_mode=guest-accept]" \  # ★GuestAccept:host SHARE + guest mem_accept
+  --hypervisor "gunyah" \                    # 2026-08-25 實測:blob_mode=guest-accept 已被拒收,app 現傳 plain gunyah
   --serial hardware=serial,num=1,type=stdout,earlycon=true \
   --vnc-server port=5900,input=tablet \      # 顯示 + 輸入(絕對座標 tablet 指標)
   --gpu='backend=gfxstream,context-types=gfxstream-vulkan,vulkan=true,gles=true,pci-bar-size=0x100000000,displays=[[mode=windowed[1920,1080],dpi=[320,320],refresh-rate=60]]' \
@@ -72,7 +72,7 @@ GFXSTREAM_LOG_LEVEL=info GFXSTREAM_ARENA_MB=2048 $CROSVM_ROOT/crosvm --log-level
 
 ## 4. 承重旗標(漏了會壞)
 
-1. `--hypervisor "gunyah[blob_mode=guest-accept]"` — GuestAccept 路(host `gunyah_share_66` SHARE + guest `gunyah_guest` mem_accept)。
+1. `--hypervisor "gunyah"`(2026-08-25 起:`blob_mode=guest-accept` 已被拒收,plain `gunyah` 即 GuestAccept 路)。**`--swiotlb 128` 是必要的**——缺了 VM_START 回 `No such device (os error 19)`,與 binary 無關。
 2. `--prepare-lend-mthp-mode chunked` — **mlock guest RAM**;漏了 host 會 reclaim guest 頁 → 隨機 SIGBUS/掛。
 3. `--gpu backend=gfxstream ... pci-bar-size=0x100000000` — 4GB host-visible BAR。
 4. host 端 `udmabuf size_limit_mb=4096` — 不設則 blob import 被 64MB 卡死。
