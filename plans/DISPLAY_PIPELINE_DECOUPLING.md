@@ -866,8 +866,9 @@ fourcc 宣告 ✓（TianoCore 橘 `(255,85,0)` 兩路逐位元組相同，R↔B 
 不在裝置上，下批 app 工單收）；APK 部署後 app 可能停在 SetupActivity（解壓頁），daemon
 要等 UI 過場才起——部署程序補一步。**兩個 app 側障礙**：turnip 要 16px 倍數寬（1400 不行、1408 可以，producer 不硬編 sink 規則，CPU 退路清楚可讀）；`applyDisplayBlitEnv` 只認 gpu-0 原生（simplefb+原生拿不到 Vulkan lib）。**兩 repo 同船閘**：app 預設配置發 `transport-cap=cpu`，舊 crosvm 拒啟——APK 打包天然滿足，手動混搭會炸 |
 | 11 | VNC 實作 GPU 半邊 | VNC 能吃 dmabuf；畫面與顏色不變；**guest vblank 不隨 VNC 客戶端有無而變**（§7） |
-| 12 | VNC sink 內部切 encoder / transport | **純重構**：錄 RFB 位元組流比對 |
-| 13 | `HwEncoder`（MediaCodec）+ H.264 側通道 | 新功能，不影響既有 RFB 客戶端；**對遠端價值大得多**（§1.3.1） |
+| 12 | VNC sink 內部拆「畫格匯流」：ingest（band diff 生產）與消費者（libvncserver）解耦，留出第二消費者的縫 | **純重構**：腳本化客戶端固定協商下，首張全幀 FramebufferUpdate 位元組 A/B 相同（先證捕獲自身確定性）；band/游標/重連行為凍結 |
+| 13 | H.264 硬編（**設計定版**）：`GPU Copy(硬體編碼)` 管線＝blit 進 MediaCodec input surface → **側通道**交付（獨立 TCP，length-prefixed Annex-B，SPS/PPS 內帶，連線即關鍵幀）；**RFB 協定不動**——legacy 客戶端由同一次 blit 的 CPU-visible 影像走傳統編碼（雙編碼僅在兩種客戶端並存時發生）；app 端 VNC console 偵測到側通道時改走 MediaCodec 解碼進 SurfaceView，輸入仍走 RFB | 新功能：既有 RFB 客戶端零影響（實測 legacy 客戶端在硬編引擎下仍收正確畫面）；側通道斷線自動退回 RFB 顯示；§7 的 MediaCodec-Vulkan 前提在此驗 |
+| 11 | VNC 的 `GPU Copy` 階：turnip blit → CPU-visible staging → libvncserver（12 的縫上第一個新消費路徑；排在 12 之後、13 之前） | VNC 能吃 dmabuf；畫面顏色不變；**guest vblank 不隨 VNC 客戶端有無而變**（§7） |
 | 14 | Direct scanout（zero-copy，§4.7），gfxstream 先行 | 協商到 Direct 時桌面畫面與顏色不變；ctrl+alt+2 降級、切回升級，肉眼無縫；拔掉 app Surface 降級不卡 guest；矩陣記錄該格觀察到的**模式集合** |
 | — | **多 scanout 啟用** | **使用者決定先不做**；第 6 步做完後阻礙只剩 AIDL 的 serviceName list |
 
