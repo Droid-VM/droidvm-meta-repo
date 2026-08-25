@@ -825,6 +825,14 @@ per-screen socket 路徑爆 `SUN_LEN`——舊命名 106/107 只剩 1 字元餘�
 縮成 `dvmin_<uuid>[_sc]_<ch>.sock` worst case 90，bind 前有響亮的長度檢查）。修後預設配置端到端：
 開機到 login、四路輸入接通、`(screen,channel)` routing 拒絕錯誤螢幕、乾淨停機。
 **部署程序陷阱**（進記憶）：APK 升級不殺 root daemon，舊 daemon 續跑舊碼——裝完必須 `kill -INT` 重啟。
+
+**使用者抓到的拆一半（2026-08-25 補完中）**：UI 已是兩列平級螢幕，但 `buildGpuCommand` 的
+`useDisplay = gpuScreen || fbScreen` 是仲裁時代謂詞的逐字翻譯，註解還在描述已刪的
+「simplefb bridge 餵 GPU 裝置」——**simplefb 螢幕開著也會給 GPU 裝置掛 scanout**，
+Linux guest 看到 virtio-gpu output 就把桌面畫過去而沒人匯出（= 終驗黑幀的根源）。
+修法分兩段：app 的 poll-hz + per-screen 幾何先行；謂詞翻轉（`gpuScreen` only）要等
+crosvm 能表達**零 scanout 的 GPU**（`displays=` 缺席時會退到內建 1280×1024 預設 scanout，
+dormant scanout 照樣勾走 Linux 桌面）＋無綁定 Stub 的噪音靜音，兩 repo 一張工單。
 **遷移的一個可見後果**：legacy `display_backend=SIMPLEFB` + `gpu_enabled` 的 Linux VM 折成綁 simplefb，
 但桌面在 gpu-0 上——舊仲裁會把桌面搬過來、新模型要使用者自己把匯出端綁到 gpu-0（一次設定）。
 guest OS 決定正確答案（Windows 反之），遷移時不可判定，所以折 UI 所示、由使用者裁決。
