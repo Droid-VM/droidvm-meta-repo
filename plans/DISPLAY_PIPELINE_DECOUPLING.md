@@ -868,7 +868,7 @@ fourcc 宣告 ✓（TianoCore 橘 `(255,85,0)` 兩路逐位元組相同，R↔B 
 | 11 | VNC 實作 GPU 半邊 | VNC 能吃 dmabuf；畫面與顏色不變；**guest vblank 不隨 VNC 客戶端有無而變**（§7） |
 | 12 | VNC sink 內部拆「畫格匯流」：ingest（band diff 生產）與消費者（libvncserver）解耦，留出第二消費者的縫 | **純重構**：腳本化客戶端固定協商下，首張全幀 FramebufferUpdate 位元組 A/B 相同（先證捕獲自身確定性）；band/游標/重連行為凍結 |
 | 13 | H.264 硬編（**設計定版**）：`GPU Copy(硬體編碼)` 管線＝blit 進 MediaCodec input surface → **側通道**交付（獨立 TCP，length-prefixed Annex-B，SPS/PPS 內帶，連線即關鍵幀）；**RFB 協定不動**——legacy 客戶端由同一次 blit 的 CPU-visible 影像走傳統編碼（雙編碼僅在兩種客戶端並存時發生）；app 端 VNC console 偵測到側通道時改走 MediaCodec 解碼進 SurfaceView，輸入仍走 RFB | 新功能：既有 RFB 客戶端零影響（實測 legacy 客戶端在硬編引擎下仍收正確畫面）；側通道斷線自動退回 RFB 顯示；§7 的 MediaCodec-Vulkan 前提在此驗 |
-| 11 | VNC 的 `GPU Copy` 階：turnip blit → CPU-visible staging → libvncserver（12 的縫上第一個新消費路徑；排在 12 之後、13 之前） | VNC 能吃 dmabuf；畫面顏色不變；**guest vblank 不隨 VNC 客戶端有無而變**（§7） |
+| 11 | ~~VNC 的 GPU Copy 階~~ | **已收＋雙 tier PASS**：crosvm `f9b09f59a` + Virtualization `2a661d2`。headless blit ctx（`ensureTarget` 是唯一知道目標用途的成員——13 換成 MediaCodec input 即可）；stride 決策=packed 時映射即 offer（零複製）、padded 才重排，12 的縫不動；**顏色**：來源 fourcc 紅藍交換宣告讓 `vkCmdBlitImage` 免費換通道，首張全幀 md5 跨 2 開機×2 傳輸全同；**§7 vblank CONFIRMED**：30s 窗 406-416 offers，客戶端有無/傳輸種類皆不動 guest flush 率（一個 0→677 暫態被重複實驗排除）。fence=None 顯式覆寫。**兩個 app 阻塞待修**：`applyDisplayBlitEnv` 不認 VNC 綁定（env 不設 → ctx 起不來）；`isImplemented(VNC,GPU)`=false → 一律 cap CPU（放開即可，crosvm 零改動——gpu 天花板本來就不發旗標） |
 | 14 | Direct scanout（zero-copy，§4.7），gfxstream 先行 | 協商到 Direct 時桌面畫面與顏色不變；ctrl+alt+2 降級、切回升級，肉眼無縫；拔掉 app Surface 降級不卡 guest；矩陣記錄該格觀察到的**模式集合** |
 | — | **多 scanout 啟用** | **使用者決定先不做**；第 6 步做完後阻礙只剩 AIDL 的 serviceName list |
 
