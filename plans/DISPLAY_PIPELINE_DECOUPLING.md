@@ -776,12 +776,30 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 **guest 輸出數 > 1 時，每個 guest OS 都需要一次性的手動設定步驟，
 那是產品面的持續成本，要寫進使用者文件。**
 
-### 5.3 每個螢幕有自己的設定（決定）
+### 5.3 圖形設定的形狀（2026-08-25 使用者定版）
 
-    設定 → 圖形 → 每個螢幕：
-        匯出端         VNC / 原生顯示
-        啟用輸入裝置    預設 on
-        可調屬性        依螢幕定義（§3.2）：simplefb 給輪詢率，virtio-gpu 給解析度/DPI/refresh
+**圖形分頁 = 兩大塊平級裝置，內部結構幾乎相同**：
+
+    Virtio-GPU 塊
+        啟用顯示設備        ← 這個裝置的螢幕（scanout）存在與否
+        渲染器 section      2D / Virglrenderer / GfxStream ＋ 各自子設定
+                            （圖形 API／主機驅動／顯存…——既有的三級 GPU 設定重組進來）
+        顯示設定            解析度 / 刷新率 / DPI（per-device，不再與 SimpleFB 共用）
+        匯出設定            匯出端(無/原生/VNC) ＋ 傳輸 ＋ 啟用輸入裝置
+
+    SimpleFB 塊
+        啟用顯示設備
+        （無渲染器 section——它天生 2D）
+        顯示設定            解析度 / 輪詢率（poll-hz，即它的「刷新率」；DT 無 DPI）
+        匯出設定            同上
+
+**「啟用顯示設備」與「渲染器」在 Virtio-GPU 塊內是兩個獨立軸**：
+渲染器選了、顯示關了 ＝ 零 scanout 的純 3D 加速裝置（guest 看不到 virtio-gpu output，
+桌面自然落在 simplefb）——這正是修掉「dormant scanout 勾走 Linux 桌面」問題的表達方式，
+需要 crosvm 的零 scanout 能力配合。
+
+**傳輸選項維持 §4.6 的上限語意**（自動／上限 GPU／上限 CPU；選了就一定可滿足），
+**Zero-copy 不在本次重構範圍**（§4.7 設計保留，第 14 步另議）。
 
 - **app 開啟該顯示時可選**
 - **切換匯出端 = 重新初始化該通道**
