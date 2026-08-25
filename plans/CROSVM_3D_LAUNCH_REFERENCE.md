@@ -87,3 +87,9 @@ GFXSTREAM_LOG_LEVEL=info GFXSTREAM_ARENA_MB=2048 $CROSVM_ROOT/crosvm --log-level
 | virtio-gpu 驅動 | `--params` 用 blacklist 擋 in-tree,好讓魔改版載 | 靠 DKMS `updates/dkms` 對 in-tree 的優先權自動載(blacklist 可省) |
 
 > 量產 app 走 UEFI 開機需磁碟 `/boot/initrd.img-<ver>` 正常(曾遇 2MB 壞 initrd → kernel panic,`update-initramfs -u` 修)。
+
+
+## 2026-08-25 追記
+- **手動部署不可混搭**：r259+ 的 app 預設會發 `transport-cap=cpu`（傳輸管線），舊 crosvm 不認這個鍵會拒啟；APK 內建的 crosvm 永遠成對，手動換 crosvm binary 時要用同批 build。
+- 手機重開機後 KSU 模組會掉：手動跑 VM 前先確認 `gunyah-kvcalloc`/`gunyah-host-share`/`gh-unmovable`/`udmabuf` 已載（缺 kvcalloc 的症狀＝`GH_VM_ANDROID_LEND_USER_MEM ... Out of memory (os error 12)`）；app daemon 啟動會自動載。
+- simplefb GPU 管線要 16px 倍數寬度（turnip LINEAR pitch 64-byte 對齊）：1400 退 CPU、1408 走 GPU，啟動行 `simplefb: transport=` 會說明。
