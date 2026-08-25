@@ -867,7 +867,12 @@ fourcc 宣告 ✓（TianoCore 橘 `(255,85,0)` 兩路逐位元組相同，R↔B 
 要等 UI 過場才起——部署程序補一步。**兩個 app 側障礙**：turnip 要 16px 倍數寬（1400 不行、1408 可以，producer 不硬編 sink 規則，CPU 退路清楚可讀）；`applyDisplayBlitEnv` 只認 gpu-0 原生（simplefb+原生拿不到 Vulkan lib）。**兩 repo 同船閘**：app 預設配置發 `transport-cap=cpu`，舊 crosvm 拒啟——APK 打包天然滿足，手動混搭會炸 |
 | 11 | VNC 實作 GPU 半邊 | VNC 能吃 dmabuf；畫面與顏色不變；**guest vblank 不隨 VNC 客戶端有無而變**（§7） |
 | 12 | ~~VNC 畫格匯流拆分~~ | **已收＋PASS：`aab68b2d1`**。縫在 C（狀態都在那側）；A rebuild 位元相同（build 可重現）；EDK2 選單跨開機不可重現 → 用 FRAMEHASH 的函數同一性論證；游標路徑 host harness 204 行 trace A≡B＋陰性對照 |
-| 13 | ~~H.264 硬編~~ | **已收＋tier 1 PASS**。host：crosvm `e15b27a0a` + Virtualization `a05556ff`（lazy encoder、DVH2/DVHX、SPS/PPS 連線快取、cap 四階 port 綁定實測、**§7 MediaCodec-Vulkan CONFIRMED**（有無 Vulkan blit 之 SPS+PPS+首 IDR 位元相同；橘色同像素同值、交換值零出現）；兩個真機才現形的修正：`consumer_generation` 取代 bool（消費者集合變化要重供給）、死 peer EOF peek）。app：`10634d9`+`c27d08b`（TextureView 疊層事件穿透、抑制=不處理訊息、`modifiedRegion` 語意保證無縫恢復、framing parser 11 測試）。**app↔host 端到端未合測**——最終部署 smoke 補 |
+| 13 | ~~H.264 硬編~~ | **已收＋tier 1 PASS**。host：crosvm `e15b27a0a` + Virtualization `a05556ff`（lazy encoder、DVH2/DVHX、SPS/PPS 連線快取、cap 四階 port 綁定實測、**§7 MediaCodec-Vulkan CONFIRMED**（有無 Vulkan blit 之 SPS+PPS+首 IDR 位元相同；橘色同像素同值、交換值零出現）；兩個真機才現形的修正：`consumer_generation` 取代 bool（消費者集合變化要重供給）、死 peer EOF peek）。app：`10634d9`+`c27d08b`（TextureView 疊層事件穿透、抑制=不處理訊息、`modifiedRegion` 語意保證無縫恢復、framing parser 11 測試）。**app↔host 端到端未合測**——最終部署 smoke 補。**已補（2026-08-25 終）**：初次接觸即通（連拒絕路徑都對）；抓到出貨阻斷——APK 殘留的
+`libgui.so` 陰影平台庫使 `libmediandk` 不可 dlopen、任何裝置都建不起編碼器（手動測試自設
+library path 所以看不見）——已修（meta `44de01d` 疊層剝除守衛 + prebuilt-root `f653df3`）並以
+正式配置重驗：DVH2、Qualcomm 硬編、NAL 正確、暫停語意成立。**後續強化清單**（非本輪）：
+側通道無讀取逾時/心跳（stall 凍結 console 且 RFB 仍被抑制）；退回後不再重探 H.264；
+首圖前的拒絕對使用者無提示；`input keyevent` 不達 guest；PresentationActivity 無 H.264 路 |
 | 11 | ~~VNC 的 GPU Copy 階~~ | **已收＋雙 tier PASS**：crosvm `f9b09f59a` + Virtualization `2a661d2`。headless blit ctx（`ensureTarget` 是唯一知道目標用途的成員——13 換成 MediaCodec input 即可）；stride 決策=packed 時映射即 offer（零複製）、padded 才重排，12 的縫不動；**顏色**：來源 fourcc 紅藍交換宣告讓 `vkCmdBlitImage` 免費換通道，首張全幀 md5 跨 2 開機×2 傳輸全同；**§7 vblank CONFIRMED**：30s 窗 406-416 offers，客戶端有無/傳輸種類皆不動 guest flush 率（一個 0→677 暫態被重複實驗排除）。fence=None 顯式覆寫。**兩個 app 阻塞待修**：`applyDisplayBlitEnv` 不認 VNC 綁定（env 不設 → ctx 起不來）；`isImplemented(VNC,GPU)`=false → 一律 cap CPU（放開即可，crosvm 零改動——gpu 天花板本來就不發旗標） |
 | 14 | Direct scanout（zero-copy，§4.7），gfxstream 先行 | 協商到 Direct 時桌面畫面與顏色不變；ctrl+alt+2 降級、切回升級，肉眼無縫；拔掉 app Surface 降級不卡 guest；矩陣記錄該格觀察到的**模式集合** |
 | — | **多 scanout 啟用** | **使用者決定先不做**；第 6 步做完後阻礙只剩 AIDL 的 serviceName list |
