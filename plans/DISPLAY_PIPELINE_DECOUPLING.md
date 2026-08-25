@@ -807,9 +807,9 @@ Windows 下則反過來（simplefb 才是那個輸出）。
 | 3 | ~~原生 sink 實作 `has_consumer`~~ | **已收 + 裝置驗收 PASS（2026-08-25，5567）**：`Virtualization a049e2a` + `crosvm 0a1deb731`。原生 sink、無 app 連接：橋執行緒 1.73% CPU（liveness 態；執行緒被 libbinder 改名 `Binder:crosvm`，靠 syscall=nanosleep 指認）；對照「說謊的預設 true」的反事實成本 27.11%（16×）；VNC 無消費者 1.56% ≈ 原生無 app 1.73%，兩 sink 收斂同一態。**殘留**：app 真的 attach → true 的正向臂未單測（日常使用即覆蓋） |
 | 4 | ~~引入 `ScanoutFrame`，`present_frame` 收攏三個 CPU 複製點~~ | **已收 + 裝置 A/B PASS（2026-08-25，5567）**：儀器 `Virtualization 1213db9` + `crosvm 0208302e8`；重構 `crosvm a2508bea8`。simplefb→VNC 1841 幀單一雜湊 A==B（獨立驗證非全黑：31 種取樣色；全零幀雜湊另算過不同）；`present_external` 4 幀全同，且**跨路交叉**：它的雜湊 == simplefb 直路的值——同一份位元組走兩個生產者。**覆蓋為零的兩處**：pool-scanout 站（EDK2 on 2D 走 `transfer_read`，未觸及的複製點；要真 3D guest 才到）與 padded-stride 原生路（已知條件：那裡不同是修剪切 bug 不是回歸）。site 2/3 數學同構是結構論證，pool 站以 3D 桌面目視 + 顏色驗收補 |
 | 5 | ~~simplefb watcher + poll-hz~~ | **已收 + 裝置驗收 PASS（2026-08-25，5567，三輪重現）**：`crosvm bb681a2a2`。無消費者 30s＝0 present；attach 邊緣恰好 1 張全幀；靜止+連線 30s＝0；按鍵流 24.0/s（<30 上限）、停鍵後歸零——**§9 雙向判準成立**；`poll-hz=10` 臂：啟動行印 `@ 10fps`、按鍵流 9.6/s ≤10。額外抓到：`NoFramebuffer` 掉格在 watcher 下需 `pending_present` 重供給（agent 實作時抓到並修，「掉格需要再供給」在迴圈內的應用）。附註：裝置端 crosvm 曾被 OPLUS lowmem（osvelte）外部 SIGKILL（mlock 892MB），量測窗皆在存活區間內，與顯示路徑無關 |
-| 6 | **匯出端 per-screen**：`display_backends` 從 fallback 清單改成 per-screen 綁定；`VncConfig` 變 list；android service name per-screen；**`Screen` 定義在此落地**（§3.2——第一個消費者是綁定與 app 清單，所以從第 5 步再挪到這裡，不預埋）。**app 端同步 list 化** | VNC + 原生同時開時兩個都活（今天 VNC 靜默贏，§1.4）；單螢幕行為不變 |
-| 7 | 刪掉仲裁（§3.3 那一整組；`simplefb_feed_loop` 同葬，watcher 版 `simplefb_display_loop` 成唯一路徑） | `external_scanout.rs` 整檔移除；**跨輪次出貨閘**：第 7 步之後「Windows VM + 原生顯示」要看到桌面必須把匯出端綁到 simplefb 螢幕——**APK 必須帶著 app 端螢幕綁定（第 6 步 app 側）一起部署**，crosvm 先行落地可以、但不可先行出貨，否則 Windows 使用者退化成凍住的 edk2 尾幀 |
-| 8 | 游標變螢幕定義的欄位（§3.5）+ `move_cursor` 改用 `scanout_id` | 游標只出現在 virtio-gpu 螢幕；切到 simplefb 後**游標消失而不是留在畫面上** |
+| 6 | ~~匯出端 per-screen（crosvm 側）~~ | **crosvm 側已收**：6a `98bb2a8cd`（`screen=gpu-0\|simplefb` 選擇器、Vec 化、1:1 驗證 + 14 測試；兩個「靜默→吵」的行為變化見 commit）＋ 6b `b375beceb`（simplefb 綁定就走自有 sink，GPU 在不在都一樣；VNC bridge 查無單例狀態）。**裝置 PASS**：雙 VNC（5900=gpu-0、5901=simplefb 異幾何）同時活 72s，各自的 FRAMEHASH/位元組數區分清楚。**app 側工單另行**（見下） |
+| 7 | ~~刪掉仲裁~~ | **已收：`b3fe7cf5e`**（+15/−488；刪除符號 grep 97→0 含註解；`feed_loop`/`present_external`/`external_scanout.rs` 同葬，`present_frame` 站點 3→2；snapshot 從未載過仲裁狀態，無需遷移；三個拼不出被刪名字的位置參數呼叫點由編譯器抓出）。**裝置確認新模型**：EDK2 在 2D 後端下 gpu-0 readback 黑（載具性質）、畫面在 simplefb 螢幕——舊碼會在 grace 後把它搬上 gpu-0，正是被刪掉的交接。**出貨閘未解除**：APK 仍須帶 app 端螢幕綁定一起部署 |
+| 8 | 游標：`move_cursor` 依 `scanout_id` 重掛（§1.4.1）+ scanout unbind/reset 時主動藏游標（§3.5 的缺口，不再靠 guest 自願）。**範圍修正**：「游標跨到 simplefb 螢幕」在協定上不可表達——`cursor_pos.scanout_id` 只索引 virtio-gpu scanout，simplefb 螢幕不在那個編號空間，且 simplefb 迴圈從不呼叫游標 API，**所以 simplefb 的 `cursor: None` 是結構性成立**；§8（五）當時把 host 螢幕與 virtio scanout 混為一談，補記於 §8（八） | 游標只出現在 virtio-gpu 螢幕（結構保證）；guest 停用 virtio-gpu 後（unbind/reset）**游標圖層被主動藏起而不是浮著**；`move_cursor` 的重掛與 `update_cursor` 同構 |
 | 9 | 每螢幕「啟用輸入裝置」屬性（§5.3） | 關閉時該通道無絕對裝置；UI 明講需要重啟 VM |
 | 10 | simplefb 走 udmabuf → 能產 `Dmabuf`（**目標是 GPU copy，不是 zero-copy，見 §4.1**） | simplefb + 原生走 GPU blit；**顏色不變**——這一步把 simplefb 從「無條件 swap」搬到「照 fourcc 選 VkFormat」，宣告錯就整張 R↔B 反且不報錯（§4.4） |
 | 11 | VNC 實作 GPU 半邊 | VNC 能吃 dmabuf；畫面與顏色不變；**guest vblank 不隨 VNC 客戶端有無而變**（§7） |
@@ -901,6 +901,15 @@ BGRX -> RGBA_8888"*——**就在我讀過並且引用了後半段的那個 hunk
 **可以推廣的那一條**：*"全樹只有一處"* 這種話，只有在**全樹**真的搜過才能說。
 我搜的是 `--include=*.rs`，而這條管線跨 FFI 到 C++。
 → **在跨語言邊界的管線上宣告「只有一處」之前，先問這條管線經過幾種語言。**
+
+**（八）「兩個螢幕並存所以 `move_cursor` 的 scanout_id 比對從第一天就必須發生」——推理錯，結論仍對但理由變弱。**
+
+（五）把 host 螢幕與 virtio-gpu scanout 混為一談：`cursor_pos.scanout_id` 只在 virtio-gpu
+的 scanout 編號空間裡取值，simplefb 螢幕根本不在其中，游標跨到它**協定上不可表達**——
+`cursor: None` 對 simplefb 是結構性質，不是要維護的規則。單 gpu scanout 之下
+`scanout_id` 恆 0，比對照舊是恆真。修 `move_cursor` 的理由退回原本的：
+多 scanout 啟用時才會咬人的已知缺陷，順手修掉比留著便宜。
+**錯誤形態**：在兩個不同的命名空間（host 螢幕 / virtio scanout）之間做了無標記的映射。
 
 ---
 
