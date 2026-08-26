@@ -23,10 +23,21 @@ VNC 指標今天注入的是 VM 全域組，而那組：
 
 ## 設計定案
 
-- **guest 可見裝置集不變**：每 input_enabled 螢幕一個 touchscreen + 一個 tablet，
+- **guest 可見裝置集**：每 input_enabled 螢幕一個 touchscreen + 一個 tablet，
   名字維持每螢幕命名（`DroidVM Touch (gpu-0)` 等）。全域 VNC 指標三件套消失。
-  RFB **鍵盤**維持 VM 全域（鍵盤語意本來就是 VM 級），沿用現有 display-window
-  keyboard 通道；VM 全域相對 mouse socket（app MOUSE 模式用）不動。
+- **鍵盤＝一把，所有源都接線**（使用者裁定「都接線到同一把鍵盤」）。
+  鍵盤也失效的機制與指標同源：事件遞送是按「display 擁有者」切分的——simplefb
+  bridge 是獨立 GpuDisplay 實例，GPU 存在時它的 event_devices 清單是空的，分派
+  迴圈對空清單迭代＝任何 kind 的事件（含鍵盤）靜默丟棄。裝置在，路不通。
+  修法：guest 只看到一把鍵盤（daemon 命名的那把），crosvm 內部改為
+  EventDevice-backed，事件源多路合流：
+  (a) 每個 DisplayVnc 一個共享 writer（`Arc<Mutex<...>>`，以「整個 report
+  （…直到 SYN_REPORT）為單位」持鎖寫入，防跨執行緒位元組交錯）；
+  (b) daemon 的 `--input keyboard[path=…]` socket 不再直接當裝置源，crosvm 連上後
+  由一個 pump 把 8-byte 記錄按 report 邊界轉寫進同一個 writer——**daemon 與 app
+  完全不用改**，seam 不動，只有 crosvm 內部的消費方式換了。
+  display-window keyboard 一併退役。
+  VM 全域相對 mouse socket（app MOUSE 模式用）不動。
 - **native 匯出的螢幕**：完全不變（tablet/touchscreen 都是 daemon socket）。
 - **VNC 匯出的螢幕**：touchscreen 照舊 socket；tablet 改由 crosvm 內部建立，
   事件端綁到該螢幕的 DisplayVnc——RFB pointer 事件（app 的 VNC console TABLET 模式
@@ -56,14 +67,19 @@ VNC 指標今天注入的是 VM 全域組，而那組：
    （`EventDevice::touchscreen`/`mouse` 同款包裝，kind=Tablet）交給該 binding 的
    DisplayVnc——gpu-0 走 `DisplayBackend::VncTcp` 的建立路徑、simplefb 走 bridge 的
    DisplayVnc 建立路徑，兩條都要把 channel 傳進去。
-3. DisplayVnc：RFB pointer 事件改寫進自己綁定的 channel（`EventDevice::send_report`
-   的框架現成），不再產生給全域分派的 pointer `GpuDisplayEvents`；鍵盤事件維持
-   走原分派（全域 keyboard）。
-4. 退役：`create_display_window_input_devices` 的 VNC 觸發路徑——
-   `!cfg.vnc_server.is_empty()` 的座標覆蓋、simplefb 分支（linux.rs:513）的指標
-   三件套、以及 vnc 自動開 `display_window_mouse` 的行為；keyboard 部分保留
-   （vnc 存在時仍建 keyboard 並照舊分派）。X11/其他平台路徑不動。
-5. 多 client：同一 VNC server 的多個 RFB client 注入同一顆 tablet——本來如此，維持。
+3. DisplayVnc：RFB pointer 事件改寫進自己綁定的 tablet channel、RFB 鍵盤事件寫進
+   共享 keyboard writer（見 4）；兩者都用 `EventDevice::send_report` 的框架，
+   `GpuDisplayEvents`/owner 分派這條路對 VNC 整個停用。
+4. 鍵盤合流：內部建一把 EventDevice-backed keyboard（名字＝daemon `--input
+   keyboard[name=…]` 傳的那個，沒有 name 就沿用現行預設名），共享 writer 發給每個
+   DisplayVnc；另起 pump 消費 daemon keyboard socket（`--input keyboard[path=…]`
+   參數形式不變，crosvm 內部從「socket 直作裝置源」改為「pump 進共享鍵盤」），
+   寫入以 report 為單位持鎖。
+5. 退役：`create_display_window_input_devices` 的 VNC 觸發路徑整組——
+   `!cfg.vnc_server.is_empty()` 的座標覆蓋、simplefb 分支（linux.rs:513）、
+   display-window keyboard/mouse/touch/tablet 全部（vnc 不再自動開
+   display_window_* 旗標）。X11/其他平台路徑不動。
+6. 多 client：同一 VNC server 的多個 RFB client 注入同一顆 tablet——本來如此，維持。
 
 ## daemon / app 半邊（DroidVM repo）
 
@@ -83,5 +99,7 @@ w11（5568）雙螢幕輸入全開：
    （綁定 tablet）——今天的死角。
 3. gpu-0 關 + simplefb vnc：照舊動（原本唯一活的 case，不得退化）。
 4. guest 裝置清單：每螢幕命名的裝置各就各位，"DroidVM VNC Touch/Tablet/Mouse"
-   三件套消失，RFB 鍵盤仍在。
+   三件套與 display-window keyboard 消失，鍵盤只剩 daemon 命名的一把。
+4b. 鍵盤三路驗證：app native console 打字、app VNC console 打字、TigerVNC 打字——
+   全部落在同一把鍵盤且都通（今天 simplefb-VNC-伴隨-GPU 的鍵盤是死的）。
 5. u26（Linux guest）VNC console 指標迴歸。
