@@ -67,6 +67,34 @@ translate 失敗即可，反正流量都在 pool 裡）。
     stock 驅動應直接可用（droidvm-guest-additions 目前也只有 gunyah_guest +
     virtio-gpu，沒有 snd 移植，正確：不需要）。
 
+## 次級 bug：chmap 數量不符（修復揭露，未修，排隊中）
+
+ACCESS_PLATFORM 修復落地後，u26（stock kernel、protected）**lent memory 錯誤消失、activate 過關**，
+但 guest `virtio_snd` probe 隨即 **-22 (EINVAL)**；host backend 同一時刻（時間戳逐秒吻合）報
+`[Card 0] start_id(0) + count(4) must be smaller than the number of chmaps (2)`
+（async_funcs.rs:960，處理 VIRTIO_SND_R_CHMAP_INFO）。修復前 activate 就死，驅動走不到 chmap
+查詢，這 bug 一直被遮著。
+
+**根因**（common_backend/mod.rs）：
+- config space 宣告數（line 558）：`chmaps = num_output_devices*3 + num_input_devices`
+  ——一條硬編公式，假設每個 output device 拿滿 3 個 layout。
+- 實際 chmap_info（line 757-779，`push_chmaps`）：按 device 的 `channels_max` **過濾**
+  `LAYOUTS = [(2ch),(4ch),(6ch)]`（`if channels > max_channels { continue }`）。這個過濾是
+  **對的且有意的**（line 718 註解：不給 stereo endpoint 宣告 6ch map，否則 Linux 把最寬的
+  map 交給 ALSA，guest 端就看得到不一致）。
+- 這台 output/input 都 2 聲道（AAudio 原生 stereo）→ 各只容 (2ch) 一個 → 實際 1+1=**2**；
+  config 公式算成 1×3+1=**4**。guest 信 config 查 [0,4)，backend 只有 2 → 回錯 → probe -22。
+- 連 test line 1367 `assert_eq!(..., 11); // (Output = 3*3)` 都洩露這假設，只在「所有 device
+  支援滿 6 聲道」時才碰巧正確。
+
+**修法**：config 的 chmaps 數量必須等於實際 `chmap_info.len()`。把 per-device 的「LAYOUTS 中
+channels<=channels_max 的個數」抽成一個函式，`hardcoded_virtio_snd_config` 與 `hardcoded_snd_data`
+共用，取代 line 558 的硬編公式；同步修 line 1367 的測試期望（不再是 3*3+1，而是按 caps 實算）。
+排在 single-port crosvm 改動之後（同一棵樹，避免建置飛行中改檔 + 混淆驗收）。
+
+**驗證**：u26 重開 → guest `cat /proc/asound/cards` 有卡、`dmesg` 無 -22；host 無 chmap 錯誤；
+非保護 VM 迴歸。SSH 進 guest 走 `root@<guest-ipv6>`（u26 IPv6 見使用者提供，會輪替）。
+
 ## 驗證計畫（fix 落地時）
 
 u26（stock kernel + restricted pool）+ 修過的 crosvm：
