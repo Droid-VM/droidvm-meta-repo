@@ -102,3 +102,32 @@ u26（stock kernel + restricted pool）+ 修過的 crosvm：
 2. guest `aplay` 出聲 / `arecord` 有樣本（端到端過 pool 反彈）；
 3. 對照：feature 未修的 crosvm 同 config 必現 activate failed（陽性對照）；
 4. 非保護 VM 迴歸：聲音照常。
+
+## Windows viosnd 驅動 vs stock virtio-snd 對齊審查（2026-08-26，讀碼完成）
+
+背景：viosnd 無 virtio-win 上游（vendored 自第三方 317764920/viosnd + DroidVM 自寫檔）。
+審查基準＝virtio-snd spec 與 stock 裝置（QEMU 類）行為。原則：只有延遲機制是 DroidVM
+獨有，其餘須 follow spec。
+
+**結論：未發現會讓 stock virtio-snd 不工作的讀取錯位。** 各軸：
+
+| 軸 | 判定 |
+|---|---|
+| chmaps | config 的 chmaps 數**只印 log**（ViosndVirtio.cpp:1514），`VIRTIO_SND_R_CHMAP_INFO` 定義了但**從不發出** → crosvm 的 chmap 虛報對 Windows 無影響（**這就是 w11 一直有聲、Linux 卻 probe -22 的原因**）；對 stock 也無影響，不查詢是 spec 合法的 |
+| channels | 從 PCM_INFO 的 channels_min/max 協商（ViosndFormat.cpp:394：hint 無效→範圍涵蓋 2 就選 2，否則 min）→ stock 的 1..N 範圍正確處理 |
+| formats/rates | 枚舉位序與 spec 逐一一致（IMA_ADPCM=0 起） |
+| direction | OUTPUT=0 / INPUT=1，對 |
+| nid 分組 | dedupe 是 **per (direction, nid)**（ViosndFindEndpoint(Set, capture, deviceIndex)）→ QEMU 全部 nid=0（1 out + 1 in）各建 endpoint，正確。限制：同方向同 nid 的第二條 stream 當 surplus 丟棄（stock 多 stream 配置會少露 endpoint——容量限制，非故障） |
+| vendor block | magic+version 把關（ViosndVirtio.cpp:822），stock 裝置讀到垃圾→歸零→「using defaults」；hint 索引有雙重邊界檢查 |
+| PCM_INFO 空回應重試 | 容忍 DroidVM backend 冷啟動的 zeroed 首答（race→wait）；stock 首答即正確，零依賴 |
+| feature bits | 只 mask VERSION_1 \| ACCESS_PLATFORM，不要求任何非 spec 位 |
+| jacks | 只 log 不查詢 → jacks=0（QEMU）OK |
+| rdmapool | 顯式退路：無池 → STATUS_NOT_FOUND → 普通 AllocateCommonBuffer；ViosndRdma.h 註解明寫「That is what runs on QEMU/KVM and on a pseudo-unprotected Gunyah VM」 |
+
+DroidVM 獨有機制全部是「有就用、沒有走預設」的加層（vendor hints / rdma staging /
+outstanding_packets 延遲參數），符合原則。使用者裁定（08-26）：允許保留的 DroidVM
+獨有機制＝延遲參數 **加上 preferred_output/input vendor hints**——兩者都以 magic/version
+把關、缺席走預設，不影響 stock 相容。兩個註記：
+1. 同方向同 nid 多 stream 只取第一條（見上）；
+2. vendor block 從 spec config 之後的固定偏移讀——stock 裝置 config 區較短，讀出界按
+   virtio-PCI 慣例回 0（magic 不符→預設路徑），慣例安全而非規格保證。
