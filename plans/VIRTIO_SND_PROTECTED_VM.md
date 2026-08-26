@@ -67,7 +67,7 @@ translate 失敗即可，反正流量都在 pool 裡）。
     stock 驅動應直接可用（droidvm-guest-additions 目前也只有 gunyah_guest +
     virtio-gpu，沒有 snd 移植，正確：不需要）。
 
-## 次級 bug：chmap 數量不符（修復揭露，未修，排隊中）
+## 次級 bug：chmap 數量不符（已修，crosvm 048f7374e；u26 實機出聲驗證通過）
 
 ACCESS_PLATFORM 修復落地後，u26（stock kernel、protected）**lent memory 錯誤消失、activate 過關**，
 但 guest `virtio_snd` probe 隨即 **-22 (EINVAL)**；host backend 同一時刻（時間戳逐秒吻合）報
@@ -143,3 +143,25 @@ outstanding_packets 延遲參數），符合原則。使用者裁定（08-26）�
 1. 同方向同 nid 多 stream 只取第一條（見上）；
 2. vendor block 從 spec config 之後的固定偏移讀——stock 裝置 config 區較短，讀出界按
    virtio-PCI 慣例回 0（magic 不符→預設路徑），慣例安全而非規格保證。
+
+## chmap 修復驗證（2026-08-26，完成）
+
+修法落地為結構保證：config 的 `chmaps` 直接取建好的 `SndData.chmap_info.len()`
+（兩個呼叫點都先建 SndData 再導出 config），不再有第二條公式可漂移。測試的期望值
+仍是 11（該設定 fallback 輸出是 6 聲道，舊公式在此碰巧吻合），但補上了真正能抓
+這類 bug 的斷言：`cfg.spec.chmaps == snd_data.chmap_info.len()`。
+
+實機（5568 u26，stock kernel，protected）：
+- `/proc/asound/cards`：card 0 = VirtIO SoundCard 出現；dmesg 零 virtio_snd 錯誤
+- host 本次開機 log：chmap／lent memory／activate failed 皆 0 筆
+- `speaker-test` 端到端：host 端 `AudioTrack: stop(72): 2,721,600 frames delivered`、
+  `AudioFlinger::unRegisterAudioTrackClient uid 10355`（snd backend 的 app uid）——
+  真實聲音資料流進了 Android 音訊系統
+
+## viosnd 端點通用化（使用者裁定 1+2，agent 實作中）
+
+裁定（08-26）：PR 未提、無現有安裝要顧——只做 (1) 端點鍵改 stream_id、
+(2) 同 nid 撞鍵按序配對；命名只要求唯一（stream_id 衍生即可），
+`VIOSND_MAX_ENDPOINTS`（每方向 4，恰容 app 的 4+4）不動。
+建置約束：本機無 EWDK，編譯驗證需 push 分支觸發 repo CI（待使用者放行）
+或使用者自有的建置管道。
