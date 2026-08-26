@@ -35,12 +35,21 @@ vring 配置在普通（=LEND 給 guest 的）記憶體，crosvm frontend 在 ac
 同檔案其他 hardcode（現在沒用到，將來會咬人）：`vhost/user/device/fs.rs:66`、
 `vhost/user/device/wl.rs:114`。
 
-## 修法（host 端，小改動）
+## 修法（host 端，小改動）——已排程，enc50 驗收後執行
 
-主程序自己 fork+exec `device snd`（它知道 protection type，也控制 argv）：
-給 snd 裝置參數加一個旗標（如 `access_platform=true`），protected VM 時傳入，
-`SndBackend::new` 據此用 `base_features(protection_type)`。或最簡單：backend 無條件
-宣告 ACCESS_PLATFORM（非保護 guest ack 後多走一層 DMA API，成本可忽略）。
+參數通道現成：`snd_helper::launch` 把整個 `SndParameters` serde 成 `--config-json`
+傳給子程序，而呼叫端 `create_unprivileged_virtio_snd_device(protection_type, ...)`
+（device_helpers.rs:615）**手上就有 protection_type**。三步：
+
+1. `devices/src/virtio/snd/parameters.rs`：`Parameters` 加 `pub access_platform: bool`
+   （serde default false，舊 JSON 相容）。
+2. `device_helpers.rs` 呼叫端：launch 前
+   `snd_params.access_platform = protection_type != ProtectionType::Unprotected`。
+3. `vhost/user/device/snd.rs:95`：`access_platform` 為真時 OR 進
+   `1 << VIRTIO_F_ACCESS_PLATFORM`。
+
+不動 in-process 路徑（common_backend 的 base_features 由呼叫端給，本來就對）；
+fs.rs/wl.rs 的同款 hardcode 不在本輪（沒用到，留註記即可）。
 
 **修復後唯一要實測的殘留變數**：`set_mem_table`（vhost_user_frontend/mod.rs:257）把
 **所有** region 連 shm fd 原樣送給 backend，含 lent 區域。guest 反彈後 backend 只會
