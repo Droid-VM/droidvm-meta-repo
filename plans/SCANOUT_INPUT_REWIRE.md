@@ -28,6 +28,31 @@
 - guest 會看到多把鍵盤（daemon 的一把 + 每個非 view-only VNC 螢幕各一把）——
   使用者明示接受，guest 對多鍵盤天然無感。
 
+
+## 第三次裁定（使用者，同日，最終版——keyboard 完全 per-scanout）
+
+    scanout 資源(scanout 隸屬 display 資源，display 沒開=完全沒有 input):
+    後端: VNC/native
+    輸入: (view-only=false): touchscreen/tablet/keyboard
+          (view-only=true): 不建立相關資源，不接線
+    VNC: crosvm 自己建需要的資源(tablet+keyboard 各一)，app 補建沒有的通道
+    DisplayVNC: if VNC server 開的，用 VNC 通道。else: 注入所屬資源 app 通道
+    Native: DisplayNative 直接注入所屬資源的 app 通道
+
+對第二版的增量（其餘全部維持）：
+1. **native 螢幕也有 per-scanout keyboard**（app/daemon 建：per-screen socket +
+   `--input keyboard[path=…,name=DroidVM Keyboard (<screenId>)]`），native console
+   打字注入自己螢幕的鍵盤。
+2. **VM 全域 keyboard socket/arg 退役**。語意收益：native 螢幕的輸入開關現在也
+   管鍵盤（舊全域鍵盤無視 per-screen 開關）。
+3. view-only / input off 對三種資源一體適用：不建 socket、不建裝置、不接線。
+4. 名字 seam 延伸：daemon 端 keyboard 命名與 crosvm 端 VNC keyboard 同格式
+   `DroidVM Keyboard (<screenId>)`。
+5. crosvm 增量：只需確認/補上 `--input keyboard[…]` 的 `name=` 欄位與多鍵盤裝置
+   支援；VNC 半邊不變。
+6. 假設（未被裁定推翻則維持）：VM 全域**相對 mouse** socket 不動——它是 console
+   的 MOUSE 模式載具，不是 scanout 資源。
+
 ## 修的 bug（診斷已完成，三 case 全對上）
 
 VNC 指標今天注入的是 VM 全域組，而那組：
