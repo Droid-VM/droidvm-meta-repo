@@ -124,6 +124,18 @@ u26（stock kernel + restricted pool）+ 修過的 crosvm：
 | jacks | 只 log 不查詢 → jacks=0（QEMU）OK |
 | rdmapool | 顯式退路：無池 → STATUS_NOT_FOUND → 普通 AllocateCommonBuffer；ViosndRdma.h 註解明寫「That is what runs on QEMU/KVM and on a pseudo-unprotected Gunyah VM」 |
 
+
+### stock host 相容補充軸（同日，讀碼完成——這四項 QEMU 端會嚴格驗）
+
+| 軸 | 判定 |
+|---|---|
+| virtqueue 索引 | `VIRTIO_SND_VQ_CONTROL=0/EVENT=1/TX=2/RX=3`（VirtioSnd.h:77-81），逐一符合 spec 順序 |
+| SET_PARAMS 整除性 | `BufferBytes = PeriodBytes × NotificationCount`、period 先取整到整數 frame（ViosndPcm.cpp:99-112）→ buffer 恆為 period 整數倍，QEMU 的 `buffer % period` 檢查必過 |
+| PCM xfer 框架 | `sg[0]`=xfer header+payload（out）、`sg[1]`=status（device-writable in）、`add_buf(...,1,1,...)`（ViosndVirtio.cpp:1952-1955）——spec 標準框架 |
+| 狀態機順序 | SET_PARAMS→PREPARE→START→STOP→RELEASE；capture 的 RELEASE-without-STOP 已在移植時修正（見既有記錄）|
+
+結論不變且更強：**驅動對 stock virtio-snd host 相容**，包括 QEMU 端嚴格驗證的部分。
+
 DroidVM 獨有機制全部是「有就用、沒有走預設」的加層（vendor hints / rdma staging /
 outstanding_packets 延遲參數），符合原則。使用者裁定（08-26）：允許保留的 DroidVM
 獨有機制＝延遲參數 **加上 preferred_output/input vendor hints**——兩者都以 magic/version
