@@ -134,3 +134,42 @@ w11（5568）雙螢幕輸入全開：
 4c. view-only：關掉某 VNC 螢幕的輸入裝置 → 該 binding 無 tablet/keyboard、
    RFB 輸入被丟棄、其他螢幕不受影響。
 5. u26（Linux guest）VNC console 指標迴歸。
+
+## 上機驗收（2026-08-26）：一半通過，露出一個 virtio-gpu-specific 的殘留 bug
+
+**simplefb VNC 輸入修好了（今天的核心死角）**：w11 雙 VNC（gpu-0+simplefb 都 vnc）下，
+從 5901（simplefb）打字，guest notepad 收到（`sfb111 sfb222` 到、即時對照）。這正是
+重構前 GPU+simplefb 併存時 simplefb VNC 完全不通的那條路。crosvm 端 log 也確認
+per-binding 建立：`VNC port 5900/5901: input -> this binding's own tablet + keyboard`。
+
+**gpu-0 VNC 輸入在 Windows guest 上仍死（新發現的殘留 bug，非重構引入）**：
+- 決定性 diag（在 drain_c_events/inject_next_event 埋 fd 標記）：w11 上只有 simplefb 的
+  DisplayVnc（fd=262）有 drain+inject；gpu-0（5900）的 RFB 事件**從不 drain、從不 inject**。
+- 對照：**u26（Linux guest，有 virtio-gpu 驅動）兩個 VNC 輸入都有反應**（使用者實測）。
+- 根因：gpu-0 的 DisplayVnc dispatch loop 由 **virtio-gpu worker** 驅動
+  (mod.rs process_display → GpuDisplay::dispatch_events)，simplefb 的由 bridge 自己的
+  輪詢迴圈驅動。RFB input 經 C 端 `ring_push` write DisplayVnc.event(eventfd)，該 event
+  註冊在 gpu-0 GpuDisplay.wait_ctx（epoll），virtio-gpu worker 監聽該 epoll fd
+  (display_desc)。理論上 RFB input 應喚醒 worker → process_display → dispatch → inject。
+  **但在 guest 不驅動 virtio-gpu 時（Windows：UEFI 後無 flip、無 gpu 命令），worker
+  block 在 `wait_ctx.wait()`，RFB event fd 沒有有效喚醒它**。有 gpu 活動時（Linux），
+  worker 靠 gpu 命令/flip 頻繁醒來，順帶 drain 掉 RFB input，所以看起來正常——這掩蓋了
+  event-fd 喚醒路徑本身失效。
+
+**這不是重構引入的**：VNC 輸入本來就走 VM 全域組（owner-scoped fan-out），同樣由
+virtio-gpu worker 驅動；重構前 gpu-0 vnc 在無驅動 guest 上一樣不會動（使用者原始狀況表
+case 1「兩個都不工作」）。重構修好了 simplefb 半邊，gpu-0 半邊的這個 worker-wakeup
+缺陷被獨立暴露出來。
+
+**待修（下一輪，未動手）**：讓 gpu-0 的 RFB input event fd 能真正喚醒 virtio-gpu worker。
+方向候選（需讀碼定奪）：
+1. 確認 gpu-0 GpuDisplay.wait_ctx 的 epoll 是否 level-triggered 且 DisplayVnc.event 真的
+   在其中、且 worker 的 event_manager 監聽的 display_desc 確實是該 epoll fd——用 diag
+   `VNCDIAG worker woke on Display token` 驗證 worker 到底有沒有醒（本輪 diag 已埋好碼但
+   binary swap 卡 text-file-busy 未跑成，diag 已從原始碼清除）。
+2. 若 worker 根本沒醒 → event fd 沒進 worker 的 wait context，或 GpuDisplay.as_raw_descriptor
+   回的 epoll fd 對 eventfd 的 level 語意有落差 → 補直接監聽或改喚醒機制。
+3. 備選：像 simplefb 那樣給 VNC binding 一個獨立的輸入輪詢，不依賴 virtio-gpu worker
+   ——但要避免和 gpu 顯示路徑的 dispatch 競爭。
+
+diag 已從原始碼移除；部署過的 diag binary 是暫時的，最終 binary 應是無 diag 的乾淨版。
