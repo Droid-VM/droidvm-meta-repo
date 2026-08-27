@@ -1,13 +1,22 @@
 #!/bin/bash
-# Pull the crosvm soong tree via the stable manifest (its main branch), then check the
-# Droid-VM forks out along this meta repo's branch chain (see lib_branch.sh). That way
-# every dev branch reuses the same manifest instead of re-pinning it per branch, and a
-# variant branch inherits the trunk from any component that does not carry one.
+# Pull the crosvm soong tree via the manifest, then check the Droid-VM forks out along
+# this meta repo's branch chain (see lib_branch.sh). The manifest follows the same chain
+# as every other component: which AOSP projects the tree needs is itself branch-specific
+# work -- a branch that starts linking a new platform library has to add the projects that
+# build it -- so pinning every branch to one manifest would make that change land on
+# branches that cannot use it. main stays in the chain as the last resort, so a branch that
+# has not published a manifest of its own still gets the stable one.
 set -e
 cd "$(dirname "$0")"
 source ./lib_branch.sh
 
-[ -d crosvm-minimal-manifest ] || git clone https://github.com/Droid-VM/crosvm-minimal-manifest.git
+MANIFEST_URL=https://github.com/Droid-VM/crosvm-minimal-manifest.git
+MANIFEST_BRANCH=$(pick "$MANIFEST_URL" $(branch_chain) main)
+[ -n "$MANIFEST_BRANCH" ] || {
+    echo "error: $MANIFEST_URL has none of: $(branch_chain) main" >&2
+    exit 1
+}
+clone_at crosvm-minimal-manifest "$MANIFEST_URL" main
 clone_at droidvm-guest-additions https://github.com/Droid-VM/droidvm-guest-additions.git
 # mesa is the one component with genuinely different content per variant (two unrelated
 # upstreams), so its variant branch is real rather than an alias of the trunk.
@@ -19,7 +28,7 @@ clone_at mesa-cross https://github.com/Droid-VM/mesa-cross.git
 
 mkdir -p crosvm_build
 cd crosvm_build
-repo init -u https://github.com/Droid-VM/crosvm-minimal-manifest.git -b main -m crosvm-minimal.xml --depth 1
+repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" -m crosvm-minimal.xml --depth 1
 repo sync -c
 cd ..
 
