@@ -1,9 +1,9 @@
-# pr/3d-accel 扁平化計畫（2026-08-31 修訂）
+# pr/3d-accel 扁平化計畫（2026-08-30 修訂，當日第三版）
 
 一項功能一個 commit，順序 **L**(licensing) → **M**(GPU 無關) → **G**(路線共用 GPU 基礎) → **D**(drm2kgsl) → **X**(gfxstream) → **V**(venus)。
 他人 commit 併入功能 commit，作者掛 `Co-authored-by:`。
 
-**08-29 之後又進來 12 個 commit，但只長出一個新的 commit 位。** 其餘都是既有功能的修正或重構
+**08-29 之後又進來 21 個 commit（全部在 08-30 當天），但只長出一個新的 commit 位。** 其餘都是既有功能的修正或重構
 （ASCII/fmt 收尾、legacy key 清除、共用終端機面板、大頁進階畫面、Linux VM 密碼路徑、顏色邊界落地），
 格子本來就亮著。唯一的新格是 **R**（nproc 救援模組）。
 
@@ -18,9 +18,9 @@
 
 | repo | 縮寫 | base | head | 範圍內 commits |
 |---|---|---|---|--:|
-| droidvm-3d-accel（meta） | meta | 空樹 | 679ae55 | 303 |
+| droidvm-3d-accel（meta） | meta | 空樹 | abaac00 | 304 |
 | mesa-cross | cross | 空樹 | 2586325 | 19 |
-| DroidVM（app） | app | `origin/master` | 5f22fe8 | 129 |
+| DroidVM（app） | app | `origin/master` | 892bc02 | 130 |
 | edk2-gunyah | edk2 | `origin/master` | 4fb0b84 | 8 |
 | gunyah_host_mod | hmod | 空樹 | e1280d8 | 38 |
 | droidvm-guest-additions | gmod | 空樹 | d7e6713 | 40 |
@@ -31,13 +31,30 @@
 | mesa | mesa | mesa main `74d4e41b2bb` | 6ad3bcbcfca | 76 |
 | crosvm-minimal-manifest | mfst | 空樹 | 29de119 | 11 |
 | gunyah-guest-drivers-windows | win | 上游 virtio-win | 8d12ff0e（`master-squash`） | 18 |
-| gh-hugepage-reserve | hp | `upstream/master` | bdf9062 | 23 |
 
-`hp` 從 29 掉到 23，是 v12（`bdf9062`）把 v9/v11 疊出來的補丁路徑整包重寫成 SOLID 結構的結果，
-不是有東西被丟掉。`win` 形狀與其他欄不同：base 是上游 virtio-win、上游目標也是 virtio-win，
+**`gh-hugepage-reserve`（舊 `hp` 欄）已經退出這張表。** 它自己走上游流程，v12（`bdf9062`）已推去
+Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額外作者（samfor12、BigfootACA）
+也跟著離開署名表。
+
+**但「退出表格」不等於「沒有牽連」，而且牽連有兩條，不是一條：**
+
+1. **`/dev/gh_pinprobe`**（見註⁷與 §3.10）——執行期相依，crosvm 半邊只需要在節點缺席時不當機。這條很輕。
+2. **M5 的 app 半邊整個是那個專案的管理面板**——這條重得多，而且 hp 還在欄裡時被 M5/hp 那一格遮著。
+   12 個 app 檔案指名 `gh-hugepage-reserve`：`HugePageModel` 讀寫它 Magisk 模組的
+   `settings.prop` / `module.prop` / `disable` / `load.sh` / `kapi_check`，`rmmod` 它，
+   並且**按它的 v6/v7 sysfs 差異分支**；`KernelModuleListController` 與 `HugePageActivity`
+   還寫死了 `https://github.com/Droid-VM/gh-hugepage-reserve/releases` 當下載連結。
+
+   也就是說 `pr/3d-accel` 的 M5 會依賴一個**審查者在同一份 PR 裡看不到**的 sysfs／settings.prop 介面，
+   而且是版本相依的。這件事要先決定怎麼講（見 §8）。
+
+`win` 形狀與其他欄不同：base 是上游 virtio-win、上游目標也是 virtio-win，
 而且**它已經自己扁平過了**（153 → 18 commits 在 `master-squash`）。
 
-**以上 head 全部已推上 org 的 `wip/3d-accel`**（08-30）。所有 repo 的工作區都是乾淨的，只剩 DroidVM 的
+**上一輪（08-30）推送時，以上 head 都在 org 的 `wip/3d-accel` 上；之後 meta 與 app 各自又多了 commit**
+（meta `abaac00`、app `892bc02`），要跟著這份修訂一起推。meta 這一列永遠會落後一步——這份文件就住在
+它描述的 repo 裡，每次更新它自己就多一個 commit。
+所有 repo 的工作區都是乾淨的，只剩 DroidVM 的
 `assets/prebuilts` submodule 髒著——那是本機重編的 payload（已含 `nproc-guard-gki-*.ko`），
 要推回 Droid-VM/DroidVM-Prebuilts 才輪得到指標 bump，而且它比目前的 crosvm HEAD 舊，下一次建 APK 會重生。
 
@@ -48,71 +65,70 @@
 
 `o` = 扁平後這個 repo 會有這個 commit　`-` = 不涉及
 
-| # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | hp |
-|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **L** | Licensing | o | o | o | o¹ | o | o | o | - | o | o | o | - | - | o |
-| **M1** | 建置管線與打包 | o | o | o | - | o | o | o | - | o | - | o | o | o | - |
-| **M2** | DisplayFramework 重構 | - | - | o | - | - | - | o | o | - | - | - | - | - | - |
-| **M3** | 磁碟與儲存² | - | - | o | - | - | - | o | - | - | - | - | o | - | - |
-| **M4** | VM 平台雜項³ | - | - | o | o | o | - | o | - | - | - | - | - | - | - |
-| **M5** | 核心模組管理與大頁（含 settings.prop 進階畫面） | - | - | o | - | o | - | - | - | - | - | - | - | - | o |
-| **R** | nproc 救援模組（`nproc_guard`）⁵ | - | - | o | - | o | - | - | - | - | - | - | - | - | - |
-| **N** | 網路預設與設定精靈步驟 | - | - | o | - | - | - | - | - | - | - | - | - | - | - |
-| **AG** | 客體代理操作（無頭 agent VM）⁴ | - | - | o | - | - | - | - | - | - | - | - | - | - | - |
-| **C** | vCPU 放置（affinity / capacity / cluster） | - | - | o | - | - | - | o | - | - | - | - | - | - | - |
-| **S** | 序列埠：SBSA UART / pty / USB ACM / PM reset | - | - | o | o | - | - | o | - | - | - | - | - | - | - |
-| **A** | 虛擬音效卡（virtio-snd + AAudio 端點）ᴬ | o | - | o | - | - | - | o | - | - | - | - | - | o | - |
-| **MED** | virtio-media：相機 / VPU⁶ᴬ | o | - | o | - | - | - | o | - | - | - | - | o | - | - |
-| **P** | pseudo-unprotected VM + boot shim | o | - | o | o | o | o | o | - | - | - | - | - | - | - |
-| **W** | Windows guest 支援（pVM 驅動移植） | o | - | - | o | - | - | - | - | - | - | - | - | o | - |
+| # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **L** | Licensing | o | o | o | o¹ | o | o | o | - | o | o | o | - | - |
+| **M1** | 建置管線與打包 | o | o | o | - | o | o | o | - | o | - | o | o | o |
+| **M2** | DisplayFramework 重構 | - | - | o | - | - | - | o | o | - | - | - | - | - |
+| **M3** | 磁碟與儲存² | - | - | o | - | - | - | o | - | - | - | - | o | - |
+| **M4** | VM 平台雜項³ | - | - | o | o | o | - | o | - | - | - | - | - | - |
+| **M5** | 核心模組管理與大頁（含 settings.prop 進階畫面） | - | - | o | - | o | - | - | - | - | - | - | - | - |
+| **R** | nproc 救援模組（`nproc_guard`）⁵ | - | - | o | - | o | - | - | - | - | - | - | - | - |
+| **N** | 網路預設與設定精靈步驟 | - | - | o | - | - | - | - | - | - | - | - | - | - |
+| **AG** | 客體代理操作（無頭 agent VM）⁴ | - | - | o | - | - | - | - | - | - | - | - | - | - |
+| **C** | vCPU 放置（affinity / capacity / cluster） | - | - | o | - | - | - | o | - | - | - | - | - | - |
+| **S** | 序列埠：SBSA UART / pty / USB ACM / PM reset | - | - | o | o | - | - | o | - | - | - | - | - | - |
+| **A** | 虛擬音效卡（virtio-snd + AAudio 端點）ᴬ | o | - | o | - | - | - | o | - | - | - | - | - | o |
+| **MED** | virtio-media：相機 / VPU⁶ᴬ | o | - | o | - | - | - | o | - | - | - | - | o | - |
+| **P** | pseudo-unprotected VM + boot shim | o | - | o | o | o | o | o | - | - | - | - | - | - |
+| **W** | Windows guest 支援（pVM 驅動移植） | o | - | - | o | - | - | - | - | - | - | - | - | o |
 
 **N** 與 **AG** 來自同一個 mega-commit `ca184f0`（61 檔 +4213/−882），連同 M3 的擴充，扁平時要按三列拆開。
 
 **R 是 08-30 唯一的新列。** 它只有兩格，而且兩格本來就亮著——如果你認為救援模組只是 `setresuid`
-修正的附屬品，把 R 併進 **M5** 即可，總數回到 130，其他什麼都不用動。分開列的理由是它是一個
+修正的附屬品，把 R 併進 **M5** 即可（兩列亮的都是 app＋hmod），總數變成 127，其他什麼都不用動。分開列的理由是它是一個
 自帶 sysfs 介面與 insmod 參數的獨立模組，扁平後 hmod 那半沒辦法誠實地塞進「核心模組管理」那一筆。
 
 ## 2. 表二：G + 路線列
 
-| # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | hp |
-|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **G1** | Gunyah 記憶體共享⁷ | - | - | o | - | o | o | o | - | - | - | - | - | - | o |
-| **G2a** | 開機期 blessed pool | - | - | o | o | - | o | o | - | - | - | - | - | - | - |
-| **G2b** | guest-alloc pool | - | - | o | - | - | o | o | - | - | - | - | - | - | - |
-| **G2c** | 可成長 pool（`droidvm,pool-size`） | - | - | o | o | o | o | o | - | - | - | - | - | - | - |
-| **G2d** | udmabuf 模組與界限（三邊 65536） | - | - | o | - | o | o | o | - | - | - | - | - | - | - |
-| **G6** | 執行期 parcel 直接匯入 DMA-BUF⁸ | - | - | - | - | o | - | o | - | - | - | - | - | - | - |
-| **G3** | Scanout 與 blit 路徑（含每個 sink 自報 fourcc） | - | - | o | - | - | o | o | o | - | o | - | - | - | - |
-| **DP** | 顯示管線解耦（Screen / Frame / Exporter、多螢幕、per-binding 輸入） | o | - | o | - | - | o | o | o | - | - | - | - | - | - |
-| **H** | VNC 硬體 H.264（RFB encoding 50 + `DVH1`） | o | - | o | - | - | - | o | o | - | - | - | o | - | - |
-| **G4** | GPU 排程（cpuset / RT，**依賴 C**） | - | - | o | - | - | - | o | - | - | - | - | - | - | - |
-| **G5** | zink 與 wsi 共用修正 | - | - | - | - | - | - | - | - | - | - | o | - | - | - |
-| **Q** | virglrenderer QEMU resource-info 相容 API | - | - | - | - | - | - | - | - | - | o | - | - | - | - |
-| **D** | drm2kgsl 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - | - |
-| **X1** | gfxstream 路線接線⁹ | o | - | o | - | - | o | o | - | - | - | o | - | - | - |
-| **X2** | fd 外部記憶體模式 + HMI HAL（取代舊 AHB 適配） | - | - | - | - | - | - | - | - | o | - | o | - | - | - |
-| **X3** | host-visible 後端、ring blob 池與 folio 政策¹⁰ | - | - | - | - | - | - | o | - | o | - | - | - | - | - |
-| **X4** | Vulkan decoder 強化與生命週期 | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
-| **X5** | ASG 傳輸（consumer / framing / seqno） | - | - | - | - | - | - | - | - | o | - | o | - | - | - |
-| **X6** | guest blob 匯入與 teardown | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
-| **X7** | cereal 相容閘（建置期腳本） | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
-| **X8** | guest ICD 擴充與配置 | - | - | - | - | - | - | - | - | - | - | o | - | - | - |
-| **X9** | gfxstream 診斷（建議丟） | - | - | - | - | - | - | - | - | o | - | o | - | - | - |
-| **X10** | 臨時壓抑（modifier 隱藏、`GFXSTREAM_NO_CB_EXPORT`） | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
-| **V** | venus 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - | - |
+| # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **G1** | Gunyah 記憶體共享⁷ | - | - | o | - | o | o | o | - | - | - | - | - | - |
+| **G2a** | 開機期 blessed pool | - | - | o | o | - | o | o | - | - | - | - | - | - |
+| **G2b** | guest-alloc pool | - | - | o | - | - | o | o | - | - | - | - | - | - |
+| **G2c** | 可成長 pool（`droidvm,pool-size`） | - | - | o | o | o | o | o | - | - | - | - | - | - |
+| **G2d** | udmabuf 模組與界限（三邊 65536） | - | - | o | - | o | o | o | - | - | - | - | - | - |
+| **G6** | 執行期 parcel 直接匯入 DMA-BUF⁸ | - | - | - | - | o | - | o | - | - | - | - | - | - |
+| **G3** | Scanout 與 blit 路徑（含每個 sink 自報 fourcc） | - | - | o | - | - | o | o | o | - | o | - | - | - |
+| **DP** | 顯示管線解耦（Screen / Frame / Exporter、多螢幕、per-binding 輸入） | o | - | o | - | - | o | o | o | - | - | - | - | - |
+| **H** | VNC 硬體 H.264（RFB encoding 50 + `DVH1`） | o | - | o | - | - | - | o | o | - | - | - | o | - |
+| **G4** | GPU 排程（cpuset / RT，**依賴 C**） | - | - | o | - | - | - | o | - | - | - | - | - | - |
+| **G5** | zink / wsi / GL 共用修正 | - | - | - | - | - | - | - | - | - | - | o | - | - |
+| **Q** | virglrenderer QEMU resource-info 相容 API | - | - | - | - | - | - | - | - | - | o | - | - | - |
+| **D** | drm2kgsl 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - |
+| **X1** | gfxstream 路線接線⁹ | o | - | o | - | - | o | o | - | - | - | o | - | - |
+| **X2** | fd 外部記憶體模式 + HMI HAL（取代舊 AHB 適配） | - | - | - | - | - | - | - | - | o | - | o | - | - |
+| **X3** | host-visible 後端、ring blob 池與 folio 政策¹⁰ | - | - | - | - | - | - | o | - | o | - | - | - | - |
+| **X4** | Vulkan decoder 強化與生命週期 | - | - | - | - | - | - | - | - | o | - | - | - | - |
+| **X5** | ASG 傳輸（consumer / framing / seqno） | - | - | - | - | - | - | - | - | o | - | o | - | - |
+| **X6** | guest blob 匯入與 teardown | - | - | - | - | - | - | - | - | o | - | - | - | - |
+| **X7** | cereal 相容閘（建置期腳本） | - | - | - | - | - | - | - | - | o | - | - | - | - |
+| **X8** | guest ICD 擴充與配置 | - | - | - | - | - | - | - | - | - | - | o | - | - |
+| **X9** | gfxstream 診斷（建議丟） | - | - | - | - | - | - | - | - | o | - | o | - | - |
+| **X10** | 臨時壓抑（modifier 隱藏、`GFXSTREAM_NO_CB_EXPORT`） | - | - | - | - | - | - | - | - | o | - | - | - | - |
+| **V** | venus 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - |
 
-本次新增 **G6**（hmod + crosvm）與 **Q**（virgl），並補三格：**G2d/gmod**、**X2/mesa**、**G1/hp**。
+08-29 新增 **G6**（hmod + crosvm）與 **Q**（virgl），並補三格：**G2d/gmod**、**X2/mesa**、**G1/hp**。
+其中 **G1/hp** 已隨 hp 欄一起消失。
 
 ### 欄總計
 
-| meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | hp | 合計 |
-|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 11 | 2 | 26 | 7 | 10 | 13 | 24 | 4 | 10 | 5 | 10 | 4 | 3 | 3 | **132** |
+| meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | 合計 |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 11 | 2 | 26 | 7 | 10 | 13 | 24 | 4 | 10 | 5 | 10 | 4 | 3 | **129** |
 
-（08-26 是 122，08-29 是 130，本次 +2 = R 的 app 與 hmod 兩格。08-30 進來的另外 11 個 commit
-全部落在已經亮著的格子裡：ci 收尾 → M1、legacy key 清除 → X1、共用終端機面板 → AG、
-大頁進階畫面 → M5、Linux VM 密碼路徑 → M3+AG、顏色邊界 → G3、打包壓縮等級 → M1、
-`setresuid` → A+MED。）
+（歷次總數：08-26 **122** → 08-29 **130** → 08-30 加入 R 後 **132** → hp 欄退出後 **129**。
+08-30 當天進來的 21 個 commit 只有 R 一列是新格，其餘全部落在已經亮著的格子裡。）
 
 ¹ edk2 保持 BSD-2-Clause-Patent，唯一不轉 GPL
 ² LXC 映像匯入與建立 Linux VM、磁碟維護（resize / 相依更新 / 自動擴容）、VM 刪除、qcow2 zstd 與 zero-cluster、
@@ -127,8 +143,9 @@
 　模組沒載入時 sysfs 節點不存在，app 那半就是 no-op。診斷模組 `nproc_probe` 明寫 temporary，見 §8
 ⁶ 地基已落地：crosvm 的 `android_camera` Camera2 後端（`camera_probe` 實測 29.45 fps NV21），
 　app 只有設定 schema 與權限；**virtio-media 裝置三個都還沒寫**
-⁷ host_share 模組、runtime SHARE / UNSHARE、VmAccept::Sync、`/dev/gh_pinprobe`（現由 hp 提供，ABI 逐位元組不變）、
-　liveness GC、pin 釋放
+⁷ host_share 模組、runtime SHARE / UNSHARE、VmAccept::Sync、`/dev/gh_pinprobe` **的用戶端**、liveness GC、pin 釋放。
+　節點本身由 `gh-hugepage-reserve` 提供（ABI 與 `gh_unmovable.ko` 舊版逐位元組相同），那個專案不在本表內，
+　所以這一列只能假設節點「可能不存在」
 ⁸ hmod `gunyah_share` 收 DMA-BUF fd 當 parcel 來源，不改它的 backing；crosvm 端把 GPU 驅動匯出的 dma-buf
 　直接送去 SHARE。這條路是 host folio 政策在 crosvm 側的替代品（見 §4）
 ⁹ capset / context-types / `GFXSTREAM_*` env（含 `GFXSTREAM_VRAM_*` 四個）/ pool 節點名 / UI / 啟動器
@@ -158,16 +175,20 @@
 8. **X1（app 端去掉 virgl2）↔ crosvm 的 vrend 保持初始化**：只上 app 那半，每台 drm2kgsl/venus VM 都沒畫面。
 9. **MED 是配對佔位**：app 半邊只有設定 schema 與權限，crosvm 半邊只有 `android_camera` 後端（沒有任何
    crosvm 程式碼引用它），virtio-media 裝置三個都沒寫。app 半邊單獨上線會是死 UI。
-10. **G1 的 pinprobe 現在由 hp 提供**：`gh_unmovable.ko` 不再註冊 `/dev/gh_pinprobe`，crosvm 端在節點不存在時
-    直接跳過探測。三個 repo（hmod 拿掉、hp 加入、crosvm 容忍缺席）必須一起上，否則舊 crosvm 配新模組會
-    在缺節點時當成不可 pin。
+10. **G1 的 pinprobe 已經搬到表外**：`gh_unmovable.ko` 不再註冊 `/dev/gh_pinprobe`，節點改由
+    `gh-hugepage-reserve` 提供，而那個專案走自己的上游流程。本表內只剩兩個半邊，必須一起上——
+    hmod 拿掉註冊、crosvm 容忍缺席；只上前者的話，舊 crosvm 會把「節點不見了」當成「不可 pin」。
+    因為提供者在表外，crosvm 那半不能寫成「節點一定在」，這是硬需求不是防禦性寫法。
 
 ## 4. 扁平時不該出現的東西
 
 - **crosvm 的 per-blob host folio 政策**：`--runtime-share` / `RuntimeShareConfig` / `prepare_blob_backing` /
   `hypervisor/src/gunyah/mthp.rs` / rutabaga `register_blob_backing_handlers`，`713d71e64` 一次全刪（−449 行）。
   淨值是「crosvm 沒有這個旗標」，政策活在 gfxstream。**這是本輪最大的一組加了又刪。**
-- **`/dev/gh_pinprobe` 在 `gh_unmovable.ko` 的那一版**：hmod 建了又搬走（`588e583`），扁平後只該出現在 hp。
+- **crosvm 的 pflash cherry-pick `f7838af1d`**：原始 commit `604aad262` 已經在 base 裡，
+  兩邊內容逐字相同，`git diff` 對 pflash 是空的。扁平後不會有這個 commit（見 §5）。
+- **`/dev/gh_pinprobe` 在 `gh_unmovable.ko` 的那一版**：hmod 建了又搬走（`588e583`），加了又刪，淨零。
+  扁平後 hmod 不該有它，而接手的專案不在這張表上。
 - **udmabuf 的 16384**：三個 repo 先後訂 16384 再一起改 65536，扁平後直接 65536，不留中間值。
 - **`external_scanout` 仲裁**：08-20 加入，`b3fe7cf5e` 被新的 Screen 模型整個刪除。加了又刪，淨零。
 - **CPU 顯示管線的「正規 BGRX」約定**：這個約定從來只寫在註解裡，而它讓一幀被改寫兩次——
@@ -193,7 +214,7 @@
 「作者」不再由歷史決定，而是由**這個功能的最終狀態裡有誰的碼**決定：
 
 1. 一個功能有幾位作者，`pr/3d-accel` 那一個 commit 就掛幾個 `Co-authored-by:`。
-2. **wip 分支裡的作者欄不必修。** 那裡有 `root`、有 `Your Name <you@example.com>`、有空 email，
+2. **wip 分支裡的作者欄不必修。** 那裡有 `Your Name <you@example.com>`、有空 email、有同一個人四種寫法，
    全部不管——`wip/3d-accel` 是工作歷史，只要 `pr/3d-accel` 是對的就好。
 3. `pr/3d-accel` 的 trailer **不掛 AI**。現在 wip 裡的 `Co-Authored-By: Claude ...` 與
    `Claude-Session:` 兩種 trailer 在扁平時一律刪掉（見 §8）。
@@ -205,53 +226,82 @@
 
 | 人 | 出現在 | 待辦 |
 |---|---|---|
-| **HuJK** | 全部 14 個 repo | 四種 email 統一 |
-| **lateautumn233（L233）** | app, hmod, gmod, crosvm, virt, virgl, mesa, mfst, hp；**gfxs 的署名被弄丟了** | 見下方每列對照 |
-| **Kancy Joe** | crosvm `f7838af1d`（aarch64 pflash for UEFI variables）→ **M4** | ⚠️ git 裡的 email 是空的，需要正確地址才寫得出 trailer |
-| sunflower2333 | win `3b005d67`（`rdmapool/` 基礎） | 只影響 W |
-| samfor12 | hp 14 個 commit（immediate reclaim、reconcile、PCP drain、SetPageReserved、C89、low-memory mode…） | ⚠️ 不在你列的三人裡，見下方 |
-| BigfootACA | hp 的兩個 merge commit（PR #6、#7） | merge 不帶內容，不必掛 |
+| **HuJK** | 全部 13 個 repo | 四種 email 統一 |
+| **lateautumn233（L233）** | app, hmod, gmod, crosvm, virt, virgl, mesa, mfst；**gfxs 的署名被弄丟了** | 見下方每列對照 |
+| **Kancy Joe**（GitHub `sunflower2333`） | win `3b005d67`（`rdmapool/` 基礎）→ **W** | 用 `Kancy Joe <54024877+sunflower2333@users.noreply.github.com>` |
 
-⚠️ **hp 多出兩個名字。** `gh-hugepage-reserve` 是從 lateautumn233 的 fork 出發、又收了 samfor12 的
-PR #7，所以它的三列（L、M5、G1）除了 HuJK 之外還要掛 samfor12 與 lateautumn233。如果 hp 打算走自己的
-上游流程而不併進 `pr/3d-accel`，這一段就不適用——這件事要先定。
+**要掛 trailer 的剛好就是三個人。** `Kancy Joe` 與 `sunflower2333` 是同一個人（GitHub id 54024877，
+帳號顯示名就是 Kancy Joe），先前被當成兩位是我看錯。email 也不是問題：他在 DroidVM 與 edk2-gunyah 的
+commit 一直用 `54024877+sunflower2333@users.noreply.github.com`，直接抄那個。
+（crosvm 那個空 email 不是 cherry-pick 弄掉的——base 裡的原始 commit `604aad262` 本來就是空的。）
+
+**BigfootACA 仍然出現在範圍內**：`win` 的 `3b005d67~1..master-squash` 裡有他 5 個 commit，
+全部是把 HuJK 自己的 PR 併進 master 的 merge。merge 不帶內容，所以不掛 trailer——這跟
+`gh-hugepage-reserve` 裡那兩個 merge 是同一個判準，不是因為那個 repo 退出了。samfor12 則是真的
+隨 hp 一起離開。
+
+⚠️ **但他的 crosvm pflash 不進 `pr/3d-accel`。** 見下一段。
 
 ### 每一列要掛誰
 
-只列出 HuJK 以外還有人的列；沒列到的列就是 HuJK 一個人。
+只列出 HuJK 以外還有人的列。沒列到的 21 列——**L**、**M5**、**N**、**AG**、**R**、**S**、**A**、**MED**、
+**P**、**G2c**、**G2d**、**G6**、**H**、**Q**、**X1**、**X4**–**X7**、**X9**、**X10**——就是 HuJK 一個人。
+**L**（Licensing）值得特別點名：hp 還在欄裡時它的非 HuJK 署名（samfor12＋L233）全部來自 hp，
+hp 退出後它變成 HuJK 獨有，很容易在清單裡被漏掉。
 
 | 列 | 追加 co-author | 依據（wip 的 commit） |
 |---|---|---|
 | **M1** 建置管線與打包 | L233 | mesa `40eccc6e9db` `34c69c5813d` `0c92ee40414` `11a4b43c40b` `f5faa901c85`；mfst 全部 7 個 |
 | **M2** DisplayFramework | L233 | app `02377c0`（DisplayChromeController tests） |
 | **M3** 磁碟與儲存 | L233 | app `540a601`（zstd worker count） |
-| **M4** VM 平台雜項 | L233, **Kancy Joe** | app `d3dfe75`（per-VM 環境變數）；crosvm `f7838af1d`（pflash） |
+| **M4** VM 平台雜項 | L233 | app `d3dfe75`（per-VM 環境變數）。~~crosvm `f7838af1d`（pflash）~~ 見下 |
 | **C** vCPU 放置 | L233 | app `7e5459c`（affinity picker） |
-| **W** Windows guest | sunflower2333 | win `3b005d67` |
-| **G1** Gunyah 記憶體共享 | L233（＋hp 的話 samfor12） | hmod `0a9d951`；crosvm `78ca3b50b` `d01bdef7f`；hp `d42d5e8` |
+| **W** Windows guest | **Kancy Joe** | win `3b005d67` |
+| **G1** Gunyah 記憶體共享 | L233 | hmod `0a9d951`；crosvm `78ca3b50b` `d01bdef7f` |
 | **G2a** 開機期 blessed pool | L233 | crosvm `bb171f312`（pci_bar_size 2GB→256MB） |
 | **G2b** guest-alloc pool | L233 | app `15c8286`；gmod `ce7e962`；crosvm `83ffa9d8f` |
 | **G3** Scanout 與 blit | L233 | gmod `075d260`；crosvm `ddf70b61b` `cff5722ee` `00ec650d0`；virgl `fd611e67` `24ce0a62`；virt `f413ae8` `4a4581e` |
 | **DP** 顯示管線解耦 | L233 | virt `466354b`（surface change handling） |
 | **G4** GPU 排程 | L233 | crosvm `2444da33c`（RT scheduling） |
-| **G5** zink 與 wsi | L233 | mesa `24df2ad76b2` `24d85e4494e` `4501696cbcd` |
-| **D** drm2kgsl | L233 | virgl 的 12 個 `drm/kgsl:` ＋ `b9881a0c`；mesa 的 `tu/virtio` 5 個、`tu/a750` `91be6906972`、`50450cbcc75`、`945635003d3`、`12b907f5a52`、freedreno/virtio 3 個 |
-| **X2** fd 外部記憶體 | L233（**補回**） | 舊分支 `7bccebab2`（memoryTypeBits + Vk13Features）——見下 |
-| **X3** host-visible 後端 | L233（**補回**） | 舊分支 `402ea1771`（lazy mLinear）——見下 |
+| **G5** zink / wsi / GL | L233 | wsi `24df2ad76b2` `24d85e4494e`；GL `4501696cbcd`（`src/mesa/main/getstring.c`，所以列名含 GL） |
+| **D** drm2kgsl | L233 | virgl：範圍內 19 個 `drm/kgsl:` 中他的 **10** 個（另外 9 個是 HuJK 的）；mesa：`tu/virtio:` 4 個、`tu/a750` `91be6906972`、`50450cbcc75`、`945635003d3`、`12b907f5a52`、freedreno/virtio 側 4 個。**`b9881a0c` 不算在內**——它改的是 `src/vrend_renderer.c`，host GL 路線，不是 kgsl（見 §8） |
+| **X2** fd 外部記憶體 | L233（**補回**） | 舊分支 `1c6e27ef3` + `e1d0472b5`；被 `7bccebab2` 重寫——見下 |
+| **X3** host-visible 後端 | L233（**補回**） | 舊分支 `f038bd111`（lazy mLinear）；被 `402ea1771` 重寫——見下 |
 | **X8** guest ICD 擴充 | L233 | mesa `44df9764052`（cerealgenerator + gfxstream_vk_device + ResourceTracker） |
 | **V** venus | L233 | crosvm `0091d85be`（forward virgl log levels）；virgl `336c5aed` |
-| **M5** 核心模組與大頁 | samfor12（若 hp 併入） | hp 的 14 個 |
+
+### pflash 已經在 base 裡，所以它不產生 commit
+
+`f7838af1d`（Kancy Joe，aarch64 pflash for UEFI variables）在 `droidvm/droidvm..HEAD` 的範圍內，
+所以按 commit 數它是「我們的」。但扁平化比的是**上游與最終狀態**，而這個功能兩邊都有：
+
+- 原始 commit `604aad262` 在 base（`droidvm/droidvm`）裡，`f7838af1d` 是它的 cherry-pick。
+  我們的分支從 `3126586d1` 分出去，那時 `604aad262` 還沒進 base，後來兩邊各自有了它。
+- `git diff droidvm/droidvm HEAD` 在 `devices/src/pflash.rs` 上**完全沒有輸出**，
+  `aarch64/src/fdt.rs` 與 `aarch64/src/lib.rs` 的 diff 裡**沒有任何一行碰到 pflash**
+  （`fdt.rs` / `lib.rs` / `pflash.rs` 三個檔的 pflash 出現次數 base 與 HEAD 一模一樣：10 / 38 / 93）。
+
+所以扁平後 M4 不會包含任何 pflash 內容，也就沒有東西要掛他的名字。他在 `pr/3d-accel` 的
+唯一貢獻是 **W** 的 `rdmapool/` 基礎。**這不是把人漏掉，是那段碼已經在上游了**——這正是
+「只對照上游與最終狀態」這條規則要處理的情況，也是 §4 那一節的同類。
 
 ### gfxstream 的署名要用手補
 
 08-21 那次不是 rebase，是**從 `aosp/emu-main-dev` 全新建立分支**再手工重寫，103 個舊 commit 變成 25 個，
-lateautumn233 的 12 個 commit 一個都沒帶過來——現在 62 個 commit 裡沒有任何一行 `Co-authored-by`。
-其中 10 個是設計取代（`ff1557881` 改用 fd/dma-buf 取代整條 AHB 路線）合理消失，但
+lateautumn233 在舊分支上的 12 個 commit 一個都沒帶過來——現在 62 個 commit 裡沒有一行**人類的**
+`Co-authored-by`（AI trailer 有 61 個，那些扁平時本來就要刪）。12 個裡有 9 個是設計取代
+（`ff1557881` 改用 fd/dma-buf 取代整條 AHB 路線）合理消失，剩下 3 個是**他的碼被重寫**，
+最終狀態裡還看得到：
 
-- **`402ea1771`（lazy mLinear）** 與 **`7bccebab2`（memoryTypeBits + Vk13Features）** 是**他的碼被重寫**，
-  最終狀態裡還看得到，所以 X2 / X3 兩列必須補上他。
+| 舊分支（他的） | 新分支（HuJK 重寫） | 要補的列 |
+|---|---|---|
+| `f038bd111` gfxstream: lazy-allocate mLinear for blob-backed resource transfers | `402ea1771` | **X3** |
+| `1c6e27ef3` gfxstream: always apply memoryTypeBits host-to-guest mapping | `7bccebab2` | **X2** |
+| `e1d0472b5` gfxstream: zero out Vk13Features instead of removing from chain | `7bccebab2`（同一個） | **X2** |
 
-舊分支保留在 `backup/pre-upstream-20260821`，比對用 `git log backup/pre-upstream-20260821 --author=lateautumn233`。
+⚠️ 這張表在 08-31 之前寫反了：當時把**新分支上 HuJK 的重寫 hash** 當成「舊分支的證據」，
+照著查會查到 HuJK 自己，`Co-authored-by` 一行都生不出來。舊分支保留在
+`backup/pre-upstream-20260821`，比對用 `git log backup/pre-upstream-20260821 --author=lateautumn233`。
 
 ### 其他
 
@@ -295,14 +345,26 @@ lateautumn233 的 12 個 commit 一個都沒帶過來——現在 62 個 commit 
 6. **`win` 的 base 要在 `dev/viosnd-endpoint-per-stream` 合併前釘住。**
 7. **預設 renderer 翻成 virglrenderer（app `6025be0`）沒有寫下理由**，body 只有機制面的事實。
    要嘛補上「virglrenderer 是目前能用的路線、gfxstream 還在實驗」，要嘛在扁平前退掉。
-8. **Kancy Joe 的 email。** git 裡是空的，寫不出 `Co-authored-by:`。M4 那一列在拿到正確地址前不能定稿。
-9. **hp 要不要併進 `pr/3d-accel`。** 併的話它的三列要多掛 samfor12（14 個 commit）與 lateautumn233；
-   不併就走自己的上游流程，這張表要拿掉 hp 欄。見 §5。
+8. **M5 對 `gh-hugepage-reserve` 的相依要怎麼在 PR 裡交代。** app 的大頁面板讀寫那個專案 Magisk 模組的
+   `settings.prop`，按它的 v6/v7 sysfs 差異分支，還寫死了它的 releases 網址。審查者在這份 PR 裡看不到
+   那個介面。三個選項：(a) 照現狀送，在 commit body 裡明說這是對外部模組的可選整合、缺席時整個面板停用；
+   (b) 把版本分支收斂成單一支援版本，減少要解釋的表面；(c) 把面板從 M5 拆出去，之後單獨送。
+   建議 (a)——面板本來就在模組缺席時整個關閉，那是可以寫下來的事實，不是要補的東西。
+9. **純 virglrenderer GL 路線在矩陣裡沒有列。** 三條路線 D / X / V 都是 Vulkan，但 app 還提供
+   `virglrenderer`（vrend GL），而且 `6025be0` 把它設成新 VM 的預設（見第 7 項）。virgl 的
+   `b9881a0c`（Adreno GLES dual-source blend）就無處可歸。要嘛補一列，要嘛連同第 7 項一起
+   決定這條路線在 PR 裡的定位。
 10. **PR 目標分支名**：org 預設是 `wip-3d-accel`（連字號）。meta / hmod / gmod 整個 repo 都是 3d-accel 工作，
    建議 `pr/3d-accel` 直接以新歷史取代。
 
 ### 已從待決移除
 
+- ~~Kancy Joe 的 email 是空的，寫不出 trailer~~ —— 他就是 GitHub 的 `sunflower2333`（id 54024877），
+  自己的 commit 一直用 `54024877+sunflower2333@users.noreply.github.com`。而且他唯一進得了
+  `pr/3d-accel` 的是 W，crosvm 的 pflash 已經在 base 裡（§5）。
+- ~~hp 要不要併進 `pr/3d-accel`~~ —— 不併。它已推去自己的上游（Droid-VM/gh-hugepage-reserve，`bdf9062`），
+  已從總表與兩張矩陣移除，帶走 L / M5 / G1 三格與 samfor12、BigfootACA 兩位署名。
+  留下的唯一牽連是 `/dev/gh_pinprobe` 的執行期相依（§3.10）。
 - ~~未提交的 G3 顏色邊界工作要先落地~~ —— 08-30 已提交，crosvm `f690a3c40` ＋ virt `3278ede`。
   §3.6 從「必須先落地」降級成「扁平時兩者不能拆開」。
 - ~~A（音訊）的 crosvm 半邊未完成~~ —— `c15fcab2e`（08-26 09:35）已經把 VM 的 protection 透過
