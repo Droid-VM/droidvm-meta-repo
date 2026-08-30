@@ -5,6 +5,7 @@
 set -e
 cd "$(dirname "$0")"
 source ./lib_branch.sh
+export DROIDVM_PREBUILT_COMPRESSION_LEVEL="${DROIDVM_PREBUILT_COMPRESSION_LEVEL:-1}"
 
 clone_at DroidVM https://github.com/Droid-VM/DroidVM.git
 # Prebuilt root is the exception: always its main branch. The build overlays the
