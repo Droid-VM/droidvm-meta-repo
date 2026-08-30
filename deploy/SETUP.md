@@ -41,6 +41,28 @@ guest 沒有 cpio → host 端解包(`zstd -dc | cpio -idm`)、換 .ko(zstd 壓�
 (沒 pin 的頁可能被 host kernel 搬走,而 RM 的 stage-2 永遠不會更新)。五個 launcher
 都已內建這行;若啟動時看到 `could not be mlocked`,先查這個。
 
+## 2. drm2kgsl native context 路線
+
+手機端:`deploy/drm2kgsl/run_drm2kgsl_nctx.sh`(`DIR=/data/local/tmp/crosvm_drm2kgsl`)。要點:
+- `--gpu backend=virglrenderer,context-types=virgl2:drm,...`(**virgl2 必須在**,
+  否則 virgl renderer 根本沒初始化 → CREATE_2D ComponentError(22) → VNC 黑屏)
+- `--pre-alloc drm-host-mb=8`:boot-blessed 的 `Drm2KgslPool` purpose region,
+  virglrenderer 的 drm2kgsl backend 從裡面切每一個 BO。拿掉就退回 runtime-share。
+- `CROSVM_DRM2KGSL_DIAG=0`:drm2kgsl backend 的診斷計數器**預設開啟且每筆走 `ANDROID_LOG_ERROR`**,
+  任何 drm2kgsl 效能數字採信前先確認它是關的。
+- 不用 `vram-limit` / `gunyah-pvm`(兩個都是 gfxstream 專屬的消費者)
+
+guest 端:
+1. 同一份 DKMS(不需要同事的 kernel fork;他那條分支的 8 個 commit 裡只有 2 個是新的,
+   arena offset 那個已被我們的 `pool_offset` wire 取代,display source release 尚未採用)
+2. ICD 指向 freedreno:`VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/freedreno_icd.aarch64.json`
+   +(zink)`MESA_LOADER_DRIVER_OVERRIDE=zink`
+3. drm2kgsl mesa 來自 `mesa` 的 `wip/3d-accel-drm2kgsl` 分支(26.3.0-devel,含 tu/virtio 工作),
+   同一個 `bash 8_build_guest_mesa.sh` → `mesa-guest_<ver>_arm64.deb`(與 gfxstream 同一包),
+   `sudo apt install ./mesa-guest-drm2kgsl_<ver>_arm64.deb`(prefix `/usr/local`)
+
+驗收階梯:VNC 有畫面 → `vulkaninfo` 顯示 driverName=turnip(經 vdrm)→ vkcube → vkmark → Minecraft。
+
 ## 3. 兩路線切換
 
 啟動參數已分開(`crosvm_gfx` vs `crosvm_drm2kgsl` 兩目錄兩 launcher)。guest 端**一台 VM 裝一份 mesa**:
@@ -55,3 +77,8 @@ guest 沒有 cpio → host 端解包(`zstd -dc | cpio -idm`)、換 .ko(zstd 壓�
 ## 4. 已知缺口 / 待辦
 
 - vkmark 只能在真 VNC GNOME session 跑(ssh 環境下它自己 early-crash,與 GPU 無關)
+- drm2kgsl 的 `VIRTIO_GPU_F_DISPLAY_SOURCE_RELEASE`(fenced RESOURCE_FLUSH,ring 63)尚未採用:
+  crosvm 側 `9f5dc46` 會開兩條 thread 跑無 timeout 的 `poll(fd, -1)`,卡住只能 kill -9,
+  而 kill -9 會洩漏 memparcel。要用之前得先補 timeout。
+- drm2kgsl 沒有 guest-alloc 路徑(vdrm 只發 `VIRTIO_GPU_BLOB_MEM_HOST3D`,virgl 的
+  `BLOB_MEM_GUEST` 進不了 DRM context);要做得改 msm_proto 協議,見 `plans/ARENA_V2_PLAN.md`
