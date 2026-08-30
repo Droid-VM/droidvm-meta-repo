@@ -67,6 +67,29 @@ if [ -f gunyah_host_mod/dist/match.json ]; then
     cp -f gunyah_host_mod/dist/match.json "$MB/usr/lib/modules/match.json"
 fi
 
+# The app ships its own match.json as a fallback, and it is NOT a copy of the module repo's:
+# it also carries GH-Hugepage-Reserve, which has no .ko to ride on, so the app's file is a
+# superset and cannot simply be overwritten from here. That leaves it hand-maintained, and it
+# had already fallen behind -- nproc_guard shipped as a .ko for weeks with no rule in the app's
+# copy. The asymmetry is what makes that easy to miss: gunyah_host_mod's own build FAILS when a
+# built module has no rule, while the app's copy going stale costs one silently absent card in
+# the Kernel Module tab, with only a Log.w nobody reads.
+#
+# So: one-directional. Every module the module repo describes must appear in the app's copy;
+# extra keys there are expected and fine.
+if [ -f gunyah_host_mod/match.json ] && [ -f DroidVM/app/src/main/assets/match.json ]; then
+    python3 - gunyah_host_mod/match.json DroidVM/app/src/main/assets/match.json <<'PY'
+import json, sys
+src, app = (json.load(open(p, encoding="utf-8"))["modules"] for p in sys.argv[1:3])
+missing = [k for k in src if k not in app]
+if missing:
+    print(f">>> WARNING: app assets/match.json has no rule for {missing}", file=sys.stderr)
+    print(">>>          those modules ship as .ko but the app will not list them when the", file=sys.stderr)
+    print(">>>          device match.json is missing or unread. Add them to", file=sys.stderr)
+    print(">>>          DroidVM/app/src/main/assets/match.json (keep gh_hugepage_reserve).", file=sys.stderr)
+PY
+fi
+
 # The pages' stylesheet is app-side, not device-side: the app inlines its own copy
 # into every page it renders, including the GH-Hugepage-Reserve page that ships in
 # the APK (that module is not one of the .ko files, so it has no prebuilt to ride
