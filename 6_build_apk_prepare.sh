@@ -25,13 +25,31 @@ if [ -f crosvm_out/crosvm ]; then
     cp -f crosvm_out/crosvm "$MB/usr/bin/crosvm"
     for so in crosvm_out/*.so; do cp -f "$so" "$MB/usr/lib/"; done
 fi
-# The overlay only ever adds, so a lib that stops being built lingers from older payloads --
-# and a lingering PLATFORM lib is not dead weight, it is a shadow: the daemon launches crosvm
-# with LD_LIBRARY_PATH pointing here, so a stale libgui.so with the wrong Surface overloads
-# made /system/lib64/libmediandk.so undlopenable and killed the H.264 encoder on every device,
-# invisibly to every manual test that sets its own library path. Same class 2_build already
-# strips (libaaudio, libbinder_ndk); strip them here too so an old payload cannot resurrect one.
-rm -f "$MB/usr/lib/libgui.so" "$MB/usr/lib/libaaudio.so" "$MB/usr/lib/libbinder_ndk.so"
+# A PLATFORM library in this directory is not dead weight, it is a shadow. The daemon launches
+# crosvm with LD_LIBRARY_PATH pointing here, and that is searched before /system/lib64, so our
+# copy answers for every consumer -- including the platform's own libraries, which we never
+# built against and whose needs we cannot see.
+#
+# It has now cost twice. A stale libgui.so with the wrong Surface overloads made
+# /system/lib64/libmediandk.so undlopenable and killed the H.264 encoder on every device. Then
+# our libc++.so (2502 symbols, older than the platform's) hid std::__1::__hash_memory from
+# /system/lib64/libaudiobase.so, and crosvm would not link at all on Android 17 -- while
+# working on 13 through 16, because nothing on those versions needed the symbols we were
+# hiding. That is the shape of this bug: it fires on the platform version you did not test,
+# for a symbol your own code never asked for.
+#
+# The soong collect step drags these in as crosvm's DT_NEEDED, and every one of them is
+# something the device already provides. The test applied to each: does anything in the
+# payload need a symbol that OUR copy has and the platform's does not? For all eleven the
+# answer is none -- so shipping them can only subtract. libvulkan_freedreno.so and the glib
+# family stay, because those the platform genuinely does not have.
+#
+# Removing rather than not-copying, because the overlay only ever adds: a lib that stops being
+# built lingers from an older payload, so a stale one has to be deleted here to be gone.
+for so in libgui libaaudio libbinder_ndk libc++ libbase libcap libcutils liblog \
+          libminijail libnativewindow libprocessgroup; do
+    rm -f "$MB/usr/lib/$so.so"
+done
 
 # EDK2 firmware (built separately in edk2-gunyah: ./build.sh -DPCI_CAM_MODE=FALSE)
 if [ -f edk2-gunyah/edk2-gunyah.fd ]; then
