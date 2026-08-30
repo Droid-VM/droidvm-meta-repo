@@ -1,38 +1,45 @@
-# pr/3d-accel 扁平化計畫（2026-08-29 修訂）
+# pr/3d-accel 扁平化計畫（2026-08-30 修訂）
 
 一項功能一個 commit，順序 **L**(licensing) → **M**(GPU 無關) → **G**(路線共用 GPU 基礎) → **D**(drm2kgsl) → **X**(gfxstream) → **V**(venus)。
 他人 commit 併入功能 commit，作者掛 `Co-authored-by:`。
 
-**08-26 修訂之後又長出八個 commit 位。** 本次把它們補上，並修正四個已經不成立的敘述：
-crosvm 的 host folio 政策整條搬去 gfxstream、`/dev/gh_pinprobe` 搬去 gh_hugepage_reserve、
-udmabuf 界限三邊一起改成 65536、virtio-snd 的 protected VM 半邊其實在 08-26 當天就修好了。
+**08-29 之後又進來 12 個 commit，但只長出一個新的 commit 位。** 其餘都是既有功能的修正或重構
+（ASCII/fmt 收尾、legacy key 清除、共用終端機面板、大頁進階畫面、Linux VM 密碼路徑、顏色邊界落地），
+格子本來就亮著。唯一的新格是 **R**（nproc 救援模組）。
+
+**「app 開不起來要重開機」找到根因了。** 我們在每次 VM 執行時反覆切換執行緒的*真實* uid，而
+`setuid()` 的 `set_user()`（更新 `cred->user`，也就是 `commit_creds()` 判斷要不要移轉 NPROC 記帳的欄位）
+被 CAP_SETUID 分支蓋著；走到 saved-uid 路徑就只更新 `cred->ucounts` 不更新 `cred->user`，
+於是這個 process 的 NPROC charge 沒加卻在結束時被減。計數器一旦為負，
+`is_rlimit_overlimit()` 讓該 uid 的每一次 fork 都失敗，Zygote 再也拉不起 app。
+修正是 crosvm/probe 兩處改用 `setresuid()`（**算 fix，不加格子**），救援是新模組 `nproc_guard`（**算新格 R**）。
 
 ## 0. 總表
 
 | repo | 縮寫 | base | head | 範圍內 commits |
 |---|---|---|---|--:|
-| droidvm-3d-accel（meta） | meta | 空樹 | af1454a | 300 |
+| droidvm-3d-accel（meta） | meta | 空樹 | f4858fb | 302 |
 | mesa-cross | cross | 空樹 | 2586325 | 19 |
-| DroidVM（app） | app | `origin/master` | 51c13cb | 117 |
+| DroidVM（app） | app | `origin/master` | 4a44f18 | 123 |
 | edk2-gunyah | edk2 | `origin/master` | 4fb0b84 | 8 |
-| gunyah_host_mod | hmod | 空樹 | b7920bb | 36 |
+| gunyah_host_mod | hmod | 空樹 | e1280d8 | 38 |
 | droidvm-guest-additions | gmod | 空樹 | d7e6713 | 40 |
-| crosvm | crosvm | `droidvm/droidvm` | 1607efb11 | 149 |
-| Virtualization | virt | `droidvm/android16-qpr2-release-local` | a05556f | 12 |
+| crosvm | crosvm | `droidvm/droidvm` | f690a3c40 | 151 |
+| Virtualization | virt | `droidvm/android16-qpr2-release-local` | 3278ede | 13 |
 | gfxstream | gfxs | `aosp/emu-main-dev` c00cd03a3（08-21 換基準） | 6a9d4dd2c | 62 |
 | virglrenderer | virgl | `8220efec`（AOSP snapshot） | 3dbfe7b5 | 44 |
 | mesa | mesa | mesa main `74d4e41b2bb` | 6ad3bcbcfca | 76 |
 | crosvm-minimal-manifest | mfst | 分支鏈（不再釘 `main`） | 29de119 | 1 |
 | gunyah-guest-drivers-windows | win | 上游 virtio-win | 8d12ff0e（`master-squash`） | 18 |
-| gh-hugepage-reserve | hp | `upstream/master` | 9805ea9 | 23 |
+| gh-hugepage-reserve | hp | `upstream/master` | 3ebe0fe | 23 |
 
 `hp` 從 29 掉到 23，是 v12（`9805ea9`）把 v9/v11 疊出來的補丁路徑整包重寫成 SOLID 結構的結果，
 不是有東西被丟掉。`win` 形狀與其他欄不同：base 是上游 virtio-win、上游目標也是 virtio-win，
 而且**它已經自己扁平過了**（153 → 18 commits 在 `master-squash`）。
 
-**尚未提交（扁平前必須先落地）**：crosvm 8 個檔（`gpu_display/` 的 per-sink fourcc 與單一轉換邊界）、
-virt 1 個檔（刪掉 `swapRedBlueInPlace`）、meta 2 個檔（打包壓縮等級）。前兩者是 **G3** 的同一件事，
-分屬兩個 repo，必須同時上。
+**所有 repo 的工作區都是乾淨的**，只剩 DroidVM 的 `assets/prebuilts` submodule 髒著——那是本機重編的
+payload（已含 `nproc-guard-gki-*.ko`），要推回 Droid-VM/DroidVM-Prebuilts 才輪得到指標 bump，
+而且它比目前的 crosvm HEAD 舊，下一次建 APK 會重生。
 
 ## 1. 表一：L / M / 新功能列
 
@@ -45,29 +52,33 @@ virt 1 個檔（刪掉 `swapRedBlueInPlace`）、meta 2 個檔（打包壓縮等
 | **M2** | DisplayFramework 重構 | - | - | o | - | - | - | o | o | - | - | - | - | - | - |
 | **M3** | 磁碟與儲存² | - | - | o | - | - | - | o | - | - | - | - | o | - | - |
 | **M4** | VM 平台雜項³ | - | - | o | o | o | - | o | - | - | - | - | - | - | - |
-| **M5** | 核心模組管理與大頁 | - | - | o | - | o | - | - | - | - | - | - | - | - | o |
+| **M5** | 核心模組管理與大頁（含 settings.prop 進階畫面） | - | - | o | - | o | - | - | - | - | - | - | - | - | o |
+| **R** | nproc 救援模組（`nproc_guard`）⁵ | - | - | o | - | o | - | - | - | - | - | - | - | - | - |
 | **N** | 網路預設與設定精靈步驟 | - | - | o | - | - | - | - | - | - | - | - | - | - | - |
 | **AG** | 客體代理操作（無頭 agent VM）⁴ | - | - | o | - | - | - | - | - | - | - | - | - | - | - |
 | **C** | vCPU 放置（affinity / capacity / cluster） | - | - | o | - | - | - | o | - | - | - | - | - | - | - |
 | **S** | 序列埠：SBSA UART / pty / USB ACM / PM reset | - | - | o | o | - | - | o | - | - | - | - | - | - | - |
-| **A** | 虛擬音效卡（virtio-snd + AAudio 端點） | o | - | o | - | - | - | o | - | - | - | - | - | o | - |
-| **MED** | virtio-media：相機 / VPU⁵ | o | - | o | - | - | - | o | - | - | - | - | o | - | - |
+| **A** | 虛擬音效卡（virtio-snd + AAudio 端點）ᴬ | o | - | o | - | - | - | o | - | - | - | - | - | o | - |
+| **MED** | virtio-media：相機 / VPU⁶ᴬ | o | - | o | - | - | - | o | - | - | - | - | o | - | - |
 | **P** | pseudo-unprotected VM + boot shim | o | - | o | o | o | o | o | - | - | - | - | - | - | - |
 | **W** | Windows guest 支援（pVM 驅動移植） | o | - | - | o | - | - | - | - | - | - | - | - | o | - |
 
-**N** 與 **AG** 是本次新增的列，都只在 app。兩者連同 M3 的擴充來自同一個 mega-commit
-`ca184f0`（61 檔 +4213/−882），扁平時要按這三列拆開。
+**N** 與 **AG** 來自同一個 mega-commit `ca184f0`（61 檔 +4213/−882），連同 M3 的擴充，扁平時要按三列拆開。
+
+**R 是 08-30 唯一的新列。** 它只有兩格，而且兩格本來就亮著——如果你認為救援模組只是 `setresuid`
+修正的附屬品，把 R 併進 **M5** 即可，總數回到 130，其他什麼都不用動。分開列的理由是它是一個
+自帶 sysfs 介面與 insmod 參數的獨立模組，扁平後 hmod 那半沒辦法誠實地塞進「核心模組管理」那一筆。
 
 ## 2. 表二：G + 路線列
 
 | # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | hp |
 |---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **G1** | Gunyah 記憶體共享⁶ | - | - | o | - | o | o | o | - | - | - | - | - | - | o |
+| **G1** | Gunyah 記憶體共享⁷ | - | - | o | - | o | o | o | - | - | - | - | - | - | o |
 | **G2a** | 開機期 blessed pool | - | - | o | o | - | o | o | - | - | - | - | - | - | - |
 | **G2b** | guest-alloc pool | - | - | o | - | - | o | o | - | - | - | - | - | - | - |
 | **G2c** | 可成長 pool（`droidvm,pool-size`） | - | - | o | o | o | o | o | - | - | - | - | - | - | - |
 | **G2d** | udmabuf 模組與界限（三邊 65536） | - | - | o | - | o | o | o | - | - | - | - | - | - | - |
-| **G6** | 執行期 parcel 直接匯入 DMA-BUF⁷ | - | - | - | - | o | - | o | - | - | - | - | - | - | - |
+| **G6** | 執行期 parcel 直接匯入 DMA-BUF⁸ | - | - | - | - | o | - | o | - | - | - | - | - | - | - |
 | **G3** | Scanout 與 blit 路徑（含每個 sink 自報 fourcc） | - | - | o | - | - | o | o | o | - | o | - | - | - | - |
 | **DP** | 顯示管線解耦（Screen / Frame / Exporter、多螢幕、per-binding 輸入） | o | - | o | - | - | o | o | o | - | - | - | - | - | - |
 | **H** | VNC 硬體 H.264（RFB encoding 50 + `DVH1`） | o | - | o | - | - | - | o | o | - | - | - | o | - | - |
@@ -75,9 +86,9 @@ virt 1 個檔（刪掉 `swapRedBlueInPlace`）、meta 2 個檔（打包壓縮等
 | **G5** | zink 與 wsi 共用修正 | - | - | - | - | - | - | - | - | - | - | o | - | - | - |
 | **Q** | virglrenderer QEMU resource-info 相容 API | - | - | - | - | - | - | - | - | - | o | - | - | - | - |
 | **D** | drm2kgsl 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - | - |
-| **X1** | gfxstream 路線接線⁸ | o | - | o | - | - | o | o | - | - | - | o | - | - | - |
+| **X1** | gfxstream 路線接線⁹ | o | - | o | - | - | o | o | - | - | - | o | - | - | - |
 | **X2** | fd 外部記憶體模式 + HMI HAL（取代舊 AHB 適配） | - | - | - | - | - | - | - | - | o | - | o | - | - | - |
-| **X3** | host-visible 後端、ring blob 池與 folio 政策⁹ | - | - | - | - | - | - | o | - | o | - | - | - | - | - |
+| **X3** | host-visible 後端、ring blob 池與 folio 政策¹⁰ | - | - | - | - | - | - | o | - | o | - | - | - | - | - |
 | **X4** | Vulkan decoder 強化與生命週期 | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
 | **X5** | ASG 傳輸（consumer / framing / seqno） | - | - | - | - | - | - | - | - | o | - | o | - | - | - |
 | **X6** | guest blob 匯入與 teardown | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
@@ -93,25 +104,36 @@ virt 1 個檔（刪掉 `swapRedBlueInPlace`）、meta 2 個檔（打包壓縮等
 
 | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | hp | 合計 |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 11 | 2 | 25 | 7 | 9 | 13 | 24 | 4 | 10 | 5 | 10 | 4 | 3 | 3 | **130** |
+| 11 | 2 | 26 | 7 | 10 | 13 | 24 | 4 | 10 | 5 | 10 | 4 | 3 | 3 | **132** |
 
-（08-26 的版本是 122。+8 = N、AG、G2d/gmod、G6/hmod、G6/crosvm、Q/virgl、X2/mesa、G1/hp。）
+（08-26 是 122，08-29 是 130，本次 +2 = R 的 app 與 hmod 兩格。08-30 進來的另外 11 個 commit
+全部落在已經亮著的格子裡：ci 收尾 → M1、legacy key 清除 → X1、共用終端機面板 → AG、
+大頁進階畫面 → M5、Linux VM 密碼路徑 → M3+AG、顏色邊界 → G3、打包壓縮等級 → M1、
+`setresuid` → A+MED。）
 
 ¹ edk2 保持 BSD-2-Clause-Patent，唯一不轉 GPL
 ² LXC 映像匯入與建立 Linux VM、磁碟維護（resize / 相依更新 / 自動擴容）、VM 刪除、qcow2 zstd 與 zero-cluster、
 　匯入後才可開機的規則
 ³ SMBIOS 身分、pflash、ACPI 電源、致命訊號、IRQ 衝突、kvcalloc >2GB、per-VM 環境變數、game mode、
 　BootPlan 分成 UEFI / 直接開機兩型
-⁴ `agent_mode`：QEMU 後端多開一條 `agent0` chardev，跑無頭 VM 做改密碼與自動擴容；動作佇列有單元測試
-⁵ 地基已落地：crosvm 的 `android_camera` Camera2 後端（`camera_probe` 實測 29.45 fps NV21），
+⁴ `agent_mode`：QEMU 後端多開一條 `agent0` chardev，跑無頭 VM 做改密碼與自動擴容；動作佇列有單元測試。
+　共用終端機面板（console / agent / disk 三個畫面同一個 `TerminalPanelView`）也記在這裡——真正改變行為的是
+　agent 那個畫面，救援 shell 從「看得到」變成「打得進去」，另外兩個是重構的連帶
+⁵ hmod 的 `nproc_guard.ko`（KMI 無關，6.1/6.6/6.12 一份原始碼，`uid=` 必填否則不動作）＋ app 兩處接線
+　（`KernelModuleManager` 帶 uid insmod、`VMInstance` 在 VM 結束後 nudge reset）。**沒有強綁定**：
+　模組沒載入時 sysfs 節點不存在，app 那半就是 no-op。診斷模組 `nproc_probe` 明寫 temporary，見 §8
+⁶ 地基已落地：crosvm 的 `android_camera` Camera2 後端（`camera_probe` 實測 29.45 fps NV21），
 　app 只有設定 schema 與權限；**virtio-media 裝置三個都還沒寫**
-⁶ host_share 模組、runtime SHARE / UNSHARE、VmAccept::Sync、`/dev/gh_pinprobe`（現由 hp 提供，ABI 逐位元組不變）、
+⁷ host_share 模組、runtime SHARE / UNSHARE、VmAccept::Sync、`/dev/gh_pinprobe`（現由 hp 提供，ABI 逐位元組不變）、
 　liveness GC、pin 釋放
-⁷ hmod `gunyah_share` 收 DMA-BUF fd 當 parcel 來源，不改它的 backing；crosvm 端把 GPU 驅動匯出的 dma-buf
+⁸ hmod `gunyah_share` 收 DMA-BUF fd 當 parcel 來源，不改它的 backing；crosvm 端把 GPU 驅動匯出的 dma-buf
 　直接送去 SHARE。這條路是 host folio 政策在 crosvm 側的替代品（見 §4）
-⁸ capset / context-types / `GFXSTREAM_*` env（含 `GFXSTREAM_VRAM_*` 四個）/ pool 節點名 / UI / 啟動器
-⁹ folio 政策現在整條在 gfxstream（`host/vulkan/host_visible_folio.h`）；crosvm 只從 `--gpu vram-folio-threshold-kb=`
+⁹ capset / context-types / `GFXSTREAM_*` env（含 `GFXSTREAM_VRAM_*` 四個）/ pool 節點名 / UI / 啟動器
+¹⁰ folio 政策現在整條在 gfxstream（`host/vulkan/host_visible_folio.h`）；crosvm 只從 `--gpu vram-folio-threshold-kb=`
 　轉成 env 傳過去，`STREAM_HANDLE_TYPE_MEM_POOL` 與 ring blob 池仍在 crosvm 側
+
+ᴬ 這兩列的 crosvm 半邊各含一處 `setuid()` → `setresuid()`：A 是 vhost-user snd 後端降權到 app uid，
+　MED 是 `camera_probe` 的同一個動作。**這是修正不是新功能**，格子本來就亮，見 §4 與 R 的說明
 
 ## 3. 排序限制與強綁定
 
@@ -125,8 +147,9 @@ virt 1 個檔（刪掉 `swapRedBlueInPlace`）、meta 2 個檔（打包壓縮等
    三個 repo 的相對順序要一致，否則中間狀態的 guest 會拿到 host 還不認得的 wire。
 5. **G2d 的 65536 是三邊數字**：hmod 的 udmabuf `list_limit`、crosvm 的 `MAX_UDMABUF_ENTRIES`、
    gmod 的 `guest_pool_max_nents`。最低的那個說了算，所以三個 repo 必須同一輪一起上。
-6. **G3 的顏色邊界跨 crosvm 與 virt**：crosvm 端讓每個 sink 自報 fourcc、在 CPU 邊界做至多一次轉換；
-   virt 端才能刪掉整幀 NEON 的 `swapRedBlueInPlace`。只上一半 = 紅藍互換。
+6. **G3 的顏色邊界跨 crosvm 與 virt**（08-30 兩邊都已提交）：crosvm 端讓每個 sink 自報 fourcc、
+   在 CPU 邊界做至多一次轉換；virt 端才能刪掉整幀 NEON 的 `swapRedBlueInPlace`。
+   扁平後這兩個 commit 之間不能插進任何會被人 bisect 到的東西——只上一半就是整片紅藍互換。
 7. **G6 與 X3 是同一個問題的兩個答案**：crosvm 的 per-blob folio 政策（`--runtime-share`）被 G6 取代，
    同一個政策的另一半搬進 gfxstream。扁平時 crosvm 不該出現 `--runtime-share`（見 §4）。
 8. **X1（app 端去掉 virgl2）↔ crosvm 的 vrend 保持初始化**：只上 app 那半，每台 drm2kgsl/venus VM 都沒畫面。
@@ -144,7 +167,12 @@ virt 1 個檔（刪掉 `swapRedBlueInPlace`）、meta 2 個檔（打包壓縮等
 - **`/dev/gh_pinprobe` 在 `gh_unmovable.ko` 的那一版**：hmod 建了又搬走（`588e583`），扁平後只該出現在 hp。
 - **udmabuf 的 16384**：三個 repo 先後訂 16384 再一起改 65536，扁平後直接 65536，不留中間值。
 - **`external_scanout` 仲裁**：08-20 加入，`b3fe7cf5e` 被新的 Screen 模型整個刪除。加了又刪，淨零。
-- **`swapRedBlueInPlace`**（virt，含 aarch64 NEON 版本）：整段刪除，換成 crosvm CPU 邊界的一次轉換。
+- **CPU 顯示管線的「正規 BGRX」約定**：這個約定從來只寫在註解裡，而它讓一幀被改寫兩次——
+  crosvm 的 `swap_red_blue_in_place`（依 guest 宣告的 fourcc 決定要不要換）＋ virt 的
+  `swapRedBlueInPlace`（整幀 NEON，換回 RGBA_8888）。兩支函式都刪了，改由每個 sink 自報 fourcc、
+  在 `copy_from_frame()` 這唯一的邊界做至多一次轉換。扁平後不該有任何一支「全幀 swizzle」存在。
+- **`gunyah_hugepage_threshold_kb` / `gunyah_dynamic_share` 的遷移碼**：改名後又留了一份
+  `migrateLegacySettings`，每次建構 VMConfig 都跑，讀一個沒人寫的 key。扁平後直接用新 key。
 - **DVH2 第二 TCP 埠 side channel**（`h264-port=`）：`e15b27a0a`+`77c685775` 加入，`038abbaa3`+`6a35ebf8b` 端到端刪除。
 - **gfxstream `188286372` ↔ `f5b4557e2`**：一對字面 revert，`git diff` 為空。
 - **gfxstream seqno ladder 的自我抵銷**：`3bcb7b855`（加回第二三階）↔ `a2fa1750c`（拿掉 futex 階），
@@ -185,11 +213,16 @@ virt 1 個檔（刪掉 `swapRedBlueInPlace`）、meta 2 個檔（打包壓縮等
   crosvm payload 沒推回 Droid-VM/DroidVM-Prebuilts。扁平後這些 bump 是噪音，除非 prebuilts repo 自己有一列。
 - **Q 的 consumer 不在這張表上**：`virgl_renderer_resource_get_info_ext` 是給 QEMU 用的，而
   `qemu-gunyah/qemu-android-gunyah` 是別的 org、最後一個 commit 停在 2026-04-03。app 的 QEMU 後端選項是上游本來就有的。
+- **`prebuilts` submodule 是髒的但指標沒動**：本機重編的 payload 已含 `nproc-guard-gki-{6.1,6.6,6.12}.ko`，
+  但沒推回 Droid-VM/DroidVM-Prebuilts，而且它比 crosvm HEAD 舊（少 `setresuid` 與顏色邊界）。
+  下次建 APK 會重生，所以沒有必要為了扁平先提交它。
 - meta 的 `CLAUDE.md`（空）與 `info.txt`（手機 IP/adb 埠）看起來是本機筆記。
 
 ## 8. 待決
 
-1. **未提交的 G3 顏色邊界工作要先落地。** crosvm 8 檔 + virt 1 檔，兩邊同時上（§3.6）。
+1. **`nproc_probe` 要不要在 PR 前刪掉。** 它自己的標頭就寫著 TEMPORARY，不在 `build.sh` 的模組清單、
+   也不在 `match.json`，所以不會被打包；留著的唯一理由是 `setresuid` 修正還沒在三台上跑滿一輪，
+   而 `leaked` 這個數字是唯一能分辨「修好了」與「剛好沒漂」的東西。確認之後就刪。
 2. **X9 / meta 的 evidence pack / virgl D5 等診斷列要不要整包丟。** 全丟大約再少 15–20 個 commit。
 3. **X10 兩個臨時壓抑**（commit body 自述「保持獨立以便隨時拿掉」）在 PR 前該不該先解決掉。
 4. **mesa 的 6 個 Blumenkrantz upstream cherry-pick**：rebase 到 main 後原版已在 base 裡，實測會靜默重複插入
@@ -204,6 +237,8 @@ virt 1 個檔（刪掉 `swapRedBlueInPlace`）、meta 2 個檔（打包壓縮等
 
 ### 已從待決移除
 
+- ~~未提交的 G3 顏色邊界工作要先落地~~ —— 08-30 已提交，crosvm `f690a3c40` ＋ virt `3278ede`。
+  §3.6 從「必須先落地」降級成「扁平時兩者不能拆開」。
 - ~~A（音訊）的 crosvm 半邊未完成~~ —— `c15fcab2e`（08-26 09:35）已經把 VM 的 protection 透過
   `params.access_platform` 帶進 vhost-user 後端，`VIRTIO_F_ACCESS_PLATFORM` 會依 VM 型態宣告。
   08-26 的修訂寫這條時它已經修好了。
