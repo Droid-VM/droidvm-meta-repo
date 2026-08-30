@@ -41,6 +41,30 @@ guest 沒有 cpio → host 端解包(`zstd -dc | cpio -idm`)、換 .ko(zstd 壓�
 (沒 pin 的頁可能被 host kernel 搬走,而 RM 的 stage-2 永遠不會更新)。五個 launcher
 都已內建這行;若啟動時看到 `could not be mlocked`,先查這個。
 
+## 1. gfxstream 路線(四種記憶體配置)
+
+手機端 launcher 都在 `deploy/gfxstream/`,`DIR=/data/local/tmp/crosvm_gfx`:
+
+| 配置 | launcher / 旗標 | 期望的 host log 特徵 |
+|---|---|---|
+| 純 pre-alloc | `run_ubuntu_gfx_prealloc.sh`(`--pre-alloc gfx-host-mb=1024`,無 vram-limit,無 udmabuf) | 有 GFXPOOL 配置行,**零** GUNYAH-SHARE-BLOB 行 |
+| fusion | 同上 + `vram-limit=2048,pool-blob-max-kb=4096` | 兩種都有,in-flight parcel 有上限 |
+| 純 runtime-share | `run_ubuntu_gfx.sh`(無 `--pre-alloc`、環境無 `NCTX_GFX_POOL_MB`) | 只有 SHARE 行。RM 的 ~39 parcel 天花板是**這個配置的已知極限,不是回歸** |
+| guest-alloc | `--pre-alloc gfx-host-mb=256,gfx-guest-mb=1024` + `udmabuf=true` | guest dmesg `has_create_guest_handle=1` + drm_buddy pool 行 |
+
+共通:`--gpu backend=gfxstream,context-types=gfxstream-vulkan,...,gunyah-pvm=true`,
+host-visible blob 的 accept 一律 `VmAccept::Sync`(host 端經 transport 驅動 guest accept)。
+
+guest 端:
+1. ICD 指向 gfxstream:`VK_DRIVER_FILES=/usr/local/share/vulkan/icd.d/gfxstream_vk_icd.aarch64.json`
+2. guest ICD 來自 `mesa` 的 `wip/3d-accel-gfxstream` 分支(26.0.3+patches),
+   `bash 8_build_guest_mesa.sh` 產出 `mesa-guest_<ver>_arm64.deb`(三條路線同一包),
+   `sudo apt install ./mesa-guest-gfxstream_<ver>_arm64.deb`(prefix `/usr/local`)
+3. **guest ICD 與 host decoder 是同一份 codebase,版本必須一致**。混到別的版本時
+   症狀是 VNC 全黑(mutter 是經 gallium 合成,不是經 Vulkan ICD),而且 git bisect 查不到。
+
+驗收:vulkaninfo → vkcube → vkmark(要在真 VNC GNOME session 裡跑)→ Minecraft。
+
 ## 2. drm2kgsl native context 路線
 
 手機端:`deploy/drm2kgsl/run_drm2kgsl_nctx.sh`(`DIR=/data/local/tmp/crosvm_drm2kgsl`)。要點:
@@ -82,3 +106,4 @@ guest 端:
   而 kill -9 會洩漏 memparcel。要用之前得先補 timeout。
 - drm2kgsl 沒有 guest-alloc 路徑(vdrm 只發 `VIRTIO_GPU_BLOB_MEM_HOST3D`,virgl 的
   `BLOB_MEM_GUEST` 進不了 DRM context);要做得改 msm_proto 協議,見 `plans/ARENA_V2_PLAN.md`
+- `deploy/gfxstream/` 的五個 launcher 有大量重複段落(tap/bridge/記憶體準備),尚未抽共用
