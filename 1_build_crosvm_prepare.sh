@@ -44,9 +44,37 @@ ln -sfn crosvm_build/packages/modules/Virtualization Virtualization
 # base; the dev work lives on the trunk, and a variant branch that a component does not
 # carry falls back to it (see lib_branch.sh). If a component has none of them, the
 # manifest revision is kept rather than failing the sync.
-for p in external/crosvm hardware/google/gfxstream external/virglrenderer packages/modules/Virtualization; do
+for p in external/crosvm hardware/google/gfxstream external/virglrenderer packages/modules/Virtualization \
+         external/libvncserver; do
     checkout_soong "crosvm_build/$p" "$(basename "$p")"
 done
+
+# external/zstd needs two lines and is NOT a Droid-VM fork, so checkout_soong has no branch to
+# select for it -- see soong-patches/README.md. `repo sync` restores the pristine tree every run,
+# so applying here is the normal path rather than a repair, and an already-applied patch is
+# success.
+apply_soong_patches() {
+    local d patch
+    for d in soong-patches/*/*; do
+        [ -d "$d" ] || continue
+        local proj=crosvm_build/${d#soong-patches/}
+        [ -d "$proj" ] || { echo "error: $proj is missing; did repo sync fail?" >&2; exit 1; }
+        for patch in "$d"/*.patch; do
+            [ -f "$patch" ] || continue
+            if git -C "$proj" apply --check "$PWD/$patch" 2>/dev/null; then
+                git -C "$proj" apply "$PWD/$patch"
+                echo ">>> $proj: applied $(basename "$patch")"
+            elif git -C "$proj" apply -R --check "$PWD/$patch" 2>/dev/null; then
+                : # already in the tree, from a previous run or a local commit
+            else
+                echo "error: $proj: $(basename "$patch") neither applies nor is already applied" >&2
+                echo "       upstream moved under it; regenerate per soong-patches/README.md" >&2
+                exit 1
+            fi
+        done
+    done
+}
+apply_soong_patches
 
 
 

@@ -31,6 +31,7 @@
 | mesa | mesa | mesa main `74d4e41b2bb` | 6ad3bcbcfca | 76 |
 | crosvm-minimal-manifest | mfst | 空樹 | 29de119 | 11 |
 | gunyah-guest-drivers-windows | win | 上游 virtio-win | 8d12ff0e（`master-squash`） | 18 |
+| libvncserver | vnc | `c70c2088f`（fork 的 `droidvm` 分支） | 6ab9b32 | 2 |
 
 **`gh-hugepage-reserve`（舊 `hp` 欄）已經退出這張表。** 它自己走上游流程，v12（`bdf9062`）已推去
 Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額外作者（samfor12、BigfootACA）
@@ -57,6 +58,10 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 只有一件事：這些程式碼會去讀一個外部專案的 sysfs／settings.prop 介面，而且 M5 那條是版本
 相依的（v6/v7 分支）。見 §8。
 
+**`libvncserver` 是實作階段才浮出來的第 14 個 repo。** 它一直在 manifest 裡（`remote="droidvm"`），
+但我們的兩個 commit 從沒推上那個 fork，只存在於一台機器上——所以它在矩陣裡完全隱形，
+直到有人在乾淨環境建置才會發現 VNC 少了東西。詳見 §7。
+
 `win` 形狀與其他欄不同：base 是上游 virtio-win、上游目標也是 virtio-win，
 而且**它已經自己扁平過了**（153 → 18 commits 在 `master-squash`）。
 
@@ -74,23 +79,23 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 
 `o` = 扁平後這個 repo 會有這個 commit　`-` = 不涉及
 
-| # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win |
-|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **L** | Licensing | o | o | o | -¹ | o | o | o | - | o | o | o | - | - |
-| **M1** | 建置管線與打包 | o | o | o | - | o | o | o | - | o | - | o | o | o |
-| **M2** | DisplayFramework 重構 | - | - | o | - | - | - | o | o | - | - | - | - | - |
-| **M3** | 磁碟與儲存² | - | - | o | - | - | - | o | - | - | - | - | o | - |
-| **M4** | VM 平台雜項³ | - | - | o | o | o | - | o | - | - | - | - | - | - |
-| **M5** | 核心模組管理與大頁（含 settings.prop 進階畫面） | - | - | o | - | o | - | - | - | - | - | - | - | - |
-| **R** | nproc 救援模組（`nproc_guard`）⁵ | - | - | o | - | o | - | - | - | - | - | - | - | - |
-| **N** | 網路預設與設定精靈步驟 | - | - | o | - | - | - | - | - | - | - | - | - | - |
-| **AG** | 客體代理操作（無頭 agent VM）⁴ | - | - | o | - | - | - | - | - | - | - | - | - | - |
-| **C** | vCPU 放置（affinity / capacity / cluster）¹¹ | - | - | o | - | - | - | - | - | - | - | - | - | - |
-| **S** | 序列埠：SBSA UART / pty / USB ACM / PM reset | - | - | o | o | - | - | o | - | - | - | - | - | - |
-| **A** | 虛擬音效卡（virtio-snd + AAudio 端點）ᴬ | o | - | o | - | - | - | o | - | - | - | - | - | o |
-| **MED** | virtio-media：相機 / VPU⁶ᴬ | o | - | o | - | - | - | o | - | - | - | - | o | - |
-| **P** | pseudo-unprotected VM + boot shim¹² | o | - | o | o | - | o | o | - | - | - | - | - | - |
-| **W** | Windows guest 支援（pVM 驅動移植） | o | - | - | o | - | - | - | - | - | - | - | - | o |
+| # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | vnc |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **L** | Licensing | o | o | o | -¹ | o | o | o | - | o | o | o | - | - | - |
+| **M1** | 建置管線與打包 | o | o | o | - | o | o | o | - | o | - | o | o | o | - |
+| **M2** | DisplayFramework 重構 | - | - | o | - | - | - | o | o | - | - | - | - | - | - |
+| **M3** | 磁碟與儲存² | - | - | o | - | - | - | o | - | - | - | - | o | - | - |
+| **M4** | VM 平台雜項³ | - | - | o | o | o | - | o | - | - | - | - | - | - | - |
+| **M5** | 核心模組管理與大頁（含 settings.prop 進階畫面） | - | - | o | - | o | - | - | - | - | - | - | - | - | - |
+| **R** | nproc 救援模組（`nproc_guard`）⁵ | - | - | o | - | o | - | - | - | - | - | - | - | - | - |
+| **N** | 網路預設與設定精靈步驟 | - | - | o | - | - | - | - | - | - | - | - | - | - | - |
+| **AG** | 客體代理操作（無頭 agent VM）⁴ | - | - | o | - | - | - | - | - | - | - | - | - | - | - |
+| **C** | vCPU 放置（affinity / capacity / cluster）¹¹ | - | - | o | - | - | - | - | - | - | - | - | - | - | - |
+| **S** | 序列埠：SBSA UART / pty / USB ACM / PM reset | - | - | o | o | - | - | o | - | - | - | - | - | - | - |
+| **A** | 虛擬音效卡（virtio-snd + AAudio 端點）ᴬ | o | - | o | - | - | - | o | - | - | - | - | - | o | - |
+| **MED** | virtio-media：相機 / VPU⁶ᴬ | o | - | o | - | - | - | o | - | - | - | - | o | - | - |
+| **P** | pseudo-unprotected VM + boot shim¹² | o | - | o | o | - | o | o | - | - | - | - | - | - | - |
+| **W** | Windows guest 支援（pVM 驅動移植） | o | - | - | o | - | - | - | - | - | - | - | - | o | - |
 
 **N** 與 **AG** 來自同一個 mega-commit `ca184f0`（61 檔 +4213/−882），連同 M3 的擴充，扁平時要按三列拆開。
 
@@ -100,42 +105,42 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 
 ## 2. 表二：G + 路線列
 
-| # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win |
-|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **G1** | Gunyah 記憶體共享⁷ | - | - | o | - | o | o | o | - | - | - | - | - | - |
-| **G2a** | 開機期 blessed pool | - | - | o | o | - | o | o | - | - | - | - | - | - |
-| **G2b** | guest-alloc pool | - | - | o | - | - | o | o | - | - | - | - | - | - |
-| **G2c** | 可成長 pool（`droidvm,pool-size`） | - | - | o | o | o | o | o | - | - | - | - | - | - |
-| **G2d** | udmabuf 模組與界限（三邊 65536） | - | - | o | - | o | o | o | - | - | - | - | - | - |
-| **G6** | 執行期 parcel 直接匯入 DMA-BUF⁸ | - | - | - | - | o | - | o | - | - | - | - | - | - |
-| **G7** | `gh_unmovable`：一開始就不可移動的記憶體，讓小 blob 也能 share | - | - | - | - | o | - | - | - | - | - | - | - | - |
-| **G3** | Scanout 與 blit 路徑（含每個 sink 自報 fourcc） | - | - | o | - | - | o | o | o | - | o | - | - | - |
-| **DP** | 顯示管線解耦（Screen / Frame / Exporter、多螢幕、per-binding 輸入） | o | - | o | - | - | o | o | o | - | - | - | - | - |
-| **H** | VNC 硬體 H.264（RFB encoding 50 + `DVH1`） | o | - | o | - | - | - | o | o | - | - | - | o | - |
-| **G4** | GPU 排程（cpuset / RT，**依賴 C**） | - | - | o | - | - | - | o | - | - | - | - | - | - |
-| **G5** | zink / wsi / GL 共用修正 | - | - | - | - | - | - | - | - | - | - | o | - | - |
-| **Q** | virglrenderer QEMU resource-info 相容 API | - | - | - | - | - | - | - | - | - | o | - | - | - |
-| **D** | drm2kgsl 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - |
-| **X1** | gfxstream 路線接線⁹ | o | - | o | - | - | o | o | - | - | - | o | - | - |
-| **X2** | fd 外部記憶體模式 + HMI HAL（取代舊 AHB 適配） | - | - | - | - | - | - | - | - | o | - | o | - | - |
-| **X3** | host-visible 後端、ring blob 池與 folio 政策¹⁰ | - | - | - | - | - | - | o | - | o | - | - | - | - |
-| **X4** | Vulkan decoder 強化與生命週期 | - | - | - | - | - | - | - | - | o | - | - | - | - |
-| **X5** | ASG 傳輸（consumer / framing / seqno） | - | - | - | - | - | - | - | - | o | - | o | - | - |
-| **X6** | guest blob 匯入與 teardown | - | - | - | - | - | - | - | - | o | - | - | - | - |
-| **X7** | cereal 相容閘（建置期腳本） | - | - | - | - | - | - | - | - | o | - | - | - | - |
-| **X8** | guest ICD 擴充與配置 | - | - | - | - | - | - | - | - | - | - | o | - | - |
-| **X9** | gfxstream 診斷（建議丟） | - | - | - | - | - | - | - | - | o | - | o | - | - |
-| **X10** | 臨時壓抑（modifier 隱藏、`GFXSTREAM_NO_CB_EXPORT`） | - | - | - | - | - | - | - | - | o | - | - | - | - |
-| **V** | venus 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - |
+| # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | vnc |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **G1** | Gunyah 記憶體共享⁷ | - | - | o | - | o | o | o | - | - | - | - | - | - | - |
+| **G2a** | 開機期 blessed pool | - | - | o | o | - | o | o | - | - | - | - | - | - | - |
+| **G2b** | guest-alloc pool | - | - | o | - | - | o | o | - | - | - | - | - | - | - |
+| **G2c** | 可成長 pool（`droidvm,pool-size`） | - | - | o | o | o | o | o | - | - | - | - | - | - | - |
+| **G2d** | udmabuf 模組與界限（三邊 65536） | - | - | o | - | o | o | o | - | - | - | - | - | - | - |
+| **G6** | 執行期 parcel 直接匯入 DMA-BUF⁸ | - | - | - | - | o | - | o | - | - | - | - | - | - | - |
+| **G7** | `gh_unmovable`：一開始就不可移動的記憶體，讓小 blob 也能 share | - | - | - | - | o | - | - | - | - | - | - | - | - | - |
+| **G3** | Scanout 與 blit 路徑（含每個 sink 自報 fourcc） | - | - | o | - | - | o | o | o | - | o | - | - | - | - |
+| **DP** | 顯示管線解耦（Screen / Frame / Exporter、多螢幕、per-binding 輸入） | o | - | o | - | - | o | o | o | - | - | - | - | - | - |
+| **H** | VNC 硬體 H.264（RFB encoding 50 + `DVH1`） | o | - | o | - | - | - | o | o | - | - | - | o | - | o |
+| **G4** | GPU 排程（cpuset / RT，**依賴 C**） | - | - | o | - | - | - | o | - | - | - | - | - | - | - |
+| **G5** | zink / wsi / GL 共用修正 | - | - | - | - | - | - | - | - | - | - | o | - | - | - |
+| **Q** | virglrenderer QEMU resource-info 相容 API | - | - | - | - | - | - | - | - | - | o | - | - | - | - |
+| **D** | drm2kgsl 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - | - |
+| **X1** | gfxstream 路線接線⁹ | o | - | o | - | - | o | o | - | - | - | o | - | - | - |
+| **X2** | fd 外部記憶體模式 + HMI HAL（取代舊 AHB 適配） | - | - | - | - | - | - | - | - | o | - | o | - | - | - |
+| **X3** | host-visible 後端、ring blob 池與 folio 政策¹⁰ | - | - | - | - | - | - | o | - | o | - | - | - | - | - |
+| **X4** | Vulkan decoder 強化與生命週期 | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
+| **X5** | ASG 傳輸（consumer / framing / seqno） | - | - | - | - | - | - | - | - | o | - | o | - | - | - |
+| **X6** | guest blob 匯入與 teardown | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
+| **X7** | cereal 相容閘（建置期腳本） | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
+| **X8** | guest ICD 擴充與配置 | - | - | - | - | - | - | - | - | - | - | o | - | - | - |
+| **X9** | gfxstream 診斷（建議丟） | - | - | - | - | - | - | - | - | o | - | o | - | - | - |
+| **X10** | 臨時壓抑（modifier 隱藏、`GFXSTREAM_NO_CB_EXPORT`） | - | - | - | - | - | - | - | - | o | - | - | - | - | - |
+| **V** | venus 路線 | o | - | o | - | - | o | o | - | - | o | o | - | - | - |
 
 08-29 新增 **G6**（hmod + crosvm）與 **Q**（virgl），並補三格：**G2d/gmod**、**X2/mesa**、**G1/hp**。
 其中 **G1/hp** 已隨 hp 欄一起消失。
 
 ### 欄總計
 
-| meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | 合計 |
-|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 11 | 2 | 26 | 6 | 10 | 13 | 23 | 4 | 10 | 5 | 10 | 4 | 3 | **127** |
+| meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | vnc | 合計 |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 11 | 2 | 26 | 6 | 10 | 13 | 23 | 4 | 10 | 5 | 10 | 4 | 3 | 1 | **128** |
 
 （歷次總數：08-26 **122** → 08-29 **130** → 08-30 加入 R 後 **132** → hp 欄退出後 **129**
 → 實作扁平化時發現**三格是空的**（edk2/L、crosvm/C、hmod/P）後 **127**
@@ -384,6 +389,18 @@ lateautumn233 在舊分支上的 12 個 commit 一個都沒帶過來——現在
 - **`prebuilts` submodule 是髒的但指標沒動**：本機重編的 payload 已含 `nproc-guard-gki-{6.1,6.6,6.12}.ko`，
   但沒推回 Droid-VM/DroidVM-Prebuilts，而且它比 crosvm HEAD 舊（少 `setresuid` 與顏色邊界）。
   下次建 APK 會重生，所以沒有必要為了扁平先提交它。
+- **`external/zstd` `e481383`（libzstd visibility）只存在於一台機器**，而且**直接讓 soong analysis 失敗**。
+  zstd 沒有我們的 fork（`Droid-VM/zstd` 不存在），remote 是 AOSP 上游，所以改成 `soong-patches/`
+  的 patch overlay，由 `1_` 在 `repo sync` 之後套用——edk2 也是這個做法。
+- **`external/libvncserver` 不是無家可歸的，是我一開始判斷錯。** 它的兩個 commit（`0b918ec` poll()、
+  `6ab9b32` FD_SETSIZE）**早就推在 fork 的 `wip/3d-accel` 上**。我的掃描把它判成「不在任何 remote」，
+  是因為本機那份 clone 只 fetch 過 `droidvm` 與 `droidvm-app`，根本沒有可以比對的 remote-tracking ref
+  ——**本機 ref 過期，不是真的沒推**。真正的 bug 只有一個：`checkout_soong` 的清單沒有列它，
+  所以乾淨環境拿到的是 manifest 釘的 `droidvm` 版本，少那兩個 commit。加進清單即可。
+  這也是矩陣多出 `vnc` 欄的原因。
+
+  教訓值得記下來：**「不在任何 remote」這個判準，在本機 ref 不完整時會給出假陽性。**
+  要問遠端就得真的問遠端（`git ls-remote`），不能問本機的 `branch -r --contains`。
 - **`guest-patches/`（23 個檔）已從 meta 的 `pr/3d-accel` 拿掉。** 它是鏡像不是產物：
   `linux/*.patch` 的實體是 gmod 的 `virtio_gpu/` DKMS 驅動；`mesa-26.0.3/` 與 `l233-mesa/` 是
   mesa fork 還推不出去時留的快照（README 自己寫「Canonical full tree: … snapshot the load-bearing
