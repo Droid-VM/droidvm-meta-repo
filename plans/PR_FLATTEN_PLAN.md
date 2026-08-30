@@ -1,4 +1,4 @@
-# pr/3d-accel 扁平化計畫（2026-08-30 修訂）
+# pr/3d-accel 扁平化計畫（2026-08-31 修訂）
 
 一項功能一個 commit，順序 **L**(licensing) → **M**(GPU 無關) → **G**(路線共用 GPU 基礎) → **D**(drm2kgsl) → **X**(gfxstream) → **V**(venus)。
 他人 commit 併入功能 commit，作者掛 `Co-authored-by:`。
@@ -18,9 +18,9 @@
 
 | repo | 縮寫 | base | head | 範圍內 commits |
 |---|---|---|---|--:|
-| droidvm-3d-accel（meta） | meta | 空樹 | f4858fb | 302 |
+| droidvm-3d-accel（meta） | meta | 空樹 | 679ae55 | 303 |
 | mesa-cross | cross | 空樹 | 2586325 | 19 |
-| DroidVM（app） | app | `origin/master` | 4a44f18 | 123 |
+| DroidVM（app） | app | `origin/master` | 5f22fe8 | 129 |
 | edk2-gunyah | edk2 | `origin/master` | 4fb0b84 | 8 |
 | gunyah_host_mod | hmod | 空樹 | e1280d8 | 38 |
 | droidvm-guest-additions | gmod | 空樹 | d7e6713 | 40 |
@@ -29,17 +29,20 @@
 | gfxstream | gfxs | `aosp/emu-main-dev` c00cd03a3（08-21 換基準） | 6a9d4dd2c | 62 |
 | virglrenderer | virgl | `8220efec`（AOSP snapshot） | 3dbfe7b5 | 44 |
 | mesa | mesa | mesa main `74d4e41b2bb` | 6ad3bcbcfca | 76 |
-| crosvm-minimal-manifest | mfst | 分支鏈（不再釘 `main`） | 29de119 | 1 |
+| crosvm-minimal-manifest | mfst | 空樹 | 29de119 | 11 |
 | gunyah-guest-drivers-windows | win | 上游 virtio-win | 8d12ff0e（`master-squash`） | 18 |
-| gh-hugepage-reserve | hp | `upstream/master` | 3ebe0fe | 23 |
+| gh-hugepage-reserve | hp | `upstream/master` | bdf9062 | 23 |
 
-`hp` 從 29 掉到 23，是 v12（`9805ea9`）把 v9/v11 疊出來的補丁路徑整包重寫成 SOLID 結構的結果，
+`hp` 從 29 掉到 23，是 v12（`bdf9062`）把 v9/v11 疊出來的補丁路徑整包重寫成 SOLID 結構的結果，
 不是有東西被丟掉。`win` 形狀與其他欄不同：base 是上游 virtio-win、上游目標也是 virtio-win，
 而且**它已經自己扁平過了**（153 → 18 commits 在 `master-squash`）。
 
-**所有 repo 的工作區都是乾淨的**，只剩 DroidVM 的 `assets/prebuilts` submodule 髒著——那是本機重編的
-payload（已含 `nproc-guard-gki-*.ko`），要推回 Droid-VM/DroidVM-Prebuilts 才輪得到指標 bump，
-而且它比目前的 crosvm HEAD 舊，下一次建 APK 會重生。
+**以上 head 全部已推上 org 的 `wip/3d-accel`**（08-30）。所有 repo 的工作區都是乾淨的，只剩 DroidVM 的
+`assets/prebuilts` submodule 髒著——那是本機重編的 payload（已含 `nproc-guard-gki-*.ko`），
+要推回 Droid-VM/DroidVM-Prebuilts 才輪得到指標 bump，而且它比目前的 crosvm HEAD 舊，下一次建 APK 會重生。
+
+`mfst` 的 commit 數從 1 更正為 11：那一欄先前寫的是扁平後的數量，不是範圍內的數量，欄位定義不符。
+整個 repo 都是我們的（無上游），11 個 commit 裡 7 個是 lateautumn233 的。
 
 ## 1. 表一：L / M / 新功能列
 
@@ -184,17 +187,78 @@ payload（已含 `nproc-guard-gki-*.ko`），要推回 Droid-VM/DroidVM-Prebuilt
 
 ## 5. 署名
 
-- **gfxstream 換基準時掉了 lateautumn233 的署名。** 08-21 分支是從 `aosp/emu-main-dev` **全新建立**（不是 rebase），
-  103 個舊 commit 手工重寫成 25 個，他的 12 個 commit 一個都沒帶過來，62 個 commit 沒有任何
-  `Co-authored-by: lateautumn233`。其中 10 個是設計取代（`ff1557881` 改用 fd/dma-buf 取代整條 AHB 路線）合理消失，
-  但 **`402ea1771`（lazy mLinear）與 `7bccebab2`（memoryTypeBits + Vk13Features）是他的碼被重寫**，這兩列要補署名。
-  舊分支保留在 `backup/pre-upstream-20260821`。
-- **`win` 的 `rdmapool/` 基礎 commit `3b005d67` 作者是 `sunflower2333`**，不是 HuJK。
-- **`hp` 有兩個外部作者**：`lateautumn233`（fork 起點）與 `samfor12`（PR #7，五個 commit：immediate reclaim、
-  reconcile 對 vm_count=0、PCP drain）。v12 重寫把他們的碼吸收進新結構，扁平後那一列要掛兩個 co-author。
-- app 的 lateautumn233 commit 5 個：guest memory allocation options（G2b）、環境變數（M4）、
-  zstd worker count（M3）、DisplayChromeController tests（M2）、vCPU affinity picker（C）。
-- crosvm `d9000bb43` 作者 `Your Name <you@example.com>` 是本機早期未設 identity 的產物，是 HuJK 自己的。
+### 規則
+
+扁平化**只對照上游與本地最終狀態**，按功能切分，不參照 wip 的 commit 邊界。所以一個 commit 的
+「作者」不再由歷史決定，而是由**這個功能的最終狀態裡有誰的碼**決定：
+
+1. 一個功能有幾位作者，`pr/3d-accel` 那一個 commit 就掛幾個 `Co-authored-by:`。
+2. **wip 分支裡的作者欄不必修。** 那裡有 `root`、有 `Your Name <you@example.com>`、有空 email，
+   全部不管——`wip/3d-accel` 是工作歷史，只要 `pr/3d-accel` 是對的就好。
+3. `pr/3d-accel` 的 trailer **不掛 AI**。現在 wip 裡的 `Co-Authored-By: Claude ...` 與
+   `Claude-Session:` 兩種 trailer 在扁平時一律刪掉（見 §8）。
+4. 作者身分以人為單位，不是以 email 為單位。HuJK 的四種寫法
+   （`gh@hujk.oeg`、`gh@hujk.org`、`s920361@gmail.com`、`Your Name <you@example.com>`）是同一個人，
+   統一成一個。
+
+### 目前的作者
+
+| 人 | 出現在 | 待辦 |
+|---|---|---|
+| **HuJK** | 全部 14 個 repo | 四種 email 統一 |
+| **lateautumn233（L233）** | app, hmod, gmod, crosvm, virt, virgl, mesa, mfst, hp；**gfxs 的署名被弄丟了** | 見下方每列對照 |
+| **Kancy Joe** | crosvm `f7838af1d`（aarch64 pflash for UEFI variables）→ **M4** | ⚠️ git 裡的 email 是空的，需要正確地址才寫得出 trailer |
+| sunflower2333 | win `3b005d67`（`rdmapool/` 基礎） | 只影響 W |
+| samfor12 | hp 14 個 commit（immediate reclaim、reconcile、PCP drain、SetPageReserved、C89、low-memory mode…） | ⚠️ 不在你列的三人裡，見下方 |
+| BigfootACA | hp 的兩個 merge commit（PR #6、#7） | merge 不帶內容，不必掛 |
+
+⚠️ **hp 多出兩個名字。** `gh-hugepage-reserve` 是從 lateautumn233 的 fork 出發、又收了 samfor12 的
+PR #7，所以它的三列（L、M5、G1）除了 HuJK 之外還要掛 samfor12 與 lateautumn233。如果 hp 打算走自己的
+上游流程而不併進 `pr/3d-accel`，這一段就不適用——這件事要先定。
+
+### 每一列要掛誰
+
+只列出 HuJK 以外還有人的列；沒列到的列就是 HuJK 一個人。
+
+| 列 | 追加 co-author | 依據（wip 的 commit） |
+|---|---|---|
+| **M1** 建置管線與打包 | L233 | mesa `40eccc6e9db` `34c69c5813d` `0c92ee40414` `11a4b43c40b` `f5faa901c85`；mfst 全部 7 個 |
+| **M2** DisplayFramework | L233 | app `02377c0`（DisplayChromeController tests） |
+| **M3** 磁碟與儲存 | L233 | app `540a601`（zstd worker count） |
+| **M4** VM 平台雜項 | L233, **Kancy Joe** | app `d3dfe75`（per-VM 環境變數）；crosvm `f7838af1d`（pflash） |
+| **C** vCPU 放置 | L233 | app `7e5459c`（affinity picker） |
+| **W** Windows guest | sunflower2333 | win `3b005d67` |
+| **G1** Gunyah 記憶體共享 | L233（＋hp 的話 samfor12） | hmod `0a9d951`；crosvm `78ca3b50b` `d01bdef7f`；hp `d42d5e8` |
+| **G2a** 開機期 blessed pool | L233 | crosvm `bb171f312`（pci_bar_size 2GB→256MB） |
+| **G2b** guest-alloc pool | L233 | app `15c8286`；gmod `ce7e962`；crosvm `83ffa9d8f` |
+| **G3** Scanout 與 blit | L233 | gmod `075d260`；crosvm `ddf70b61b` `cff5722ee` `00ec650d0`；virgl `fd611e67` `24ce0a62`；virt `f413ae8` `4a4581e` |
+| **DP** 顯示管線解耦 | L233 | virt `466354b`（surface change handling） |
+| **G4** GPU 排程 | L233 | crosvm `2444da33c`（RT scheduling） |
+| **G5** zink 與 wsi | L233 | mesa `24df2ad76b2` `24d85e4494e` `4501696cbcd` |
+| **D** drm2kgsl | L233 | virgl 的 12 個 `drm/kgsl:` ＋ `b9881a0c`；mesa 的 `tu/virtio` 5 個、`tu/a750` `91be6906972`、`50450cbcc75`、`945635003d3`、`12b907f5a52`、freedreno/virtio 3 個 |
+| **X2** fd 外部記憶體 | L233（**補回**） | 舊分支 `7bccebab2`（memoryTypeBits + Vk13Features）——見下 |
+| **X3** host-visible 後端 | L233（**補回**） | 舊分支 `402ea1771`（lazy mLinear）——見下 |
+| **X8** guest ICD 擴充 | L233 | mesa `44df9764052`（cerealgenerator + gfxstream_vk_device + ResourceTracker） |
+| **V** venus | L233 | crosvm `0091d85be`（forward virgl log levels）；virgl `336c5aed` |
+| **M5** 核心模組與大頁 | samfor12（若 hp 併入） | hp 的 14 個 |
+
+### gfxstream 的署名要用手補
+
+08-21 那次不是 rebase，是**從 `aosp/emu-main-dev` 全新建立分支**再手工重寫，103 個舊 commit 變成 25 個，
+lateautumn233 的 12 個 commit 一個都沒帶過來——現在 62 個 commit 裡沒有任何一行 `Co-authored-by`。
+其中 10 個是設計取代（`ff1557881` 改用 fd/dma-buf 取代整條 AHB 路線）合理消失，但
+
+- **`402ea1771`（lazy mLinear）** 與 **`7bccebab2`（memoryTypeBits + Vk13Features）** 是**他的碼被重寫**，
+  最終狀態裡還看得到，所以 X2 / X3 兩列必須補上他。
+
+舊分支保留在 `backup/pre-upstream-20260821`，比對用 `git log backup/pre-upstream-20260821 --author=lateautumn233`。
+
+### 其他
+
+- crosvm `d9000bb43` 作者 `Your Name <you@example.com>` 是本機早期未設 identity 的產物，是 HuJK 自己的，
+  不是第四個人。
+- L233 的兩個 `tmp` / `wip` 標題（crosvm `d01bdef7f`、mesa `44df9764052`）內容都是真的：
+  前者是 Gunyah + GPU blob（G1），後者是 gfxstream guest ICD（X8）。標題爛不代表可以丟。
 
 ## 6. 換基準帶來的反向問題
 
@@ -231,8 +295,10 @@ payload（已含 `nproc-guard-gki-*.ko`），要推回 Droid-VM/DroidVM-Prebuilt
 6. **`win` 的 base 要在 `dev/viosnd-endpoint-per-stream` 合併前釘住。**
 7. **預設 renderer 翻成 virglrenderer（app `6025be0`）沒有寫下理由**，body 只有機制面的事實。
    要嘛補上「virglrenderer 是目前能用的路線、gfxstream 還在實驗」，要嘛在扁平前退掉。
-8. **Claude-Session trailer** 全部拿掉；HuJK 三種 email（`gh@hujk.oeg` / `gh@hujk.org` / `s920361@gmail.com`）統一。
-9. **PR 目標分支名**：org 預設是 `wip-3d-accel`（連字號）。meta / hmod / gmod 整個 repo 都是 3d-accel 工作，
+8. **Kancy Joe 的 email。** git 裡是空的，寫不出 `Co-authored-by:`。M4 那一列在拿到正確地址前不能定稿。
+9. **hp 要不要併進 `pr/3d-accel`。** 併的話它的三列要多掛 samfor12（14 個 commit）與 lateautumn233；
+   不併就走自己的上游流程，這張表要拿掉 hp 欄。見 §5。
+10. **PR 目標分支名**：org 預設是 `wip-3d-accel`（連字號）。meta / hmod / gmod 整個 repo 都是 3d-accel 工作，
    建議 `pr/3d-accel` 直接以新歷史取代。
 
 ### 已從待決移除
