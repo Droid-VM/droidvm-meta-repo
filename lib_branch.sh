@@ -90,7 +90,11 @@ checkout_soong() {
     local d=$1 name=$2 url b
     url="https://github.com/Droid-VM/$name.git"
     git -C "$d" remote get-url droidvm >/dev/null 2>&1 || git -C "$d" remote add droidvm "$url"
-    b=$(pick droidvm $(branch_chain))
+    # Ask the URL, not the remote name. `pick` runs git in the CURRENT directory -- the meta
+    # repo -- where "droidvm" is not a remote, so the name form fails to resolve for every
+    # branch in the chain and every soong fork silently kept its manifest revision instead.
+    # It failed as ">>> ... keeping the manifest revision", which reads like a decision.
+    b=$(pick "$url" $(branch_chain))
     if [ -z "$b" ]; then
         echo ">>> $d: no $(branch_chain) on droidvm, keeping the manifest revision $(git -C "$d" rev-parse --short HEAD)"
         return 0
