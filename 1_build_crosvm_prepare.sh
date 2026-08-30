@@ -40,6 +40,25 @@ ln -sfn crosvm_build/hardware/google/gfxstream       gfxstream
 ln -sfn crosvm_build/external/virglrenderer          virglrenderer
 ln -sfn crosvm_build/packages/modules/Virtualization Virtualization
 
+# A project whose manifest NAME changes keeps pointing at its old object store, and repo
+# refuses to fetch rather than rebind it:
+#
+#   error: hooks is different in .repo/projects/external/zstd.git
+#                            vs .repo/project-objects/zstd.git
+#
+# That is what happened when external/zstd moved from platform/external/zstd (AOSP) to zstd
+# (the Droid-VM fork). A fresh workspace never sees it -- there is no old binding to collide
+# with -- so this only bites a checkout that predates the rename. Say so with the command,
+# rather than letting repo's message stand on its own: it warns about losing "the work tree's
+# git metadata", which sounds worse than it is when the project carries nothing local.
+for stale in .repo/project-objects/platform/external/zstd.git; do
+    [ -e "crosvm_build/$stale" ] || continue
+    echo ">>> external/zstd was renamed in the manifest; its old object store is still here." >&2
+    echo "    Nothing of ours lives in that project, so rebinding it is safe:" >&2
+    echo "        (cd crosvm_build && repo sync --force-sync external/zstd)" >&2
+    echo "    Check first if you are unsure: git -C crosvm_build/external/zstd status" >&2
+done
+
 # Check each Droid-VM fork out along the branch chain. The manifest only pins a stable
 # base; the dev work lives on the trunk, and a variant branch that a component does not
 # carry falls back to it (see lib_branch.sh). If a component has none of them, the
