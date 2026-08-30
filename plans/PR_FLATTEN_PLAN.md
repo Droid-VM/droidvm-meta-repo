@@ -36,17 +36,26 @@
 Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額外作者（samfor12、BigfootACA）
 也跟著離開署名表。
 
-**但「退出表格」不等於「沒有牽連」，而且牽連有兩條，不是一條：**
+**但「退出表格」不等於「沒有牽連」。有三條，全部是 fail-open 的可選整合，沒有一條是硬相依：**
 
-1. **`/dev/gh_pinprobe`**（見註⁷與 §3.10）——執行期相依，crosvm 半邊只需要在節點缺席時不當機。這條很輕。
-2. **M5 的 app 半邊整個是那個專案的管理面板**——這條重得多，而且 hp 還在欄裡時被 M5/hp 那一格遮著。
-   12 個 app 檔案指名 `gh-hugepage-reserve`：`HugePageModel` 讀寫它 Magisk 模組的
+1. **`/dev/gh_pinprobe`**（見註⁷與 §3.10）——crosvm 只需要在節點缺席時不當機。最輕。
+2. **M5 的大頁面板**——`HugePageModel` 讀寫那個專案 Magisk 模組的
    `settings.prop` / `module.prop` / `disable` / `load.sh` / `kapi_check`，`rmmod` 它，
    並且**按它的 v6/v7 sysfs 差異分支**；`KernelModuleListController` 與 `HugePageActivity`
    還寫死了 `https://github.com/Droid-VM/gh-hugepage-reserve/releases` 當下載連結。
+   （M5 不是「整個都是 hp 的面板」——同一列也管我們自己的四個模組，hmod 那格就是為此而亮。）
+3. **`PoolPreflight` 在 VM 啟動前看一眼池子**——不在 M5，在啟動路徑上（`VMActions:113` 前景、
+   `VMInstance:570` guest reboot 後重啟、`VMInstanceStore:157` 開機自啟）。它讀
+   `/sys/module/gh_hugepage_reserve/parameters` 的 `pool_avail`，不夠就等（背景啟動）或說一聲（前景啟動）。
 
-   也就是說 `pr/3d-accel` 的 M5 會依賴一個**審查者在同一份 PR 裡看不到**的 sysfs／settings.prop 介面，
-   而且是版本相依的。這件事要先決定怎麼講（見 §8）。
+   **這是純新增的功能，不是新的相依。** 池子夠用時所有配置都由模組 serve，那條壞路徑根本走不到；
+   池子不夠時的下場（整機停頓後 OOM-kill crosvm、`qcom_scm ... -22` 重置）是**舊版本一樣會有**的
+   既有行為，PoolPreflight 只是先看一眼、能等就等。模組不在時 `readPages` 回 −1 →
+   `applicable=false` → `isEnough()` 回 true → 照常啟動，也就是退回舊版本的行為。
+
+所以三條都不是必要相依，`pr/3d-accel` 不會因為缺少那個專案而不能用。真正要在 PR 裡交代的
+只有一件事：這些程式碼會去讀一個外部專案的 sysfs／settings.prop 介面，而且 M5 那條是版本
+相依的（v6/v7 分支）。見 §8。
 
 `win` 形狀與其他欄不同：base 是上游 virtio-win、上游目標也是 virtio-win，
 而且**它已經自己扁平過了**（153 → 18 commits 在 `master-squash`）。
@@ -67,7 +76,7 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 
 | # | commit（功能） | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win |
 |---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **L** | Licensing | o | o | o | o¹ | o | o | o | - | o | o | o | - | - |
+| **L** | Licensing | o | o | o | -¹ | o | o | o | - | o | o | o | - | - |
 | **M1** | 建置管線與打包 | o | o | o | - | o | o | o | - | o | - | o | o | o |
 | **M2** | DisplayFramework 重構 | - | - | o | - | - | - | o | o | - | - | - | - | - |
 | **M3** | 磁碟與儲存² | - | - | o | - | - | - | o | - | - | - | - | o | - |
@@ -76,11 +85,11 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 | **R** | nproc 救援模組（`nproc_guard`）⁵ | - | - | o | - | o | - | - | - | - | - | - | - | - |
 | **N** | 網路預設與設定精靈步驟 | - | - | o | - | - | - | - | - | - | - | - | - | - |
 | **AG** | 客體代理操作（無頭 agent VM）⁴ | - | - | o | - | - | - | - | - | - | - | - | - | - |
-| **C** | vCPU 放置（affinity / capacity / cluster） | - | - | o | - | - | - | o | - | - | - | - | - | - |
+| **C** | vCPU 放置（affinity / capacity / cluster）¹¹ | - | - | o | - | - | - | - | - | - | - | - | - | - |
 | **S** | 序列埠：SBSA UART / pty / USB ACM / PM reset | - | - | o | o | - | - | o | - | - | - | - | - | - |
 | **A** | 虛擬音效卡（virtio-snd + AAudio 端點）ᴬ | o | - | o | - | - | - | o | - | - | - | - | - | o |
 | **MED** | virtio-media：相機 / VPU⁶ᴬ | o | - | o | - | - | - | o | - | - | - | - | o | - |
-| **P** | pseudo-unprotected VM + boot shim | o | - | o | o | o | o | o | - | - | - | - | - | - |
+| **P** | pseudo-unprotected VM + boot shim¹² | o | - | o | o | - | o | o | - | - | - | - | - | - |
 | **W** | Windows guest 支援（pVM 驅動移植） | o | - | - | o | - | - | - | - | - | - | - | - | o |
 
 **N** 與 **AG** 來自同一個 mega-commit `ca184f0`（61 檔 +4213/−882），連同 M3 的擴充，扁平時要按三列拆開。
@@ -99,6 +108,7 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 | **G2c** | 可成長 pool（`droidvm,pool-size`） | - | - | o | o | o | o | o | - | - | - | - | - | - |
 | **G2d** | udmabuf 模組與界限（三邊 65536） | - | - | o | - | o | o | o | - | - | - | - | - | - |
 | **G6** | 執行期 parcel 直接匯入 DMA-BUF⁸ | - | - | - | - | o | - | o | - | - | - | - | - | - |
+| **G7** | `gh_unmovable`：一開始就不可移動的記憶體，讓小 blob 也能 share | - | - | - | - | o | - | - | - | - | - | - | - | - |
 | **G3** | Scanout 與 blit 路徑（含每個 sink 自報 fourcc） | - | - | o | - | - | o | o | o | - | o | - | - | - |
 | **DP** | 顯示管線解耦（Screen / Frame / Exporter、多螢幕、per-binding 輸入） | o | - | o | - | - | o | o | o | - | - | - | - | - |
 | **H** | VNC 硬體 H.264（RFB encoding 50 + `DVH1`） | o | - | o | - | - | - | o | o | - | - | - | o | - |
@@ -125,12 +135,20 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 
 | meta | cross | app | edk2 | hmod | gmod | crosvm | virt | gfxs | virgl | mesa | mfst | win | 合計 |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 11 | 2 | 26 | 7 | 10 | 13 | 24 | 4 | 10 | 5 | 10 | 4 | 3 | **129** |
+| 11 | 2 | 26 | 6 | 10 | 13 | 23 | 4 | 10 | 5 | 10 | 4 | 3 | **127** |
 
-（歷次總數：08-26 **122** → 08-29 **130** → 08-30 加入 R 後 **132** → hp 欄退出後 **129**。
-08-30 當天進來的 21 個 commit 只有 R 一列是新格，其餘全部落在已經亮著的格子裡。）
+（歷次總數：08-26 **122** → 08-29 **130** → 08-30 加入 R 後 **132** → hp 欄退出後 **129**
+→ 實作扁平化時發現**三格是空的**（edk2/L、crosvm/C、hmod/P）後 **127**
+（hmod/P 空出來的位置由新列 **G7** 補上，所以總數持平）。）
 
-¹ edk2 保持 BSD-2-Clause-Patent，唯一不轉 GPL
+**那三格是實作時才發現的，不是重新判斷的結果。** builder 做不出那些 commit，因為範圍內根本沒有
+對應內容：edk2 的 licensing 加了又 revert（§4）、crosvm 完全沒有 vCPU 放置的碼（註¹¹）、
+hmod 沒有 pseudo-unprotected 的碼（註¹²）。矩陣先前把「不變」「上游本來就有」「放錯格的模組」
+都畫成了一格 commit。**這是紙上推演看不出來、真的去建分支才會撞到的一類錯誤。**
+
+¹ edk2 保持 BSD-2-Clause-Patent，唯一不轉 GPL——而且「保持」是字面意思：範圍內**沒有任何 licensing 檔案被動過**。
+　`fe353d3` 加過一版又被 `f8fa47a` 整個 revert（拿它動過的 7 個檔案 diff `fe353d3~1..f8fa47a`，0 行），
+　所以這格是 `-`：沒有 commit 可產出
 ² LXC 映像匯入與建立 Linux VM、磁碟維護（resize / 相依更新 / 自動擴容）、VM 刪除、qcow2 zstd 與 zero-cluster、
 　匯入後才可開機的規則
 ³ SMBIOS 身分、pflash、ACPI 電源、致命訊號、IRQ 衝突、kvcalloc >2GB、per-VM 環境變數、game mode、
@@ -149,6 +167,15 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 ⁸ hmod `gunyah_share` 收 DMA-BUF fd 當 parcel 來源，不改它的 backing；crosvm 端把 GPU 驅動匯出的 dma-buf
 　直接送去 SHARE。這條路是 host folio 政策在 crosvm 側的替代品（見 §4）
 ⁹ capset / context-types / `GFXSTREAM_*` env（含 `GFXSTREAM_VRAM_*` 四個）/ pool 節點名 / UI / 啟動器
+¹² hmod 範圍內**沒有 pseudo-unprotected 的碼**：整棵樹搜 `pseudo` 只有 `udmabuf.c:141` 一句註解。
+　原本佔著 P 那格的 `gh_unmovable` 是獨立模組（非 Gunyah SHARE 本體），改列成 **G7**——
+　跟 R（`nproc_guard`）同樣的處理：一個模組一列。hmod 的 commit 數不變
+
+¹¹ crosvm 範圍內**沒有 vCPU 放置的碼**：整個 `droidvm/droidvm..wip` 的 diff 裡，`cpu_affinity` /
+　`cpu_capacity` / `cpu_cluster` / `sched_setaffinity` / `cpuset` / `gpu_cgroup` 一行增刪都沒有，
+　`--gpu-cgroup-path` 在 base 與 wip 的 `cmdline.rs` 裡都存在且相同——那是上游本來就有的。
+　C 因此只剩 app 一格（lateautumn233 的 affinity picker）
+
 ¹⁰ folio 政策現在整條在 gfxstream（`host/vulkan/host_visible_folio.h`）；crosvm 只從 `--gpu vram-folio-threshold-kb=`
 　轉成 env 傳過去，`STREAM_HANDLE_TYPE_MEM_POOL` 與 ring blob 池仍在 crosvm 側
 
@@ -157,8 +184,9 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 
 ## 3. 排序限制與強綁定
 
-1. **G4 必須排在 C 之後。** `--gpu-cgroup-path` 由 lateautumn233 的 vCPU affinity commit 引進，G4 的 RT 開關又 gate
-   在 cpuset 存在上。反序會產生編不起來的樹。
+1. ~~**G4 必須排在 C 之後。**~~ **這條作廢。** 它的前提是「`--gpu-cgroup-path` 由 lateautumn233 的
+   vCPU affinity commit 引進」——實查 `cmdline.rs`，那個旗標在 base 與 wip 都在且相同，是上游本來就有的，
+   不在我們的範圍內。crosvm 沒有 C 列（註¹¹），所以兩列之間沒有順序關係。G4 在 crosvm 是獨立的一筆。
 2. **H 是一個七函式 C ABI**：`android_h264_enc_{create,destroy,request_sync_frame,encode_frame,poll_output,codec_config,frame_counts}`
    加 `media_codec_abi.h`。crosvm 宣告 `extern "C"`、virt 提供實作。兩邊必須同時上。
 3. **X3 是第二個跨 repo ABI**：`stream_renderer_handle` 欄位、`STREAM_HANDLE_TYPE_MEM_POOL`、init params 2048/2049。
@@ -185,6 +213,8 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 - **crosvm 的 per-blob host folio 政策**：`--runtime-share` / `RuntimeShareConfig` / `prepare_blob_backing` /
   `hypervisor/src/gunyah/mthp.rs` / rutabaga `register_blob_backing_handlers`，`713d71e64` 一次全刪（−449 行）。
   淨值是「crosvm 沒有這個旗標」，政策活在 gfxstream。**這是本輪最大的一組加了又刪。**
+- **edk2 的 licensing commit `fe353d3`**：加了又被 `f8fa47a` 整個 revert，逐字淨零，所以 edk2 的
+  L 格是 `-`（註¹）。
 - **crosvm 的 pflash cherry-pick `f7838af1d`**：原始 commit `604aad262` 已經在 base 裡，
   兩邊內容逐字相同，`git diff` 對 pflash 是空的。扁平後不會有這個 commit（見 §5）。
 - **`/dev/gh_pinprobe` 在 `gh_unmovable.ko` 的那一版**：hmod 建了又搬走（`588e583`），加了又刪，淨零。
@@ -224,13 +254,33 @@ Droid-VM/gh-hugepage-reserve，不進 `pr/3d-accel`。它帶進來的兩位額�
 
 ### 目前的作者
 
+**寫 commit 時就用這幾行**（前三個位址都實測過 GitHub 會連到本人的帳號，用
+`gh api repos/<r>/commits/<sha> --jq .author.login` 驗的）：
+
+```
+Author: HuJK <gh@hujk.org>
+Co-authored-by: lateautumn233 <lateautumn233@foxmail.com>
+Co-authored-by: sunflower2333 <sunflower2333@outlook.com>
+Co-authored-by: chunxu Liu <17998140+317764920@users.noreply.github.com>
+```
+
+⚠️ **`gh@hujk.oeg` 是錯字（oeg / org），而且 GitHub 認不得**——實測那個位址的 commit 回
+`UNLINKED`，`gh@hujk.org` 才回 `HuJK`。範圍內最多的作者欄剛好就是那個認不得的錯字，
+所以「四種 email 統一」不是美觀問題，是**不統一的話大半 commit 不會算在本人頭上**。
+
 | 人 | 出現在 | 待辦 |
 |---|---|---|
-| **HuJK** | 全部 13 個 repo | 四種 email 統一 |
+| **HuJK** | 全部 13 個 repo | 四種寫法統一成 `gh@hujk.org`（見上） |
 | **lateautumn233（L233）** | app, hmod, gmod, crosvm, virt, virgl, mesa, mfst；**gfxs 的署名被弄丟了** | 見下方每列對照 |
-| **Kancy Joe**（GitHub `sunflower2333`） | win `3b005d67`（`rdmapool/` 基礎）→ **W** | 用 `Kancy Joe <54024877+sunflower2333@users.noreply.github.com>` |
+| **Kancy Joe**（GitHub `sunflower2333`） | win `3b005d67`（`rdmapool/` 基礎）→ **W** | 用他自己 commit 的 `sunflower2333 <sunflower2333@outlook.com>`（實測會連到帳號） |
+| **chunxu Liu** | win 的 viosnd → **A** | trailer 已經在 wip `41c2521b` 的 body 裡，照抄 |
 
-**要掛 trailer 的剛好就是三個人。** `Kancy Joe` 與 `sunflower2333` 是同一個人（GitHub id 54024877，
+**是四個人，不是三個。** 第四位 **chunxu Liu** 是實作扁平化時才浮出來的：win 的 viosnd 驅動
+vendored 自 `github.com/317764920/viosnd`，wip `41c2521b` 的 body 本來就掛著他的 `Co-Authored-By:`。
+那不是 AI trailer，不能跟 Claude 那些一起刪。**只掃 `%an` 掃不到他，要讀 commit body 才看得見**
+——署名不能只看作者欄。
+
+`Kancy Joe` 與 `sunflower2333` 是同一個人（GitHub id 54024877，
 帳號顯示名就是 Kancy Joe），先前被當成兩位是我看錯。email 也不是問題：他在 DroidVM 與 edk2-gunyah 的
 commit 一直用 `54024877+sunflower2333@users.noreply.github.com`，直接抄那個。
 （crosvm 那個空 email 不是 cherry-pick 弄掉的——base 裡的原始 commit `604aad262` 本來就是空的。）
@@ -306,7 +356,11 @@ lateautumn233 在舊分支上的 12 個 commit 一個都沒帶過來——現在
 ### 其他
 
 - crosvm `d9000bb43` 作者 `Your Name <you@example.com>` 是本機早期未設 identity 的產物，是 HuJK 自己的，
-  不是第四個人。
+  不是另一個人。
+- **meta 不掛 lateautumn233。** 他在 meta 唯一的痕跡是 `guest-patches/linux/0001-...patch` 這種
+  vendored patch 檔（patch 內文的 `From:` 是他），而那整個目錄已經從 `pr/3d-accel` 拿掉（§7）。
+  真正 ship 的是 gmod 的 `virtio_gpu/` 驅動，gmod 的 `bf00f88`（accept host-SHARE'd memparcels）
+  已經掛了他的 trailer。**署名跟著實際 ship 的碼走，不跟著鏡像走。**
 - L233 的兩個 `tmp` / `wip` 標題（crosvm `d01bdef7f`、mesa `44df9764052`）內容都是真的：
   前者是 Gunyah + GPU blob（G1），後者是 gfxstream guest ICD（X8）。標題爛不代表可以丟。
 
@@ -330,7 +384,17 @@ lateautumn233 在舊分支上的 12 個 commit 一個都沒帶過來——現在
 - **`prebuilts` submodule 是髒的但指標沒動**：本機重編的 payload 已含 `nproc-guard-gki-{6.1,6.6,6.12}.ko`，
   但沒推回 Droid-VM/DroidVM-Prebuilts，而且它比 crosvm HEAD 舊（少 `setresuid` 與顏色邊界）。
   下次建 APK 會重生，所以沒有必要為了扁平先提交它。
-- meta 的 `CLAUDE.md`（空）與 `info.txt`（手機 IP/adb 埠）看起來是本機筆記。
+- **`guest-patches/`（23 個檔）已從 meta 的 `pr/3d-accel` 拿掉。** 它是鏡像不是產物：
+  `linux/*.patch` 的實體是 gmod 的 `virtio_gpu/` DKMS 驅動；`mesa-26.0.3/` 與 `l233-mesa/` 是
+  mesa fork 還推不出去時留的快照（README 自己寫「Canonical full tree: … snapshot the load-bearing
+  files here」），那些檔案 mesa repo 裡都有。**沒有任何 `1~9*.sh` 引用它**（實查 0 次），
+  `droidvm-gpu-modules.service` 也是 DKMS 打包前的手動 insmod unit。
+- **`info.txt` 留著但做過去識別化**（空的 `CLAUDE.md` 拿掉）。而且不只 info.txt——同一批本機資料
+  散在 **26 個檔案**裡（`deploy/` 的 bench 腳本 `PHONE=${PHONE:-…}` 預設值、`plans/` 的多份文件），
+  只洗 info.txt 等於沒洗。`pr/3d-accel` 上一律換成：
+  路由器 `10.53.12.1`、手機 `192.168.40.11/.12/.13`、MAC `02:00:5e:11:22:33`、
+  IPv6 改用文件用途的 `2001:db8::/32`（原本是真實的 ISP 前綴，比內網 IP 更能識別）、
+  路徑一律 `/root/Documents/DroidVM_meta`。驗證方式是整支分支 grep 原值，0 個檔案命中。
 
 ## 8. 待決
 
@@ -345,11 +409,11 @@ lateautumn233 在舊分支上的 12 個 commit 一個都沒帶過來——現在
 6. **`win` 的 base 要在 `dev/viosnd-endpoint-per-stream` 合併前釘住。**
 7. **預設 renderer 翻成 virglrenderer（app `6025be0`）沒有寫下理由**，body 只有機制面的事實。
    要嘛補上「virglrenderer 是目前能用的路線、gfxstream 還在實驗」，要嘛在扁平前退掉。
-8. **M5 對 `gh-hugepage-reserve` 的相依要怎麼在 PR 裡交代。** app 的大頁面板讀寫那個專案 Magisk 模組的
-   `settings.prop`，按它的 v6/v7 sysfs 差異分支，還寫死了它的 releases 網址。審查者在這份 PR 裡看不到
-   那個介面。三個選項：(a) 照現狀送，在 commit body 裡明說這是對外部模組的可選整合、缺席時整個面板停用；
-   (b) 把版本分支收斂成單一支援版本，減少要解釋的表面；(c) 把面板從 M5 拆出去，之後單獨送。
-   建議 (a)——面板本來就在模組缺席時整個關閉，那是可以寫下來的事實，不是要補的東西。
+8. **對 `gh-hugepage-reserve` 的介面相依怎麼在 PR 裡交代**（§0 那三條）。三條都 fail-open，
+   缺了那個專案一樣能跑，所以這是措辭問題不是設計問題。commit body 照實寫「對外部模組的可選整合」
+   即可，不必渲染缺席時的後果——那是既有行為，不是這批改動造成的。
+   唯一實質待辦是 **M5 面板的 v6/v7 版本分支**：那是唯一一處我們對外部專案的介面做了版本判斷，
+   要嘛收斂成單一支援版本，要嘛在 body 說明為什麼兩版都要支援。
 9. **純 virglrenderer GL 路線在矩陣裡沒有列。** 三條路線 D / X / V 都是 Vulkan，但 app 還提供
    `virglrenderer`（vrend GL），而且 `6025be0` 把它設成新 VM 的預設（見第 7 項）。virgl 的
    `b9881a0c`（Adreno GLES dual-source blend）就無處可歸。要嘛補一列，要嘛連同第 7 項一起
