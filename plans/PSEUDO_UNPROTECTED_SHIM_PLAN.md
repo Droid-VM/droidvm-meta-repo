@@ -1,0 +1,625 @@
+# pseudo-unprotected VM:crosvm 新模式 + 開機 shim
+
+2026-08-18。草案,尚未實作。承接同事 `Droid-VM/crosvm@unprotected` / `edk2-gunyah@unprotected`
+的發現(runtime `MEM_SHARE` 帶 X 的 parcel,guest `MEM_ACCEPT` 後 Stage-2 是 RWX 且 host 可見),
+把「整段 system RAM 走這條路」做成 crosvm 的一種 protection type,對 kernel 直開 / EDK2 / Windows 一視同仁。
+
+---
+
+## 0. 一句話
+
+```
+[LEND'd 小 boot region: shim @+0, DTB @+2M]  [SHARE'd RWX 視窗 = 真正的 guest RAM(kernel/EDK2 也放這裡)]  [pools]  [MMIO]
+        ^ RM 只認得這一塊                          ^ 開機時無 Stage-2;shim 用 RM RPC accept 進來
+```
+
+shim 是唯一在 guest 端做事的人:accept 視窗 → 把 `/memory` 改成視窗 → `x0=DTB` 跳到 payload。
+沒有 jmp 回來、沒有改 payload 開頭、沒有 swiotlb、沒有 RDMA0000。
+
+---
+
+## 1. 依據(哪些是查到的、哪些要量)
+
+| # | 事實 | 來源 | 狀態 |
+|---|---|---|---|
+| F1 | RM 不檢查 `/memory reg`,VM_START 會用它認得的 parcel/demand-paged range 重寫 | RM `vm_config_parser.c:2377`, `vm_creation.c:1329` | 開源碼;裝置上以 shim 重寫為準,不依賴 |
+| F2 | `/reserved-memory` 帶 `reg` 的子節點必須精確對到一顆已 accept 的 parcel,否則 DENIED | RM `vm_creation.c:1507-1545, 1674-1677`;8gen3 實測 ENODEV(crosvm `mod.rs:540-560`、lowmem fence 註解) | 8gen3 已證;8e/8e5 較寬 |
+| F3 | RM 對 SHARE 沒有「不能 X」規則;accept 方權限 = 建立者 ACL;`MAP_OTHER` DENIED(host 不能代 accept) | RM `memparcel.c:666-757, 387-401, 2061` | 開源碼 |
+| F4 | GKI 6.6 driver 把 SHARE binding 一律映成 R/RW;host_share 模組走 RM parcel 路徑,ACL X 會過 SCM assign | GKI `vm_mgr_mem.c:155-162`, `gunyah_qcom.c:15-45`;host_share `gunyah_share_mod.c:365-449` | 6.6 已證(同事);**8gen3 待驗(E1)** |
+| F5 | PC = base-address(6.1);6.6 由 crosvm `SET_BOOT_CONTEXT` 指到 payload。x0 = DTB。DTB 必須在 image parcel 內 | RM `vm_firmware.c:765`;GKI `vm_mgr.c:717-722, 763-770`;crosvm `gunyah/aarch64.rs:296-350` | 已證 |
+| F6 | GH_VM_START 之後、vCPU 跑之前可以 runtime SHARE(`share_probe()` 就是這個時序) | crosvm `mod.rs:791-800, 840` | 已證 |
+| F7 | 視窗 IPA 必須在 `[base-address, base+size-max)`;上方 PCI 視窗的 BAR blob 三台都能 accept | crosvm `gunyah/aarch64.rs:80-145`;R5 驗收 gfxstream 三台 PASS | 已證 |
+| F8 | host 寫進 memfd 的內容 SHARE/ACCEPT 後保留(driver 與模組都不帶 SANITIZE) | GKI `rsc_mgr_rpc.c:178,264`;host_share 不設 flags | 開源碼 |
+| F9 | 一顆 parcel = 一次 RM 配額(1024/機,owner=HLOS,不 reclaim 不還);512 entries/RPC 由 driver 以 MEM_APPEND 分段 | RM `memparcel.c:106,781-787`;GKI 6.1/6.6 `rsc_mgr_rpc.c` | 開源碼 |
+| F10 | RM 只在 owner 明確 `MEM_NOTIFY` 時才對 guest 發 `MEM_SHARED`;driver 不發 → 預先 share N 顆不會塞爆 rm-rpc msgq(depth 8) | RM `memparcel.c:2625-2650` | 開源碼 |
+| F11 | edk2-gunyah FD 位置無關(`code0: adr x1,.` + PE 重定位);system memory 取 `/memory` **第一段**;UEFI region = FD 後 64 MiB;沒有 restricted-dma-pool 就不裝 IoMmu、不產 RDMA0000 | `GunyahKernel.fdf:52-53`, `ModuleEntryPoint.S:37-45,90-112`, `FdtParser.c:54-73`, `GunyahIoMmuDxe.c:302-340` | 已讀 |
+| F12 | GB 級單顆 SHARE parcel 的 RM/hyp 行為 | — | **待量(E2)** |
+
+---
+
+## 2. 記憶體布局(新模式)
+
+```
+IPA
+0x0000_0000 ┐ platform MMIO(RTC 0x2000 / WDT 0x3000 / GPIO 0x4000 / PCI CAM …)  → 不變,shim 不加裝置
+0x0200_0000 │ 32-bit PCI MEM、pflash                                            → 不變
+0x3FFD_0000 │ GIC
+0x4000_0000 │ RM 捐的 low RAM(RW no-X)                                          → shim 寫 /memory 時自然排除,不再需要 fence 節點
+0x8000_0000 ┼ boot region(LEND'd,GuestMemoryRegion,固定 4 MiB)
+            │   +0x000000  shim.bin(<2 MiB,含 stack)
+            │   +0x200000  DTB slot(AARCH64_FDT_MAX_SIZE = 2 MiB;RM 在這裡就地 patch)
+0x8040_0000 ┼ handoff(新 purpose ShimHandoff,2 MiB,開機完整 SHARE + 自己的 no-map 節點)
+            │   host 在 GH_VM_START 之後把 memparcel handle 寫進來(§5)
+0x8060_0000 ┼ 視窗(新 purpose,例 SharedGuestRam;大小 = --mem;memfd,host 開機前 populate+collapse+mlock)
+            │   +0          payload:kernel Image / edk2 FD(crosvm 直接寫進 memfd,F8)
+            │   +align16M   initrd
+            │   …           剩下 = guest 的 RAM
+            │   (可切 N 顆 parcel:parcel-mb;預設整段一顆,視 E2 決定)
+            ┼ gfx_host / gpu_guest / drm2kgsl / venus pool(不變,仍是 boot SHARE 的 data pool)
+            ┼ platform-MMIO 8 MiB + 64-bit PCI 視窗(host-visible BAR)             → 隨 end_addr() 上移,不變
+            └ size-max
+```
+
+- `--mem N` 語意改為「視窗大小」;boot region 是固定額外 4 MiB。
+- 沒有 `--swiotlb`、沒有 simplefb 獨立 region(要 simplefb 就從視窗切,節點由 shim 事後加,見 §4.5)。
+- 6.6 的 RM 把 image parcel 視為 DTB parcel(`mem_ipa_base` = DTB 位址),normal memory 只允許在它之上 → 視窗必須在 DTB 之上;上面的排法滿足。
+
+---
+
+## 3. 開機時序
+
+```
+crosvm                                   RM / hyp                       shim(guest vCPU0)
+─────────────────────────────────────    ────────────────────────────   ─────────────────────────────
+1 建 region:boot(LEND) + 視窗(memfd)
+2 prepare 視窗:populate/collapse/mlock
+3 載入:shim→boot+0;payload/initrd→視窗
+   DTB→boot+2M(/memory=boot region;
+   /droidvm,shim 節點;無 swiotlb/fence)
+4 GH_VM_ANDROID_LEND(boot region)
+   GH_VM_SET_DTB_CONFIG / SET_BOOT_PC=shim
+5 GH_VM_START ───────────────────────►   VM_ALLOCATE…INIT(parse DT)
+                                          VM_START:patch DTB、vcpu_poweron(pc=shim,x0=DTB)
+6 share_blob(視窗 parcel i, RWX) ×N ─►   MEM_SHARE(ACL guest RWX, host RWX);SCM assign
+   handles → handoff 區域,最後寫 ready
+7 GH_VCPU_RUN ─────────────────────────────────────────────────────►    a 設 SP;讀 DTB:/droidvm,shim、
+                                                                          gunyah-resource-manager(tx/rx cap)
+                                                                        b handoff:等 ready,讀 N 與各 handle
+                                                                        c 每顆:MSGQ_SEND MEM_ACCEPT
+                                          MEM_ACCEPT → Stage-2 RWX ◄──     (CONTIGUOUS|DONE, sgl={base,size})
+                                          reply ─────────────────────►     輪詢 MSGQ_RECV,丟棄非本 seq 的訊息
+                                                                        d dc civac payload/initrd 範圍;ic iallu
+                                                                        e /memory reg = 視窗;套 overlay(若有);
+                                                                          刪 /droidvm,shim
+                                                                        f handoff status=JUMPING
+                                                                        g x0=DTB, x1..x3=0 → 跳 payload
+8 輪詢 handoff status:JUMPING 才算成功;
+   ERROR → 印 msg/error、結束 VM(不要靜默卡死)
+… VM 結束:unshare_blob ×N(RM RECLAIM),否則吃配額(F9);crash 由 host_share reaper 兜底
+```
+
+---
+
+## 4. shim 規格
+
+### 4.1 進入 ABI
+- EL1、MMU off、cache off、IRQ masked;`x0 = DTB`,其他暫存器不可信(SP=0)。第一件事設 SP(shim 區內)。
+- 6.1:PC 由 RM 定為 image base;6.6:crosvm `SET_BOOT_CONTEXT` 指到同一位址。兩邊一致 → shim 永遠在 `0x8000_0000`。
+
+### 4.2 輸入 —— header + handoff,不是 DT 節點
+
+原本打算用一個 `/droidvm,shim` DT 節點傳參數。實際做下來不需要:靜態的東西(payload 位址、
+handoff 位址、DTB 可成長上限、旗標)crosvm 在**開機前就能寫進 shim 映像自己的 header**
+(`struct shim_header`,在入口分支之後的 offset 8),動態的東西(memparcel handle)本來就得走
+handoff 區域。少一個節點,也少一次「RM 會不會嫌棄這個節點」的風險。
+
+shim 唯一要從 DT 讀的是 RM 的 message queue capability:
+
+```
+/hypervisor/qcom,resource-mgr { compatible = "gunyah-resource-manager"; reg = <tx_capid rx_capid>; }
+```
+
+這個節點是 RM 自己產生的(crosvm 只宣告 `vdevice-type = "rm-rpc"`),`reg` 是兩個 u64 —— 和
+guest 端 `gunyah_guest.c:762-773` 讀的是同一個東西。
+
+### 4.3 步驟(對應 §3 的 a–g)
+1. `fdt_check_header`;找 `/droidvm,shim`;找 `gunyah-resource-manager` 取 tx/rx capability。
+2. handoff:等 `ready`(host 最後才寫),讀 `nparcels` 與每顆 `{handle, base, size}`。
+3. 每顆送 RM `MEM_ACCEPT 0x51000011`:hdr(handle, type=NORMAL, trans=SHARE, flags=MAP_CONTIGUOUS|DONE, validate_label=0),acl n=0,sgl n=1 {base,size},attr n=0。
+   收 reply:`MSGQ_RECV` 輪詢,只認 type=REPLY 且 seq 相符者,其他訊息丟棄(F10 說正常不會有,但要能吃)。錯誤碼非 0 → 失敗。
+4. `dc civac` payload+initrd 範圍(host 用 cacheable 寫進來、guest 現在用 device 屬性讀 → 保險;成本 ~ms),`dsb sy; ic iallu; dsb; isb`。
+5. DT:`fdt_open_into` 到 `dtb-max-size`;`/memory reg` = windows(排序、合併相鄰);有 `overlay` 就 `fdt_overlay_apply`;`fdt_del_node(/droidvm,shim)`;`fdt_pack`。
+6. handoff `status = SHIM_STATUS_JUMPING`。
+7. `x0 = DTB; x1=x2=x3=0; br payload`。不開 MMU 就不用關;若為了 memcpy 效能開了 MMU,跳前關掉並 clean。
+
+### 4.4 錯誤處理
+任何一步失敗:handoff `status = SHIM_STATUS_ERROR`、`error` 放 RM 錯誤碼、`msg` 放一行人話,然後
+`wfi` 迴圈。crosvm 輪詢到就把 `msg` 印進 log 並結束 VM —— 不會變成一台安靜卡住的 VM。
+
+### 4.5 不做的事(交給 crosvm 的 overlay)
+simplefb-in-window、其他 `/reserved-memory` 節點、`/chosen` 額外屬性 … 一律由 crosvm 生成 dtbo 放在 `overlay` 屬性,
+shim 只負責套。shim 保持「accept + memory reg + jump」三件事,穩定後不必再動。
+
+### 4.6 實作選型
+- **C + asm + vendored libfdt**(BSD/GPL-2.0+ 雙授權,和 DroidVM 的 GPL-2.0-or-later 相容),
+  `clang --target=aarch64-none-elf -ffreestanding -fPIC -nostdlib`,linker script 出 flat `shim.bin`(< 64 KB)。
+  理由:libfdt 現成、RM RPC 封包格式在 `gunyah_guest.c` / `GunyahPreloadDxe.c` 已有兩份可直接抄。
+- 放哪:meta repo 新目錄 `droidvm-shim/`(獨立 Makefile);crosvm 以 `include_bytes!` 內嵌預設版,並提供
+  `--protected-vm-pseudo-unprotected shim=PATH` 覆蓋,方便單獨迭代。
+- 備選:Rust `no_std` `aarch64-unknown-none` — 少一條 C 工具鏈但要自己寫 fdt setprop/overlay,先不選。
+
+---
+
+## 5. handoff 區域(取代原本的 mailbox MMIO 裝置)
+
+memparcel handle 只在 `GH_VM_START` 之後才存在,而 boot region 那時已經 LEND 出去、host 寫不進去 ——
+所以 handle 必須經由一段 **host 仍可寫**的記憶體交給 shim。原本打算做一個 MMIO 裝置;後來發現
+不需要:一個 **2 MiB、開機就完整 SHARE 的區域**就夠了,而那正是今天三個 GPU pool 的形狀,
+crosvm 不必新增任何裝置。
+
+* purpose `ShimHandoff`,2 MiB,完整 pre-share(`step = 0`)。
+* 它有自己的 `/reserved-memory` 節點(`reg` 精確等於那顆 parcel,`no-map`)—— 8gen3 的 RM 因此
+  接受它,而 RM 重新產生 `/memory` 時也會因為 `no-map` 把它排除,不會變成 Linux 的 RAM。
+* shim 不必找節點:位址由 crosvm 在開機前寫進 shim 的 header。
+* 內容就是 `struct shim_handoff`(`crosvm/hypervisor/src/gunyah/shim_abi.rs`):magic/version、`nparcels`、每顆
+  `{handle, base, size}`、以及 host 最後才寫的 `ready`;回程是 `status`/`error`/`exec_probe`/`msg`,
+  crosvm 輪詢它來決定 boot 成不成功、並把 `msg` 印進 log。
+
+`ready` 是最後寫、最先讀的欄位:沒有它,一個比 host share 迴圈跑得快的 shim 會拿到還是 0 的 handle。
+
+## 6. crosvm 變更清單
+
+| 檔案 | 改什麼 |
+|---|---|
+| `hypervisor/src/lib.rs` | `ProtectionType` 新變體 `ProtectedPseudoUnprotected`(`isolates_memory()=true`、`runs_firmware()=false`),`Config` 加 shim 選項(parcel_mb、shim 路徑) |
+| `src/crosvm/cmdline.rs` / `config.rs` | `--protected-vm-pseudo-unprotected [shim=PATH,parcel-mb=N]`;與 `--swiotlb`、`--protected-vm` 互斥;非 gunyah 拒絕 |
+| `vm_memory/src/guest_memory.rs` | 新 `MemoryRegionPurpose::SharedGuestRam`;host 端視為 always-backed(裝置存取不擋);`is_guest_ram()` 類判斷要含它 |
+| `aarch64/src/lib.rs` | `guest_memory_layout`:主 region 縮成 4 MiB boot region、視窗 region 疊在其後;`main_memory_size` 相關(initrd 上限、FDT 位置)改指視窗;`load_kernel`/`load_image` 目標改視窗;載入 shim 到 boot+0;`init_arch` 的 payload_entry = shim;pools 疊在視窗上方;`get_system_allocator_config` 不變(靠 end_addr) |
+| `aarch64/src/fdt.rs` | `create_memory_node` 只放 boot region;新 `create_shim_node`;此模式不產 restricted-dma-pool / `/pci memory-region`;`chosen` initrd 指視窗;可選 overlay 生成(`cros_fdt` 建 fragment@0/target-path) |
+| `hypervisor/src/gunyah/mod.rs` | `GunyahVm::new`:`SharedGuestRam` → 不 LEND、不 boot SHARE(`continue`),但做 `prepare_lend_region` 等級的 populate/collapse/mlock;`start()`:GH_VM_START 成功後對每顆 parcel `share_blob(…, exec=true)`,handle 存進 `Arc<Mutex<Vec<ShimParcel>>>`;`share_blob` 加 `allow_exec` 參數(**不要**全域改成 RWX,只有視窗給 X);Drop/teardown `unshare_blob` ×N |
+| `hypervisor/src/gunyah/aarch64.rs` | `create_fdt`:`SharedGuestRam` 不建 shm vdevice;此模式不發 lowmem fence 節點;size-max 公式不變 |
+| `devices/src/` | 不用動 —— handoff 走一段 SHARE'd 記憶體,不是新裝置(§5) |
+| `src/crosvm/sys/linux.rs` / `arch` | shim 映像(內嵌 blob 或 `shim=PATH`)進 `VmComponents`;開機前 patch shim header;`GH_VM_START` 之後 share 窗口、填 handoff、寫 `ready`;輪詢 `status`,ERROR 就印 `msg` 並結束 VM |
+| `hypervisor/src/geniezone`、kvm | `SharedGuestRam` 當普通 guest RAM(模式本身在非 gunyah 拒絕) |
+| balloon | 此模式先不支援 inflate(`GH_VM_RECLAIM_REGION` 對 SHARE 無效);DroidVM 的 dynamic memory 之後改走 guest RELEASE + host RECLAIM(粒度 = parcel) |
+
+---
+
+## 7. 其他 repo 的影響
+
+- **edk2-gunyah**:理論上零改動 —— FD 放視窗、`/memory` 第一段 = 視窗、UEFI region 落在視窗內、無 restricted-dma-pool → IoMmu/RDMA0000 自動略過(F11)。
+  要盯:DTB 拷到 FD+0x40 的 32 KB slack(`FdtParser.c:78-86` 沒有大小檢查;crosvm DTB + RM patch + overlay 後要 < 32 KB,否則得改 edk2)。
+- **guest kernel / guest-additions**:不用改。`/memory` 只有視窗;無 swiotlb;`gunyah_guest` 仍靠 RM 節點;pools 照舊。
+- **DroidVM app**:VM 設定加第三種 protection 選項;此模式忽略 swiotlb 欄位;`--mem` 語意說明。
+- **host_share 模組**:不用改(X 由 flags 帶入)。
+
+---
+
+## 8. 量到的東西(2026-08-19,8gen3 / OPD2404 / 6.1.118,除非另註)
+
+裝置實測,不是讀碼推論。rig 在 `deploy/pseudo-unprotected/poolvm.sh`(無 GPU 的最小 VM + 可調 test pool),
+guest 用 `droidvm-guest-additions/dynpool_test` 加 `accept` / `window` / `exec` 命令與
+`tests/dynpool_exec.c`(EL0 探針)。crosvm 端三個診斷開關:`GH_SHARE_EXEC`、
+`DROIDVM_POOL_HIDE=dt|shm|both`、`DROIDVM_TEST_POOL[_2]_GAP_MB`。
+
+### E1 執行權限 —— 通過(EL0),EL1 待 shim
+
+| 步驟 | 結果 |
+|---|---|
+| runtime `MEM_SHARE` ACL 帶 X(`flags=0x7`)| **RM 接受**,SCM assign 沒有拿走 host 的存取 |
+| guest `MEM_ACCEPT` 到一個「crosvm 沒有 region、DT 沒節點、沒有 shm vdevice」的純空洞 | **成功**(rc=0)|
+| 讀回 host 預先寫的圖樣 | **相符** —— 拿到的真的是 host 的頁 |
+| EL0 執行(`/dev/dynpool` + `PAGE_SHARED_EXEC`,跑 `mov x0,#42; ret`)| **回傳 42** |
+| **反面對照**:同一台、同一個池子、同一個位移、同一段程式碼,只把 `GH_SHARE_EXEC` 關掉 | **`NO-EXEC: signal 7`**(SIGBUS)在 CALL,而同一頁的讀寫照常 —— 所以可執行是 ACL 的 X 給的,不是本來就有 |
+| EL1 執行 | **測不到,兩條路都被 stage-1 擋死** |
+
+EL1 為什麼在 Linux 裡量不到,兩條路都試過:
+
+1. **核心映射**:7.0 的 arm64 `ioremap_prot` 要求 `PTE_USER` 且只保留記憶體型別位元,底層的
+   `ioremap_page_range()` 又一律套 `pgprot_nx` —— 沒有任何 ioremap 路徑能產生可執行的核心映射。
+2. **使用者映射清掉 PXN,再從模組裡(同一個行程的 syscall 中)呼叫進去**:一樣被拒。ARMv8.7 的
+   FEAT_PAN3/EPAN 會讓「使用者可執行」的頁對 EL1 自動變成 PXN,這條路在這代核心上本來就是死的。
+
+兩次的 `ESR` 都是 `0x8600000f`(L3 指令權限錯誤)、位址都是**我們自己映的那個 VA**,也就是說
+擋下來的是 stage-1,stage-2 完全沒有表態。第二條路的程式碼已經撤掉,留著只會誤導。
+
+所以 EL1 的答案只能由 shim 給(MMU off → 沒有 stage-1 → 只剩 stage-2,正是真實情境),
+`SHIM_FLAG_PROBE_EXEC` 就是為此存在。旁證仍然很強:Gunyah 的 `pgtable_access_t` 沒有
+「只在 EL0 可執行」這種編碼,RM 把 ACL 的 RWX 映成 `PGTABLE_ACCESS_RWX` —— 和 guest 自己那塊
+LEND'd RAM(guest kernel 每分每秒都在上面執行 EL1 程式碼)用的是同一個 access 值。
+
+### E3 開機拒絕的真因 —— 是 `/reserved-memory` 節點,不是 region
+
+一個宣告 512 MiB、開機零 SHARE 的池子,四個變體:
+
+| 變體 | resmem 節點 | shm vdevice | 結果 |
+|---|---|---|---|
+| A | 有 | 有 | **拒絕**:`GH_VM_START failed` → `failed to initialize virtual machine No such device (os error 19)` |
+| B | **無** | 有 | **開機成功** |
+| C | 有 | **無** | 拒絕(同 A)|
+| D | 無 | 無 | **開機成功** |
+
+所以:
+* **窗口可以是 crosvm 的 GuestMemory region**(宣告了卻不 SHARE,RM 不在意)—— 設計成立,
+  memfd 預載 payload 與 `offset_from_base` 都保得住。
+* shm vdevice 節點也無所謂(B 保留它仍能開機)。
+* 唯一的地雷就是開源 RM `vm_creation.c:1507-1545` 那條:`/reserved-memory` 帶 `reg` 的子節點
+  必須精確對到一顆已 accept 的 memparcel。窗口本來就不進 `/reserved-memory`,不會踩到。
+* 附帶收穫:池子的 DT 節點其實不是必需品 —— host 端的池子表以 pool-id 為鍵,guest 只要知道
+  base/size 就能驅動(`dynpool_test` 現在支援 `base=`/`size=` 模組參數)。這條讓 growable pool
+  在 8gen3 上第一次可用。
+
+### E2 單顆 parcel 的大小與成本 —— 卡在 host 的準備路徑,不是 RM
+
+`--mem 1024`,池子整段一次 grant(一顆 memparcel):
+
+| 窗口 | 結果 |
+|---|---|
+| 512 MiB | **成功**:folio 準備 751 ms + share/accept 1.20 s(其中 host share ioctl 1.148 s);`flags=0x7` 確認 ACL 帶 X;verify 通過;EL0 執行通過 |
+| 1 / 2 / 4 GiB | **失敗 -ENOMEM**,而且失敗在 RM 之前 —— `prepare_folios` 就回錯 |
+
+真因量到了:`folio_back_range()` 會**先 `fallocate` 整段**,那是普通 4 KiB shmem;
+而這些手機把記憶體都停在大頁保留池裡(實測 8gen3:`MemAvailable` 1.05 GiB、`MemFree` 282 MiB,
+對比 `pool_avail` 2816 頁 = 5.5 GiB)。4 KiB 配置拿不到保留池,於是 1 GiB 就撞牆;
+更糟的是就算 fallocate 成功,後面的 `MADV_COLLAPSE` 還要再配一顆 2 MiB folio 並搬進去 —— 峰值雙倍。
+
+**已修**(`hypervisor/src/gunyah/mthp.rs`):拿掉 fallocate,改成先 `MADV_HUGEPAGE` 再逐 2 MiB
+`MADV_POPULATE_WRITE`,直接從保留池的 order-9 供給鉤子拿 folio —— 就是多 GiB guest RAM 的 LEND
+一直在走的那條路(`prepare_lend_region`)。順手把錯誤處理分開:只有 `EINVAL/ENOSYS`(舊核心沒有
+POPULATE_WRITE)才退回手動 write-fault,`ENOMEM` 直接往上回,否則手動 fault 遇到真的沒記憶體會
+是 SIGBUS 打死 VMM,而不是一次 grant 失敗。
+
+這順帶也是既有 growable pool 的一個真 bug:在保留池佔滿記憶體的機器上,大一點的 grow 從來不可能成功。
+
+修完之後重跑,**一顆 parcel 涵蓋整段窗口在 8gen3 上是可行的**:
+
+| 窗口 | folio 準備 | share + guest accept | 其中 host share ioctl | verify | EL0 執行 |
+|---|---|---|---|---|---|
+| 1 GiB | — | — | — | 通過 | 42 |
+| 4 GiB | **257 ms** | **1.09 s** | 1.045 s | 通過 | 42 |
+
+4 GiB 反而比修正前的 512 MiB(751 ms)還快,因為現在是直接從保留池拿 order-9 folio,
+不再有「先配 4 KiB 再搬進 folio」那一輪。
+
+**結論:`parcel-mb` 預設就整段一顆**,4 GiB 窗口在開機路徑上多花約 1.35 s。
+切多顆只有兩個理由(RM 配額細粒度釋放、未來的動態記憶體),不是正確性需求。
+
+### 順帶量到的三件事
+
+* **`crosvm stop` 不是優雅關機**:guest 從不 flush,那一輪寫的檔案下次開機全是 0 bytes。
+  要 `ssh … systemctl poweroff`(`poolvm.sh stop` 已改)。SETUP.md 早就寫了,我又踩一次。
+* **pin probe 會擋 probe 用的 scratch 記憶體**:匿名頁落在 CMA → `GH-PIN … cannot be
+  long-term pinned` → share 回 ENOMEM。`GUNYAH_PIN_POLICY=fix` 讓它遷移。真正的窗口走
+  reserve pool + 2 MiB folio,不會遇到。
+* **沒有任何一層擋得住「往任意 GPA accept」**:host 只要肯 share、guest 拿到 handle 就能
+  accept 到任何位址(`pool_validate_share` 只驗 pool 相對位移,guest 端只驗 handle/size 非零)。
+  窗口模式上線時 host 端要補一張「可被 share 的位址」白名單。
+
+### 還沒做的
+
+* E1 的 EL1(等 shim v0)。
+* 8e5 只驗到「新的 pool DT 模型能開機」(firmware-only,`GH_VM_START` 無錯);完整的 grow/exec 沒跑。
+* 8e 完全沒驗 —— 量測期間那台一直有使用者自己的 acc-test VM 在跑。
+
+## 8b. 順帶解鎖:growable pool 在 8gen3 可用了(新的 DT 模型)
+
+E3 的副產品。舊模型把整個窗口寫進 `/reserved-memory` 的 `reg`,而只有 floor 被 SHARE ——
+8gen3 的 RM 找不到對應的 memparcel,VM 直接不啟動。新模型只換一件事:**`reg` 描述 floor,
+窗口大小改用 `droidvm,pool-size`**。四個參數(總大小/預分配/步長/max-grants)一個都沒改,
+crosvm 的 CLI 也沒動。
+
+| 參數 | 舊 | 新 |
+|---|---|---|
+| 總大小 | `reg` 的 size | `droidvm,pool-size` |
+| 預分配(floor)| `droidvm,pre-alloc-size` | `reg` 的 size(`pre-alloc-size` 同值保留)|
+| 步長 | `droidvm,step-size` | 不變 |
+| max-grants | 本來就只在 host 端 | 不變 |
+
+三台通用,而且是同一條路徑:8gen3 的 RM 會檢查(新形狀正好滿足),6.6/6.12 那兩代的 driver
+根本不替每個 region 建 parcel,它們的 RM 從來沒在比對 —— 這正是舊形狀在那兩台過得去的原因。
+
+改動:
+* `aarch64/src/fdt.rs`:`reg = <gpa floor>`;`floor != size` 時多一個 `droidvm,pool-size`。
+  全預配的池子輸出**完全不變**(floor 就是窗口),所以既有三個 GPU pool 一個位元都沒動。
+* `aarch64/src/fdt.rs` `create_memory_node`:growable pool 不再進 `/memory`。窗口的未 grant 部分
+  被當成 RAM 會是「讀到零、寫下去 VM 死」,而 floor 由它自己的節點描述。非 growable 的池子維持原樣。
+* `vm_memory/src/guest_memory.rs`:growable pool 的 floor 下限 **2 MiB**(`pool_param_error`)。
+  floor = 0 就沒有 parcel 可對,節點也就沒地方掛屬性;要 floor=0 的只有窗口,而窗口不需要節點。
+* guest `virtio_gpu/virtgpu_vram.c`、`dynpool_test`:有 `droidvm,pool-size` 就用它,沒有就退回
+  `resource_size(reg)` —— 新舊 DT 都能跑。
+* edk2 `GunyahPoolAcpiDxe`:同樣的讀法,Windows 那邊的 `_CRS` 才不會只看到 floor。
+
+## 9. 風險與備案
+
+- **vendor RM ≠ 開源 RM**:F1/F2/F10 是開源碼推論,裝置行為以實測為準;設計上已不依賴 F1(shim 自己重寫 `/memory`)。
+- **cache 可見性**(host cacheable 寫、guest MMU-off 讀):今天 LEND 路徑同樣情境沒事;仍在 shim 加 `dc civac`,crosvm 端也可在寫完 payload 後 `dc cvac`(EL0 允許)。
+- **配額**:每顆 parcel 佔 1024 配額之一且要在 teardown reclaim;crash 依賴 host_share reaper。parcel 數保持個位數到十幾。
+- **記憶體全程 pin**:與今天 LEND 的 mTHP prepare 同量級,但少了 balloon 回收;先接受,後續用 parcel 粒度做動態記憶體。
+- **DTB 32 KB slack(EDK2)**:超過就得改 edk2 PrePi;先量。
+- **安全語意**:guest RAM 對 host 完全可見 —— 這是本模式的目的,文件要寫清楚,UI 上跟 protected 分開。
+
+---
+
+## 10. 里程碑
+
+1. E1–E3(1 天,三台輪流)。
+2. shim v0(零視窗直跳,E4)+ crosvm 版面/載入/handoff 骨架。
+3. shim v1(accept + memory reg)+ crosvm share-after-start + teardown reclaim → 8e 上 kernel 直開通。
+4. EDK2 路線(Ubuntu grub、Windows)驗證;overlay 機制視需要補。
+5. 8gen3 全套;app 選項;三台驗收(沿用 R5 條件)。
+
+---
+
+## 11. 定案(2026-08-19,實作中)
+
+設計討論收斂後的最終形狀,和 §2–§5 的差別都在這裡。
+
+### 布局:boot region 從 `--mem` 裡切,不是外加
+
+```
+0x8000_0000  +2 MiB   shim(實測 5 KiB + 16 KiB stack)
+0x8020_0000  +2 MiB   DTB(AARCH64_FDT_MAX_SIZE;必須和 shim 同一個 region —— RM 用
+                      「含 DTB 的 parcel」當 image parcel)
+0x8040_0000  +2 MiB   handoff(開機完整 SHARE,host 之後還寫得到)
+0x8060_0000  ...      窗口 = --mem 減掉上面三塊
+             ...      pools / platform MMIO / 64-bit PCI 視窗:位置和 protected 模式逐位元相同
+```
+
+`--mem 4096` 是「總共 4 GiB」,不是「窗口 4 GiB 另外加」。因為 pools 和 MMIO 都從
+`PHYS_MEM_START + memory_size` 起算,這樣選的話上層布局完全不動 —— 「其餘的和 protected 模式
+一模一樣」這句話才是真的。
+
+### shim 只碰一個屬性
+
+不新增節點、不刪除節點:`/memory` 的 `reg` 就地改值,長度不變。進來幾段就出去幾段,窗口放
+**第一段**、其餘補 `{0,0}`(EDK2 的 PrePi 只讀第一段,Linux 的 `early_init_dt_scan_memory` 跳過
+size==0)。
+
+進來的每一段都不留:boot region 是 LEND'd 的(host 看不見)、RM 捐的低位記憶體是 RW no-X、
+pool floor 和 handoff 是 driver 的。窗口是唯一該當 RAM 的東西,而它在 `/memory` 裡從頭到尾
+不存在。
+
+### swiotlb 不是「移除」,是一開始就不產
+
+這個模式不帶 `--swiotlb`,所以 `restricted-dma-pool` 節點和 `/pci memory-region` 都不存在。
+EDK2 的 `GunyahIoMmuDxe` 找不到就跳過,不裝 IOMMU protocol、不產 RDMA0000。目標 kernel
+(Debian trixie 6.12.101,`CONFIG_RESTRICTED_DMA_POOL` 沒開)因此才有機會開機。
+
+### handoff 沒有 guest DT 節點
+
+RM 只檢查「節點 → parcel」的方向,沒有節點就沒東西可檢查;而「別被當成 RAM」已經由
+`/memory` 改寫解決。它只需要 `gunyah-vm-config/vdevices` 底下的 shm 節點 —— 那是 RM 建 VM 時
+吃的設定,6.1 上正是靠它的 `base` 把 parcel 釘在 crosvm 選的 IPA。
+
+### 語言與打包
+
+Rust `no_std`,住在 `crosvm/droidvm-shim/`(自成 workspace,cargo_embargo 看不到)。ABI 是
+`crosvm/hypervisor/src/gunyah/shim_abi.rs`,**一份被兩邊 include**。`2-0_build_shim.sh` 在 soong
+之前產出 `shim.bin`,`include_bytes!` 內嵌 —— rustc 的 dep-info 會列出它、soong 有餵 depfile 給
+ninja,所以改 shim 會自動重編 crosvm。不多一顆要 push 的 blob;`shim=PATH` 覆蓋留給 bring-up。
+
+### 兩個實作時抓到的坑
+
+* **exec 探針不能寫窗口起點** —— 那是 payload 的前 8 個位元組。改寫最後一頁。
+* **窗口必須先做 folio 準備** —— 保留池服務的是 order-9;用 4 KiB 頁組出來的 parcel,4 GiB 窗口
+  會有一百萬個 mem_entry。準備在 `GunyahVm::new` 做(和 LEND'd RAM 同一個位置),但**不** SHARE,
+  SHARE 留到 `GH_VM_START` 之後。
+
+### 驗收目標
+
+Debian trixie cloud image 抽出來的 kernel(`6.12.101+deb13-arm64`,無 `CONFIG_RESTRICTED_DMA_POOL`)
+在 direct 與 EDK2 兩條路都能正常開機。這顆 kernel 在今天的 protected 模式下開不起來,而它是
+「發行版 kernel 能不能跑」這個問題的代表。
+
+---
+
+## 12. 第一次上機:一個**後來被推翻**的假說(留著當紀錄)
+
+> **這一節的結論是錯的。** 「共享區域之間有洞」不是 RM 拒絕的原因 —— 把 swiotlb 加回去(洞就在
+> 兩塊 SHARE'd parcel 中間)照樣被拒,把窗口整個拿掉(完全沒有洞)也照樣被拒。真因見 §13。
+> 這一節唯一站得住的部分是「crosvm 預設偷塞 64 MiB swiotlb」那個發現本身,以及它給的教訓。
+> 留著是因為推論過程本身有價值:一個能解釋當時所有觀察的假說,仍然可以是錯的。
+
+### (以下為當時的推論)
+
+
+2026-08-19,8gen3。crosvm 端每一步都做對了 —— shim 載入、header patch、窗口 100% 2 MiB folio 覆蓋
+並 mlock —— 但 `GH_VM_START` 回 ENODEV,kernel 印 `Failed to start VM: -19`。
+
+`-19` 在 6.1 driver 的對照表是 **`GH_RM_ERROR_NORESOURCE`**(`rsc_mgr.c:209`),而那行訊息來自
+`vm_mgr.c:590`,也就是**最後那個 VM_START RPC** —— 表示 `VM_CONFIG_IMAGE` 與 `VM_INIT` 都通過了,
+RM 解析我們的 DT 沒有意見。
+
+### bisect
+
+RM 對所有不滿都回同一個碼,只能一次改一項(`DROIDVM_SHIM_BOOT_MB` / `DROIDVM_SHIM_NO_HANDOFF`):
+
+| boot region | handoff | 結果 |
+|---|---|---|
+| 4 MiB | 無 | 拒絕 |
+| 16 MiB | 有 | 拒絕 |
+| 64 MiB | 無 | 拒絕 |
+| 1900 MiB(窗口只剩 82 MiB)| 有 / 無 | 都拒絕 |
+
+同一顆 binary 跑舊模式 `--protected-vm-without-firmware`:**VM 有起來**,vcpu 跑了才崩在 kernel
+自己身上(那顆 Debian kernel 沒有 `CONFIG_RESTRICTED_DMA_POOL`,protected 模式下的預期下場)。
+所以不是 binary 壞了,是布局被拒。
+
+### 真因
+
+`src/crosvm/sys/linux.rs:1568`:**只要不是 `Unprotected`,crosvm 就自動給 64 MiB swiotlb**。
+沒傳 `--swiotlb` 不等於沒有。於是實際布局是:
+
+```
+boot(LEND) │ handoff(SHARE) │ 窗口(不 share ── RM 不知道的洞) │ swiotlb 64 MiB(SHARE)
+```
+
+這是第一次讓**兩塊 SHARE'd parcel 之間隔著一個 RM 不知道的洞**。舊模式所有區域連續;E3 那次
+「宣告了卻不 share」的池子在**所有共享區域之上**,也沒有夾在中間。四組 bisect 全滅正是因為那個洞
+在每一組裡都在。
+
+順帶一提它還讓驗收目標註定失敗:swiotlb 會產生 `restricted-dma-pool` 節點,而這個模式存在的理由
+就是不需要它。
+
+**修法**:這個模式和 `Unprotected` 一樣不給預設 swiotlb。窗口本來就是 host 可見的,沒有東西要 bounce。
+
+### 記下來的教訓
+
+「我沒傳那個旗標」不等於「那個東西不存在」。這次是 64 MiB 的 swiotlb 悄悄出現在布局裡,而它同時
+是 RM 拒絕的原因和驗收目標開不了機的原因 —— 兩個症狀,一個來源,而我原本在追的是前者。
+
+
+## 13. 真因與驗收(2026-08-19,8gen3 / OPD2404 / 6.1.118)
+
+### RM 拒絕的真因:**每一塊 SHARE'd memparcel 都要有一個 `reg` 對得起來的 `/reserved-memory` 節點**
+
+`create_pool_node` 的註解早就寫著這件事 ——「**RM blesses by `reg`**」—— 只是先前把它當成池子的規矩,
+沒當成所有共享區域的規矩。handoff 頁有 shm vdevice、卻沒有 reserved-memory 節點,就是全部的差別:
+
+| 佈局 | 結果 |
+|---|---|
+| shim + handoff + 窗口 | 拒絕 |
+| 同上,加回 swiotlb(洞夾在兩塊 SHARE 中間) | 拒絕 |
+| 沒有窗口(boot 吃滿),仍有 handoff | 拒絕 |
+| 沒有窗口、沒有 shim(等於舊模式,只換了 ProtectionType) | 拒絕 |
+| 沒有窗口、沒有 handoff | **起來了** |
+| handoff 加上 `/reserved-memory`(`compatible = "droidvm,shim-handoff"`, `no-map`) | **起來了** |
+| 完整模式(shim + handoff + 節點 + 窗口) | **起來了** |
+
+RM 對此只回一個 `GH_RM_ERROR_NORESOURCE`,而且是在最後那個 VM_START RPC —— 前面的 CONFIG_IMAGE
+和 INIT 都過,所以看起來像「DT 沒問題但 VM 起不來」。
+
+倒過來 bisect(從**會動的舊模式**開始,一次加一項)是最後找到它的方法。從壞掉的組態一項一項拿掉,
+四輪都全滅,因為每一輪裡真兇都還在。
+
+### 另外兩個絆了很久的東西
+
+* **`2-0_build_shim.sh` 一直在複製舊 target 目錄的 binary。** `.cargo/config.toml` 改成
+  `aarch64-unknown-none-softfloat`(為了拿掉 NEON)之後,腳本還在 `cp` 舊的
+  `target/aarch64-unknown-none/release/droidvm-shim`。整個上午上機跑的都是那顆**含 SIMD 的舊
+  shim**,而它在 CPACR_EL1.FPEN 還沒開的情況下第一條 SIMD 就 trap —— 一個沒有 vector table、
+  沒有 console、什麼都說不出來的 VM。現在 target 名字只寫一次,並且 objdump 檢查 SIMD 運算元。
+* **shim 沒有 exception vectors → 手機重開機。** MMU 關著的 EL1 fault 會無限迴圈,vcpu 不退出,
+  底下那顆 host CPU 不再回應 IPI,下一個 `kick_all_cpus_sync` 就是 watchdog bite
+  (`qcom_wdt_bark_handler` panic,實測 17278 秒那次)。加了 vectors 之後同樣的錯只印一行。
+* **`gh_vm_mem_alloc` 的 pinned-page 陣列是一次 kmalloc。** 2 GiB parcel = 4 MiB = order 10,
+  剛開機的手機給得出來,用過一陣子的給不出來(同一個 VM,差一小時)。這就是 repo 裡
+  `gunyah_kvcalloc` 模組存在的理由;重開機會把它清掉,rig 現在自己 insmod。
+
+### 驗收(目標達成)
+
+`https://images.linuxcontainers.org/images/debian/trixie/arm64/cloud/20260818_05:24/disk.qcow2`
+裡的 **Debian trixie,Linux 6.12.101+deb13-arm64,沒有 `CONFIG_RESTRICTED_DMA_POOL`**:
+
+| 路徑 | 結果 |
+|---|---|
+| direct(`--protected-vm-pseudo-unprotected`,無 swiotlb) | 開到 `multi-user.target` / login prompt |
+| edk2(同一顆 VM,UEFI → GRUB → 同一顆 kernel) | 開到同一個 login prompt |
+
+shim 實測時序:窗口 SHARE(2 GiB,單一 parcel)約 0.9–1.0 s,guest 這側 accept + DT 改寫 + 交棒
+約 10 ms。**`exec_probe = 0x2a`** —— 也就是本案最後一個未解問題的答案:**guest 在 EL1、MMU 關閉的
+狀態下,可以從 runtime SHARE'd + 自己 accept 的窗口取指執行**。
+
+### 跨機驗收(2026-08-19)
+
+同一顆 crosvm、同一顆 Debian trixie kernel、同一個 overlay 磁碟:
+
+| 機器 | SoC / kernel | direct | edk2 | 窗口 SHARE 耗時 | exec probe |
+|---|---|---|---|---|---|
+| 8gen3(5567,OPD2404) | pineapple / 6.1.118 | login | login | 2 GiB ≈ 1.0 s、4 GiB ≈ 3.4 s | 42 |
+| 8e5(5566,PLK110) | canoe / 6.12.23 | login | login | 2 GiB ≈ 30 ms、4 GiB ≈ 63 ms | 42 |
+| 8e(5568,TB322FC) | sun / 6.6.118 | 未測 | 未測 | — | — |
+
+* 4 GiB 窗口兩台都開得起來,guest 看到 `Memory: 3899132K/4188160K available`,`/memory` 就是窗口本身。
+* **6.1 和 6.12 的 SHARE 耗時差兩個數量級**:6.1 的 RM 要當場把 2043 個 folio 組成一個 parcel,
+  6.12 的 driver 走 demand paging。6.1 上 4 GiB 的 3.4 s 是實打實的開機延遲,要壓的話就是切成多個
+  parcel 平行送(handoff 頁本來就是 parcel 陣列),不過目前還在可接受範圍。
+* guest accept + 改 DT + 交棒在兩台都是 10–35 ms,與窗口大小無關。
+* 兩台的 reserve pool 在 VM 結束後都完整歸還(3072 / 2816 pages),沒有洩漏。
+* 8e 沒測:使用者的 `acc-test` VM(4608 MB)還在跑,pool 是空的,沒去動它。
+
+### 現在的樣子
+
+```
+0x80000000  shim(12 KiB)          ─┐
+0x80200000  device tree            ├ boot region,LEND,4 MiB(DROIDVM_SHIM_BOOT_MB 可調)
+0x80400000  handoff 頁,SHARE      ─┘ 有自己的 /reserved-memory 節點(droidvm,shim-handoff)
+0x80600000  窗口 ── VM_START 之後才 SHARE(帶 EXEC),由 shim accept,payload 就放在最底下
+```
+
+guest 看到的 `/memory` 由 shim 改成窗口本身(`0x80600000 + size`),`/reserved-memory` 只剩
+handoff 那一個 no-map 節點,沒有 `restricted-dma-pool`。
+
+
+## 14. 之後的調整(2026-08-19 下午)
+
+### `alloc_from_vm_sys_ram`:池子從 `--mem` 裡切,不再疊在上面
+
+`--pre-alloc alloc-from-vm-sys-ram=true`。池子本身完全不變 —— 一樣大、一樣的位址、一樣的分享方式
+—— 只有「system ram 要多大」的算式改了:4 GiB 的 VM 配 1 GiB 池子,以前跟 host 要 5 GiB,現在要
+4 GiB、guest 拿 3 GiB。**設定多少就拿多少**,這在記憶體來自固定 reserve pool 的情況下才是能預算的數字。
+
+實測(8gen3,`--mem 2048` + `test-pool-mb=256`):
+
+```
+GH-POOL: 0x10000000 of --mem set aside for pools, 0x10000000 used
+guest /memory = 0x80400000+0x6fc00000  (1788 MiB = 2048 - 2 boot - 2 handoff - 256 pool)
+reserve pool:  2816 → 1792 pages = 1024 pages = 2048 MiB  ← 剛好 --mem
+```
+
+池子大小必須在布局存在**之前**就知道(要拿來縮 RAM),所以那組環境變數被讀了兩次:一次縮 RAM、
+一次擺池子。兩者會漂移,所以布局會把「保留了多少 / 用掉多少」印出來,而且用超過會出聲。
+
+### shim + device tree 壓到 2 MiB:6.1 可以,6.12 不行 → 維持 4 MiB
+
+把 tree 放在 +64 KiB、宣告 1 MiB 長,boot region 就能是 2 MiB(一個 folio),8gen3 完全正常開機。
+但 8e5(6.12)的 RM 直接拒絕 VM_INIT:
+
+```
+gunyah: RM rejected message 5600000b. Error: 10     ← VM_INIT / GH_RM_ERROR_MEM_INVALID
+misc gunyah: Failed to initialize VM: -22
+```
+
+那一代要求 tree 待在一般 VM 放它的地方(`AARCH64_FDT_ALIGN`,長度 `AARCH64_FDT_MAX_SIZE`),
+而一個同時要塞 shim(offset 0)和 2 MiB tree 的區域不可能小於兩者相加。所以維持 4 MiB,常數上把
+原因寫清楚,另外 `2-0_build_shim.sh` 會在 shim 長到吃掉 tree 的位置時讓 build 失敗。
+
+### 把視窗切成多個 parcel:可以,而且在 6.1 上值 3.6 倍
+
+`DROIDVM_SHIM_PARCEL_MB`,**預設 0 = 一次整塊**(6.12 上切不切都一樣快,而切要花 memparcel 配額)。
+6.1 上 4 GiB 整塊交出去要 ~3.4 s,切成 8 顆 512 MiB 只要 ~0.94 s(含 guest 全部 accept 完)。
+
+這條路先前兩代都失敗 —— 6.1 第二個 accept 被回 `ARGUMENT_INVALID`,6.12 guest 吃到 instruction
+abort —— 而**兩個都是同一個 bug,而且是 shim 自己的**:
+
+> shim 的 msgq 收送 buffer 沒有做 cache maintenance。shim 的 MMU 是關的,所以它寫 request buffer
+> 是寫進記憶體、不是寫進 cache line;而 hypervisor 是**用 cacheable 映射去讀**那塊 buffer,而且它
+> 之前就讀過同一個位址。於是第二個 request 是用第一個的 bytes 送出去的 —— RM 被要求 accept 一個
+> 它已經 accept 過的 parcel,回 `ARGUMENT_INVALID`,而且回覆上蓋的是**第一個 request 的 seq**。
+>
+> 這看起來就像「RM 一個 VM 只回答一次 accept 然後裝死」,所以第一次的診斷是錯的。
+
+修法:送出前 `dc civac` request buffer,收完後 `dc civac` reply buffer(handoff 頁本來就有做,
+只有這兩塊漏了)。修完之後 8 顆 parcel 在 8gen3 和 8e5 都完整 accept,guest 看到全部 4 GiB。
+seq 比對也改回嚴格比對 —— RM 的 seq 一直是對的。
+
+**對 guest 的 virtio-gunyah-accept 沒有影響**:accept 之間沒有 RM 端的上下文,不需要把任何東西
+傳給 Linux。壞掉的是 shim 自己的 buffer,而 Linux 的 RM client 跑在 MMU/cache 開著的環境,
+用自己的 buffer,碰不到這個 hazard。
+
+### app:兩個在「host 看得到記憶體」時沒有意義的設定
+
+普通 / 偽非保護 兩個模式下:
+
+* **SWIOTLB 欄位隱藏**。沒有東西需要 bounce;偽非保護下還會多一個 `restricted-dma-pool` 節點,
+  正好是這個模式要避開的東西。
+* **guest-alloc 池子(顯存大小 / 啟用動態顯存)隱藏,CLI 帶 0**。它的用途是讓 host 摸得到 guest
+  配出來的 buffer,而這兩個模式下 host 本來就摸得到。歸零做在 backend 而不只是 UI:換模式前存的
+  設定、或直接走 daemon API 的設定,還是會帶著一個大小進來。
+
+guest 端不需要改:virtio-gpu 找不到池子節點就退回 shmem(`virtgpu_vram.c` 裡本來就寫著
+「That is the correct behaviour on a VMM whose host can read guest RAM directly」),而且只有在
+DT 帶著 `restricted-dma-pool`(= 記憶體是借出去的)時才會大聲警告 —— 偽非保護不帶那個節點,
+所以走的是安靜那條。顯存用量沒有 sysfs 可改:這個驅動只有 debugfs
+(`virtio-gpu-features` / `-irq-fence` / `-host-visible-mm`),沒有池子就沒有池子帳,blob 就是
+一般的 guest shmem,本來就算在 guest 自己的記憶體帳上。
