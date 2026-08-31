@@ -34,6 +34,9 @@
 #                      this fast; any local edits in the mesa tree are DISCARDED).
 #   TURNIP_CLEAN=1     delete turnip/banners-turnip and re-clone/rebuild from scratch.
 #   BANNERS_PIN=...    override the pinned fork commit ("branch" = use branch HEAD).
+#   TURNIP_NDK_DIR=... extracted android-ndk-r29 root to symlink into the workdir
+#                      instead of downloading 700MB (must be r29 -- other releases
+#                      change the toolchain and break "same pin, same driver").
 #
 # Build deps: git meson ninja patchelf unzip curl pip flex bison zip glslang
 # glslangValidator python3 ccache.
@@ -42,7 +45,7 @@ cd "$(dirname "$0")"
 source ./lib_branch.sh
 
 BANNERS_URL=${BANNERS_URL:-https://github.com/Droid-VM/Banners-Turnip.git}
-BANNERS_PIN=${BANNERS_PIN:-fc7a50e660b169ff33bdb49fe8f68b5c7f69f6fc}
+BANNERS_PIN=${BANNERS_PIN:-96f7844136e680d4c49d1055722e3d061fdcff8d}
 BT_DIR=turnip/banners-turnip
 MESA_DIR=$BT_DIR/turnip_workdir/mesa
 SO=turnip/libvulkan_freedreno.so
