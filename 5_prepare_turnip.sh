@@ -1,81 +1,96 @@
 #!/bin/bash
 # Build the host turnip Vulkan driver from source -> turnip/libvulkan_freedreno.so.
 # 6_build_apk_prepare.sh stages it into DroidVM-Prebuilt-Root's manual-build so the APK
-# ships it to DATA/usr/lib/. gfxstream (crosvm's GPU backend) runs the guest's Vulkan on
-# this driver; the daemon points it there via ANDROID_EMU_VK_LOADER_PATH.
+# ships it to DATA/usr/lib/. gfxstream (crosvm's GPU backend, the vk command proxy) runs
+# the guest's Vulkan on this driver; the daemon points it there via
+# ANDROID_EMU_VK_LOADER_PATH.
 #
 # WHY: without turnip, gfxstream falls back to the phone's closed Adreno blob (AHB-only,
 # supportsDmaBuf=0) -> host-visible coherent memory fails ("dmabuf not supported",
 # VK_ERROR_OUT_OF_DEVICE_MEMORY) -> zink/desktop black-screens. turnip advertises
 # VK_EXT_external_memory_dma_buf (supportsDmaBuf=1).
 #
-# Built via StevenMXZ/Adreno-Tools-Drivers build_turnip.sh: our Droid-VM/turnip fork's `gen8`
-# branch (Adreno A8xx), KGSL backend, -Dplatforms=android -> a hwvulkan HAL (exports `HMI`),
-# -static-libstdc++ (needs NO libc++_shared.so). Self-contained (pulls its own NDK r29 +
-# mesa fork), so it does NOT touch the crosvm soong tree.
+# Source: Droid-VM/Banners-Turnip, our fork of The412Banner/Banners-Turnip -- the
+# maintained successor of the whitebelyash/mesa-tu8 lineage (archived 2026-04) the old
+# adreno-tools-drivers flow built from. Its build_droidvm.sh clones UPSTREAM mesa at the
+# commit pinned in the fork's mesa_hash.txt and applies patch files on top: the a8xx gen8
+# stack (8 Elite) plus our droidvm_* patches (a750 RB CCU AHB fix, kgsl fixes). One .so
+# covers both host SoCs -- a750/8gen3 support is upstream mesa, A8xx comes from the
+# patches. Guest-side turnip is a different build from Droid-VM/mesa (kgsl proxy /
+# virtio native context), NOT this driver.
 #
-# Droid-VM/turnip is our fork of whitebelyash/mesa-tu8 (gen8 branch) with the local kgsl fixes
-# committed directly onto it, so build_turnip.sh's clone already has them -- no post-clone patch
-# step needed. Local work on the driver happens in that fork (branch/PR there), not by editing
-# the tree this script checks out.
+# The checkout follows this meta repo's branch chain (lib_branch.sh) and is then pinned
+# to BANNERS_PIN, so branch + pin fully determine the driver (the fork pins mesa, the
+# pin here pins the fork). Bump flow: push to the fork branch, update BANNERS_PIN here.
+#
+# UNLIKE the old flow, local driver work does NOT live in the build tree: every rebuild
+# resets the mesa tree and re-applies the patch stack, so changes belong in the fork's
+# patches/ (edit patch, push, bump pin). The mesa checkout under turnip/banners-turnip
+# is disposable.
 #
 # Cached: reuses turnip/libvulkan_freedreno.so if present.
 #
-#   TURNIP_REBUILD=1   rebuild from the tree that is already there, keeping it. Cheap (ninja is
-#                      incremental) and, more importantly, non-destructive: the tree is where
-#                      local work on the driver lives, so a rebuild must never throw it away.
-#   TURNIP_CLEAN=1     re-clone everything from scratch. This DELETES turnip/adreno-tools-drivers,
-#                      including any edits made directly in the cloned mesa source. Anything worth
-#                      keeping belongs on the Droid-VM/turnip fork first.
+#   TURNIP_REBUILD=1   reset the mesa tree, re-apply patches, rebuild (ninja+ccache make
+#                      this fast; any local edits in the mesa tree are DISCARDED).
+#   TURNIP_CLEAN=1     delete turnip/banners-turnip and re-clone/rebuild from scratch.
+#   BANNERS_PIN=...    override the pinned fork commit ("branch" = use branch HEAD).
 #
-# Build deps: git meson ninja patchelf unzip curl pip flex bison zip glslangValidator python3
-# ccache.
+# Build deps: git meson ninja patchelf unzip curl pip flex bison zip glslang
+# glslangValidator python3 ccache.
 set -e
 cd "$(dirname "$0")"
+source ./lib_branch.sh
 
-ATD_REPO="${ATD_REPO:-https://github.com/StevenMXZ/Adreno-Tools-Drivers.git}"
-TURNIP_FORK="${TURNIP_FORK:-https://github.com/Droid-VM/turnip.git}"
-ATD_DIR=turnip/adreno-tools-drivers
+BANNERS_URL=${BANNERS_URL:-https://github.com/Droid-VM/Banners-Turnip.git}
+BANNERS_PIN=${BANNERS_PIN:-fc7a50e660b169ff33bdb49fe8f68b5c7f69f6fc}
+BT_DIR=turnip/banners-turnip
+MESA_DIR=$BT_DIR/turnip_workdir/mesa
 SO=turnip/libvulkan_freedreno.so
+# Install prefix of build_turnip.sh's `build_lib_for_android main`.
+BUILT_SO=/tmp/turnip-main/lib/libvulkan_freedreno.so
 
-MESA_DIR="$ATD_DIR/turnip_workdir/mesa"
-NDK="$PWD/$ATD_DIR/turnip_workdir/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
-# Point build_turnip.sh's mesa clone at our fork instead of upstream whitebelyash/mesa-tu8. It
-# still owns the NDK download, meson cross files, and Android source-stub sed fixes; only the
-# mesa source URL changes.
-point_at_fork() {
-    sed -i "s#^mesasrc=.*#mesasrc=\"$TURNIP_FORK\"#" "$ATD_DIR/build_turnip.sh"
-}
-
-# meson/ninja are already configured in the tree; this is seconds, not minutes.
-rebuild_in_place() {
-    ( cd "$MESA_DIR" && PATH="$PWD/../bin:$NDK:$PATH" ninja -C build-android-aarch64 install ) \
-        || { echo "error: rebuild failed" >&2; exit 1; }
-    cp /tmp/turnip-gen8/lib/libvulkan_freedreno.so "$SO"
+# The old adreno-tools-drivers flow left a usable NDK behind; hardlink it into the new
+# workdir so a fresh clone does not re-download 700MB. No-op once the old tree is gone.
+seed_ndk() {
+    local old=turnip/adreno-tools-drivers/turnip_workdir/android-ndk-r29
+    local new=$BT_DIR/turnip_workdir/android-ndk-r29
+    if [ -d "$old" ] && [ ! -d "$new" ]; then
+        echo ">>> seeding NDK from $old (hardlinks)"
+        mkdir -p "$BT_DIR/turnip_workdir"
+        cp -al "$old" "$new"
+    fi
 }
 
 if [ -n "${TURNIP_CLEAN:-}" ]; then
-    echo ">>> TURNIP_CLEAN: removing $ATD_DIR and re-cloning (local source edits will be lost)"
-    rm -rf "$ATD_DIR"
+    echo ">>> TURNIP_CLEAN: removing $BT_DIR and re-cloning"
+    rm -rf "$BT_DIR"
 fi
 
-if [ ! -d "$MESA_DIR/build-android-aarch64" ]; then
-    echo ">>> building turnip from $ATD_REPO (NDK r29 + $TURNIP_FORK gen8, ~4 min)"
-    [ -d "$ATD_DIR" ] || git clone --depth 1 "$ATD_REPO" "$ATD_DIR"
-    point_at_fork
-    ( cd "$ATD_DIR" && bash build_turnip.sh )
-    zip=$(ls -t "$ATD_DIR"/turnip_workdir/a8xx-gen8-V*.zip 2>/dev/null | head -1)
-    [ -n "$zip" ] || { echo "error: turnip build produced no a8xx zip" >&2; exit 1; }
-    unzip -o -j "$zip" libvulkan_freedreno.so -d turnip/
-    rebuild_in_place
-    echo ">>> built turnip md5=$(md5sum "$SO" | cut -d' ' -f1)"
+if [ ! -d "$BT_DIR" ]; then
+    clone_at "$BT_DIR" "$BANNERS_URL"
+    if [ "$BANNERS_PIN" != branch ]; then
+        git -C "$BT_DIR" -c advice.detachedHead=false checkout -q "$BANNERS_PIN"
+    fi
+fi
+echo ">>> $BT_DIR @ $(git -C "$BT_DIR" rev-parse --short HEAD) (pin ${BANNERS_PIN:0:12})"
+[ "$BANNERS_PIN" = branch ] || [ "$(git -C "$BT_DIR" rev-parse HEAD)" = "$BANNERS_PIN" ] || \
+    echo ">>>   warning: checkout differs from BANNERS_PIN -- building what is checked out"
+
+if [ ! -d "$MESA_DIR" ]; then
+    echo ">>> building turnip from $BANNERS_URL (pinned mesa, ~5 min with seeded NDK)"
+    seed_ndk
+    ( cd "$BT_DIR" && bash build_droidvm.sh )
 elif [ -n "${TURNIP_REBUILD:-}" ] || [ ! -s "$SO" ]; then
-    echo ">>> rebuilding turnip in place from $MESA_DIR (tree kept)"
-    rebuild_in_place
-    echo ">>> built turnip md5=$(md5sum "$SO" | cut -d' ' -f1)"
+    echo ">>> rebuilding turnip (mesa tree reset + patches re-applied)"
+    ( cd "$BT_DIR" && SKIP_SOURCE_DOWNLOAD=1 bash build_droidvm.sh )
 else
     echo ">>> reusing cached $SO (md5=$(md5sum "$SO" | cut -d' ' -f1))"
-    echo ">>>   TURNIP_REBUILD=1 rebuilds in place; TURNIP_CLEAN=1 re-clones from scratch"
+    echo ">>>   TURNIP_REBUILD=1 rebuilds; TURNIP_CLEAN=1 re-clones from scratch"
+    echo "Done. turnip at $SO — staged into manual-build by 6_build_apk_prepare.sh."
+    exit 0
 fi
+
+[ -s "$BUILT_SO" ] || { echo "error: build produced no $BUILT_SO" >&2; exit 1; }
+cp "$BUILT_SO" "$SO"
+echo ">>> built turnip md5=$(md5sum "$SO" | cut -d' ' -f1)"
 echo "Done. turnip at $SO — staged into manual-build by 6_build_apk_prepare.sh."
