@@ -64,19 +64,15 @@ $SSH "sudo apt-get install -y '/tmp/$(basename "$deb")'"
 
 step "ICD"
 icd=$(mesa_icd_list)
-# The package writes its own marked block into /etc/environment from postinst, and three other
-# channels besides (environment.d, profile.d, systemd system.conf.d). What is left to do here is
-# strip any BARE line an older provision run appended outside that block: it would be read after
-# the block and win, pinning the guest to whichever single ICD was current then.
+# The zink override and the ICD pins are applied AT BOOT by the package's mesa-guest-env.service
+# (and by its postinst, which just ran): applied when the guest has a paravirt GPU, cleared when
+# it does not, so a simplefb-only guest falls back to the package's llvmpipe instead of
+# crash-looping the greeter. What is left to do here is strip any BARE line an older provision
+# run appended outside the marked block: it would be read after the block and win, pinning the
+# guest to whichever single ICD was current then.
 $SSH "sudo sed -i '/^# BEGIN mesa-guest/,/^# END mesa-guest/!{/^VK_DRIVER_FILES=/d;/^VK_ICD_FILENAMES=/d;/^MESA_LOADER_DRIVER_OVERRIDE=/d}' /etc/environment"
-# Every route needs this, not just the DRM one. The build is -Dgallium-drivers=zink, so it
-# ships no virtio_gpu_dri.so -- and /usr/local's dri directory takes precedence over the
-# distro's without falling back to it. Left unset, GNOME Shell asks the loader for the driver
-# matching its DRM device, gets "virtio_gpu: driver missing", falls back to kms_swrast, and then
-# fails outright with "Failed to setup: No GPUs found" -- so gdm retries the greeter until it
-# gives up ("maximum number of display failures reached"). Vulkan is fine throughout, which makes
-# it look like a gdm or a mesa-version problem rather than a missing GL driver.
-$SSH 'grep -E "^VK_|^MESA_" /etc/environment'
+# Empty on a guest with no GPU -- by design, not by accident, so say which case this is.
+$SSH 'grep -E "^VK_|^MESA_" /etc/environment || echo "  (no zink block: mesa-guest-env found no GPU; llvmpipe fallback active)"'
 
 step "verify"
 $SSH "for f in \$(echo '$icd' | tr ':' ' '); do
