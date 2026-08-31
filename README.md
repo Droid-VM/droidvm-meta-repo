@@ -35,7 +35,7 @@ whose failures are all silent.
 | 2-3 | `2-3_crosvm_run_ubuntu.sh` | run the manual test VM on the device |
 | 3 | `3_build_edk2.sh` | build the EDK2 firmware (`edk2-gunyah && ./build.sh -DPCI_CAM_MODE=FALSE`) |
 | 4 | `4_build_gunyah_host.sh` | build the host modules (host-share, kvcalloc, gh_unmovable, udmabuf) for each GKI KMI → `gunyah_host_mod/dist/` |
-| 5 | `5_prepare_turnip.sh` | build the host turnip Vulkan driver (Droid-VM/turnip `gen8`, KGSL) → `turnip/libvulkan_freedreno.so` |
+| 5 | `5_prepare_turnip.sh` | build the host turnip Vulkan driver (Droid-VM/Banners-Turnip: pinned upstream mesa + patches, KGSL) → `turnip/libvulkan_freedreno.so` |
 | 6 | `6_build_apk_prepare.sh` | clone app + prebuilt-root, overlay crosvm/EDK2/gunyah/turnip artifacts into `manual-build/` |
 | 7 | `7_build_apk.sh` | build the DroidVM APK with the local prebuilts baked in |
 | 8 | `8_build_guest_mesa.sh` | build the guest mesa — one package carrying all three routes (cross-compiled in a container, recipe from `mesa-cross/`) |
@@ -50,11 +50,14 @@ all into `manual-build/` before the APK is packed.
 
 Turnip is the host GPU Vulkan driver (hwvulkan HAL): without it gfxstream falls
 back to the closed Adreno blob (AHB-only, `supportsDmaBuf=0`) and host-visible
-coherent memory fails. Step 5 builds it from our Droid-VM/turnip fork of
-mesa-tu8 `gen8` via StevenMXZ/Adreno-Tools-Drivers — a self-contained build (own
-NDK + mesa fork), so it does not touch the crosvm soong tree. The drm2kgsl route
-does not need it: there the guest runs turnip itself and the host only
-translates the DRM layer.
+coherent memory fails. Step 5 builds it from our Droid-VM/Banners-Turnip fork:
+upstream mesa pinned by the fork's `mesa_hash.txt`, with the a8xx gen8 stack and
+our droidvm fixes applied as patch files — a self-contained build (own NDK), so
+it does not touch the crosvm soong tree. The fork checkout follows this repo's
+branch chain and is pinned by `BANNERS_PIN` in the script; driver work happens
+in the fork's `patches/`, never in the build tree, which every rebuild resets.
+The drm2kgsl route does not need it: there the guest runs turnip itself and the
+host only translates the DRM layer.
 
 ## Guest mesa
 
