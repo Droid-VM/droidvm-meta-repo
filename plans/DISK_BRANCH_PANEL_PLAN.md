@@ -167,3 +167,11 @@ Android 端：
 
 1. **首頁「建立嚮導」**：原本 toast「功能未實現」，改開與 VM 頁 + 相同的選單（Linux VM / Windows VM / 從 .vmpkg 匯入 / 自訂）。選單抽成 `ui/vm/VMCreateMenu.show(context)`，`MainVMFragment.onFabClick` 與 `MainHomeFragment.openWizard` 共用。實機點卡片看到四個選項 ✅
 2. **VPU 與相機文案**：`create_vm_vpu_note`（圖形分頁）與 `edit_vm_peripheral_unavailable`（外設卡片，相機類型顯示）三語系改成「功能待實現」措辭。圖形分頁與外設頁的相機卡片實機都看到新文案 ✅
+
+## 8. 追加：大頁預檢多算 guest pool（5568 的 5 GB VM 被說要 6 GB）
+
+根因：daemon（`CrosvmBackendInstance`）在 host 看得到客體 RAM 的兩種模式（protected_normal、pseudo_unprotected）會把 `gpu_guest_pool_mb` 歸零不傳；`PoolPreflight.neededPages` 沒套同一條規則，仍加 1024 → 5120+1024=6144。另一處漂移：gfxstream 的 udmabuf 預設 daemon=true、預檢=false。
+
+修法：新增 `lib/store/vm/GuestPoolSizing`（`hostVisibleRam / bootGuestPoolMb / bootGuestPreallocMb`），daemon 三條路線與預檢都改呼叫它。單元測試 `PoolPreflightTest` 6 例（pseudo_unprotected=5120、protected=6144、gfxstream udmabuf 開關、無 GPU、prealloc 512）。
+
+部署注意：預檢在 app 程序跑（前景啟動），裝 APK 即生效；daemon 的 `waitForPool`（背景/自動啟動）同一段碼，要重啟 daemon 才換新。5568 當時有 VM 在跑，未主動安裝。
