@@ -2,19 +2,25 @@
 # Branch resolution shared by the numbered build scripts.
 #
 # Every component repo used to be checked out at "whatever branch THIS meta repo is
-# on". That breaks the moment the meta repo carries a variant branch a component does
-# not have: `git clone -b wip/3d-accel-drm2kgsl` just fails with "couldn't find remote ref".
+# on". That breaks the moment the meta repo carries a branch a component does not
+# have: `git clone -b <branch>` just fails with "couldn't find remote ref" -- and a
+# piece of work touches only a few components, so most of them do not have it.
 #
-# The development line lives on ONE trunk in every repo (wip/3d-accel). Variants exist
-# only where the content genuinely differs -- this meta repo (launchers, plans, which
-# mesa to build) and mesa (two unrelated upstreams). So resolution is a fallback chain:
+# So resolution is a two-step chain. The DEVELOPMENT branch comes first and is simply
+# this meta repo's branch: a component takes part in a piece of work by carrying a
+# branch of the same name. A component the work does not touch has no such branch and
+# falls back to its STABLE branch, which the org keeps under one name in every repo,
+# `droidvm` -- except the app, whose stable branch is `master` (6_build_apk_prepare.sh):
 #
-#     wip/3d-accel-<variant>   ->   wip/3d-accel   ->   (soong forks) the manifest revision
+#     <this meta repo's branch>   ->   droidvm   ->   (soong forks) the manifest revision
 #
 # Source this after `cd "$(dirname "$0")"`.
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-TRUNK=${TRUNK:-wip/3d-accel}
+# The stable branch. Override it per call for the one repo that names it differently,
+# `STABLE=master clone_at ...` -- an assignment in front of a function call is scoped to
+# that call in bash.
+STABLE=${STABLE:-droidvm}
 
 if [ "$BRANCH" = HEAD ]; then
     echo "error: meta repo is in detached HEAD -- check out a branch first" >&2
@@ -36,24 +42,13 @@ pick() {
     return 0
 }
 
-# The branch the trunk replaced. Kept in the chain so a fresh clone still works against
-# remotes that have not been published yet, but selecting it is REPORTED (see warn_legacy):
-# a component silently left on the old branch while the rest moved to the trunk is the
-# crosvm/gfxstream ABI skew whose failures are all silent. Unset it once every repo has
-# published wip/3d-accel.
-LEGACY=${LEGACY:-wip/3d-accel-gfxstream}
-
 # branch_chain -- the fallback chain for a component repo, most specific first.
 branch_chain() {
-    local c=$TRUNK
-    [ "$BRANCH" = "$TRUNK" ] || c="$BRANCH $TRUNK"
-    [ -z "$LEGACY" ] || c="$c $LEGACY"
-    printf '%s' "$c"
-}
-
-warn_legacy() {
-    [ -n "$LEGACY" ] && [ "$1" = "$LEGACY" ] || return 0
-    echo "warning: $2 has no $TRUNK yet -- falling back to $LEGACY" >&2
+    if [ "$BRANCH" = "$STABLE" ]; then
+        printf '%s' "$STABLE"
+    else
+        printf '%s %s' "$BRANCH" "$STABLE"
+    fi
 }
 
 # clone_at <dir> <url> [extra-branch...]
@@ -77,7 +72,6 @@ clone_at() {
     fi
     b=$(pick "$url" $(branch_chain) "$@")
     [ -n "$b" ] || { echo "error: $url has none of: $(branch_chain) $*" >&2; exit 1; }
-    warn_legacy "$b" "$dir"
     echo ">>> cloning $dir at $b"
     git clone -b "$b" "$url" "$dir"
 }
@@ -96,7 +90,7 @@ checkout_soong() {
     # It failed as ">>> ... keeping the manifest revision", which reads like a decision.
     b=$(pick "$url" $(branch_chain))
     if [ -z "$b" ]; then
-        echo ">>> $d: no $(branch_chain) on droidvm, keeping the manifest revision $(git -C "$d" rev-parse --short HEAD)"
+        echo ">>> $d: $url has none of: $(branch_chain) -- keeping the manifest revision $(git -C "$d" rev-parse --short HEAD)"
         return 0
     fi
     git -C "$d" fetch -q droidvm "$b"
@@ -107,6 +101,5 @@ checkout_soong() {
         exit 1
     fi
     git -C "$d" checkout -q -B "$b" FETCH_HEAD
-    warn_legacy "$b" "$d"
     echo ">>> $d @ $b $(git -C "$d" rev-parse --short HEAD)"
 }

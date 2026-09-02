@@ -1,121 +1,73 @@
-# droidvm-3d-accel
+# Droidvm Build
 
-Meta repo for DroidVM's 3D-acceleration stack: build pipeline, cross-repo docs
-and the guest kernel patches. Every component lives in its own Droid-VM repo;
-this folder is the workspace that ties them together (sub-repo folders are
-gitignored).
+DroidVM 的 meta repo：建置流程、跨 repo 文件、guest kernel 補丁。
+每個元件都是獨立的 Droid-VM repo；這個資料夾是把它們串起來的工作區
+（子 repo 的資料夾都在 .gitignore 裡）。
 
-## Branches
+## 分支
 
-The development line is ONE trunk, `wip/3d-accel`, in every repo. Variant
-branches exist only where the content genuinely differs:
+分支分兩種。`lib_branch.sh` 對每個元件都沿著 **開發 → 穩定** 這條鏈解析：
 
-| branch | where | what |
+| 分支 | 在哪 | 是什麼 |
 |---|---|---|
-| `wip/3d-accel` | all 10 repos | everything host-side, both graphics backends, all three pools |
-| `wip/3d-accel-gfxstream` | this repo + `mesa` | gfxstream launchers/plans; mesa 26.0.3 + the gfxstream guest ICD |
-| `wip/3d-accel-drm2kgsl` | this repo + `mesa` | drm2kgsl launcher/plans; mesa 26.3.0-devel + turnip over vdrm |
+| `<本 repo 的分支>` | 本 repo + 這項工作有動到的元件 | 開發線：元件要參與某項工作，就開一個和 meta repo 同名的分支 |
+| `droidvm` | 每個 Droid-VM repo | 穩定分支，全 org 統一用這個名字 |
+| `master` | 只有 `DroidVM`（app） | app 的穩定分支，唯一的例外，在 `6_build_apk_prepare.sh` 處理 |
 
-`lib_branch.sh` resolves each component along a chain —
-`wip/3d-accel-<variant>` → `wip/3d-accel` → (soong forks) the manifest
-revision — so a variant branch inherits the trunk from every repo that does not
-carry one. The old `wip/3d-accel-gfxstream` sits at the tail of that chain until
-the trunk is published everywhere; selecting it prints a warning, because a
-component left behind while the rest moved on is the crosvm/gfxstream ABI skew
-whose failures are all silent.
+這項工作沒動到的元件，自然就沒有同名分支，於是用它的穩定分支建置；
+soong fork 兩者都沒有的話，維持 manifest 的 revision。
+既有的 checkout 只會被回報，絕不會被悄悄切換（`REPO_SWITCH=1` 才會切）。
 
-## Pipeline
+## 流程
 
-| step | script | what |
+1_.sh 一路跑到 9_.sh ，跑完就能拿到全部的元件，含 apk 和 linux 驅動等等
+
+1_ 先跑
+先等 1_ 跑完，2_ 3_ 4_ 5_ 可以同時跑
+6_ 7_ 按順序跑
+8_ 9_ 沒依賴，可以同時跑
+
+| 步驟 | 腳本 | 做什麼 |
 |---|---|---|
-| 1 | `1_build_crosvm_prepare.sh` | repo-sync the crosvm soong tree, then check every Droid-VM fork out along the branch chain (incl. `mesa` and `mesa-cross`) |
-| 2 | `2_build_crosvm.sh` | build crosvm (+ gfxstream/virglrenderer) for the device |
-| 2-1 | `2-1_collect_crosvm.sh` | collect crosvm + linked .so into `crosvm_out/` (called by step 2) |
-| 2-2 | `2-2_crosvm_out_to_adb.sh` | push `crosvm_out/` to the device for manual testing |
-| 2-3 | `2-3_crosvm_run_ubuntu.sh` | run the manual test VM on the device |
-| 3 | `3_build_edk2.sh` | build the EDK2 firmware (`edk2-gunyah && ./build.sh -DPCI_CAM_MODE=FALSE`) |
-| 4 | `4_build_gunyah_host.sh` | build the host modules (host-share, kvcalloc, gh_unmovable, udmabuf) for each GKI KMI → `gunyah_host_mod/dist/` |
-| 5 | `5_prepare_turnip.sh` | build the host turnip Vulkan driver (Droid-VM/Banners-Turnip: pinned upstream mesa + patches, KGSL) → `turnip/libvulkan_freedreno.so` |
-| 6 | `6_build_apk_prepare.sh` | clone app + prebuilt-root, overlay crosvm/EDK2/gunyah/turnip artifacts into `manual-build/` |
-| 7 | `7_build_apk.sh` | build the DroidVM APK with the local prebuilts baked in |
-| 8 | `8_build_guest_mesa.sh` | build the guest mesa — one package carrying all three routes (cross-compiled in a container, recipe from `mesa-cross/`) |
-| 9 | `9_build_guest_addition.sh` | package the guest kernel modules as a DKMS .deb |
+| 1 | `1_build_crosvm_prepare.sh` | 用 manifest repo-sync crosvm 的 soong tree，再把每個 Droid-VM fork 沿分支鏈 checkout（含 `mesa`、`mesa-cross`） |
+| 2 | `2_build_crosvm.sh` | 為裝置編譯 crosvm（+ gfxstream/virglrenderer） |
+| 2-1 | `2-1_collect_crosvm.sh` | 把 crosvm 和它連結的 .so 收進 `crosvm_out/`（步驟 2 會呼叫） |
+| 2-2 | `2-2_crosvm_out_to_adb.sh` | 把 `crosvm_out/` 推到裝置上手動測試 |
+| 2-3 | `2-3_crosvm_run_ubuntu.sh` | 在裝置上跑手動測試用的 VM |
+| 3 | `3_build_edk2.sh` | 編譯 EDK2 韌體（`edk2-gunyah && ./build.sh -DPCI_CAM_MODE=FALSE`） |
+| 4 | `4_build_gunyah_host.sh` | 針對每個 GKI KMI 編譯 host 模組（host-share、kvcalloc、gh_unmovable、udmabuf）→ `gunyah_host_mod/dist/` |
+| 5 | `5_prepare_turnip.sh` | 編譯 host 端 turnip Vulkan 驅動（Droid-VM/Banners-Turnip：pin 住的上游 mesa + patch，走 KGSL）→ `turnip/libvulkan_freedreno.so` |
+| 6 | `6_build_apk_prepare.sh` | clone app + prebuilt-root，把 crosvm/EDK2/gunyah/turnip 的產物疊進 `manual-build/` |
+| 7 | `7_build_apk.sh` | 用本機 prebuilt 打包 DroidVM APK |
+| 8 | `8_build_guest_mesa.sh` | 編譯 guest mesa：一個套件包含三條路線（在容器裡交叉編譯，recipe 來自 `mesa-cross/`） |
+| 9 | `9_build_guest_addition.sh` | 把 guest kernel 模組打成 DKMS .deb |
 
-`gh_hugepage_reserve` is a separate out-of-tree module (`../gh-hugepage-reserve`)
-and is NOT built by step 4.
+請按 1 到 9 的順序跑：後面的腳本會吃前面的產物（步驟 6 把步驟 2 編出的
+crosvm 拉進 app 專案，步驟 7 打包出去）。最終產物是 host 端 APK（步驟 7）
+和兩個 guest 端 `.deb`（步驟 8、9，放在 `dist-guest/`）。
 
-Build artifacts (crosvm step 2, EDK2 step 3, gunyah modules step 4, turnip step 5)
-each land in their own component dir; step 6 is the single place that pulls them
-all into `manual-build/` before the APK is packed.
+建置產物（crosvm 步驟 2、EDK2 步驟 3、gunyah 模組步驟 4、turnip 步驟 5）
+各自留在自己的元件目錄
 
-Turnip is the host GPU Vulkan driver (hwvulkan HAL): without it gfxstream falls
-back to the closed Adreno blob (AHB-only, `supportsDmaBuf=0`) and host-visible
-coherent memory fails. Step 5 builds it from our Droid-VM/Banners-Turnip fork:
-upstream mesa pinned by the fork's `mesa_hash.txt`, with the a8xx gen8 stack and
-our droidvm fixes applied as patch files — a self-contained build (own NDK), so
-it does not touch the crosvm soong tree. The fork checkout follows this repo's
-branch chain and is pinned by `BANNERS_PIN` in the script; driver work happens
-in the fork's `patches/`, never in the build tree, which every rebuild resets.
-The drm2kgsl route does not need it: there the guest runs turnip itself and the
-host only translates the DRM layer.
+步驟 6 是唯一把它們全部收進 `manual-build/` ，覆蓋掉 prebuilt ，之後打包 APK。
 
-## Guest mesa
 
-The guest ships ONE mesa package carrying all three routes, built from one
-branch of Droid-VM/mesa. The build recipe is its own repo,
-[Droid-VM/mesa-cross](https://github.com/Droid-VM/mesa-cross) (`wip/3d-accel`,
-cloned into `mesa-cross/` by step 1 or by step 8): the cross container, the
-packaging, and `mesa-cross/mesa-config.sh`, which holds the whole
-configuration -- meson options, package name, ICD list, the version scheme --
-so the local build and CI cannot drift apart:
 
-| route | Vulkan driver | ICD |
-|---|---|---|
-| gfxstream | gfxstream guest ICD, paired with the host gfxstream decoder | `gfxstream_vk_icd.aarch64.json` |
-| venus | venus (`vn`), speaking the venus wire to virglrenderer's vkr | `virtio_icd.aarch64.json` |
-| drm2kgsl | turnip over vdrm (freedreno, kmds `msm,virtio`) | `freedreno_icd.aarch64.json` |
+## 裝置
 
-The mesa branch is always THIS repo's branch (`mesa_branch`), so a new meta
-branch never silently keeps building the old mesa.
+手機透過 OpenWrt 路由器 `10.53.12.1` 用 adb 連線，每台手機轉發一個 port：
 
-Until 2026-08-18 this was three packages from three mesa branches, because the
-routes sat on unrelated upstream lines: gfxstream and venus on 26.0.3 (the
-gfxstream guest ICD and the host decoder are one codebase and must match),
-drm2kgsl on 26.3.0-devel (where the tu/virtio work lives). Rebasing every route
-onto the same upstream commit showed the three trees touch disjoint files --
-`src/gfxstream/**`, `src/virtio/vulkan/vn_*`, `src/freedreno/**` -- so they
-became one branch and one build (`-Dvulkan-drivers=gfxstream,freedreno,virtio`).
+| 路由器 | 手機（host） |
+|---|---|
+| `10.53.12.1:5566` | `192.168.40.11:5566` |
+| `10.53.12.1:5567` | `192.168.40.12:5567` |
+| `10.53.12.1:5568` | `192.168.40.13:5568` |
 
-**The route is now chosen at run time, not install time.** `VK_DRIVER_FILES`
-names all three ICDs and the Vulkan loader keeps whichever one enumerates a
-device: a guest sees exactly one virtio-gpu capset, so exactly one answers.
-Nothing has to be swapped to change route. The package still supersedes the old
-per-route `mesa-guest-{gfxstream,venus,drm2kgsl,kgsl}` packages, which installed
-to the same `/usr/local` paths, so `apt install ./mesa-guest_<ver>_arm64.deb`
-removes whichever of them a guest still carries. That matters because they all
-shipped libgallium, the desktop composites through gallium rather than through
-the Vulkan ICD, and a leftover copy shows up as a fully black VNC scanout with
-no error anywhere.
+app daemon 啟動時會載入 kernel 模組並拉起 `br-wifi`。橋接已經設定好；
+若損毀就重設。它基於 pseudo-bridge-rs，所以跑起來的 VM 位址會出現在手機
+自己的 `wlan0` 上，帶 `nodad` 旗標，靠這個旗標分辨代理上去的 VM 位址和手機
+本身的位址（VM 沒開機時那裡就沒有）：
 
-The split between the two repos is git vs. build: `lib_mesa_build.sh` here
-resolves the branch and keeps the checkout, then hands a PATH to
-`mesa-cross/build.sh`, which knows nothing about git. The same recipe runs in
-mesa-cross's GitHub Actions workflow (**Actions → guest mesa → Run workflow**):
-pick the branch, it clones `Droid-VM/mesa`, builds the one `.deb` and publishes
-it as a pre-release tagged with the branch name (`/` becomes `_`, which git
-requires) plus `MD5SUMS` -- the same files a local `dist-guest/` would hold.
-Note that CI builds what is PUSHED to Droid-VM/mesa; a local checkout with
-uncommitted changes only reaches the local build.
+adb -s 10.53.12.1:5566 shell "ip addr show wlan0" nodad 就是 vm ipv6，ssh key 已經設定好，直接 ssh root 連線過去
 
-## Layout
 
-- `plans/` — design docs and evidence packs
-- `deploy/` — phone-side launchers and benchmark harness (`gfxstream/`, `drm2kgsl/`);
-  start at `deploy/SETUP.md`
-- `guest-patches/` — guest kernel delta as patches (in-tree reference; the
-  supported install route is Droid-VM/droidvm-guest-additions) + ICD snapshots
-- `mesa-cross/` — clone of Droid-VM/mesa-cross (gitignored): the guest mesa
-  cross-build recipe + `mesa-config.sh`; `mesa/` is the checkout step 8 builds
-  from
-- `crosvm`/`gfxstream`/`virglrenderer`/`Virtualization` — symlinks into
-  `crosvm_build/` (the soong build sandbox needs the real directories in-tree)

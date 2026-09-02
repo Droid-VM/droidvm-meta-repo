@@ -7,7 +7,8 @@ cd "$(dirname "$0")"
 source ./lib_branch.sh
 export DROIDVM_PREBUILT_COMPRESSION_LEVEL="${DROIDVM_PREBUILT_COMPRESSION_LEVEL:-1}"
 
-clone_at DroidVM https://github.com/Droid-VM/DroidVM.git
+# The app is the one repo whose stable branch is master, not droidvm (lib_branch.sh).
+STABLE=master clone_at DroidVM https://github.com/Droid-VM/DroidVM.git
 # Prebuilt root is the exception: always its main branch. The build overlays the
 # freshly built crosvm/EDK2/gunyah/turnip on top (below), rather than tracking a dev branch.
 [ -d DroidVM/DroidVM-Prebuilt-Root ] || git clone https://github.com/Droid-VM/DroidVM-Prebuilt-Root.git DroidVM/DroidVM-Prebuilt-Root
