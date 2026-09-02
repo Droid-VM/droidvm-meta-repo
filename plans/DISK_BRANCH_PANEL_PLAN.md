@@ -175,3 +175,13 @@ Android 端：
 修法：新增 `lib/store/vm/GuestPoolSizing`（`hostVisibleRam / bootGuestPoolMb / bootGuestPreallocMb`），daemon 三條路線與預檢都改呼叫它。單元測試 `PoolPreflightTest` 6 例（pseudo_unprotected=5120、protected=6144、gfxstream udmabuf 開關、無 GPU、prealloc 512）。
 
 部署注意：預檢在 app 程序跑（前景啟動），裝 APK 即生效；daemon 的 `waitForPool`（背景/自動啟動）同一段碼，要重啟 daemon 才換新。5568 當時有 VM 在跑，未主動安裝。
+
+## 9. 追加：清空增量（reset overlay）
+
+qemu-img 沒有「丟棄增量內容」的指令，做法是重建：在旁邊 `qemu-img create` 一個同 backing、同虛擬大小、同 cluster_size / compression_type 的空 header 檔（`<path>.reset.tmp`），再 rename 蓋回原路徑（原子交換，失敗時原檔不動）。路徑不變所以 VM 槽位與註冊表都不用動，確認框只列「內容將被改寫為基底目前狀態」。
+
+限制：只有可寫葉子可做（有 parent、無 child）；加密磁碟拒絕（沒金鑰重建不了）；掛著它的 VM 必須停止（pinned 游標拒絕）。
+
+入口：面板節點選單、磁碟清單長按（overlay 選單）、資訊頁併入「管理增量分支」。`DiskActionDialog.tryReset(config, live, onConfirmed)`。非葉子（根或有子節點）不顯示這個選項而不是按了才拒絕：面板用 `MaterialMenu.setItemVisible`，清單走 `MainListFragment.onPrepareItemMenu` hook（MainDiskFragment 覆寫）；tryReset 內的檢查保留作防呆。
+
+實機（5566）：4.3 MB 髒增量 rs-ov → 清空後 196616 bytes，backing / virtual size 不變，rs-vm 槽位不動，面板不關 ✅；根節點與有子節點的節點被拒絕 ✅。
