@@ -9,7 +9,7 @@ mkdir -p crosvm_out
 cd crosvm_build
 source build/envsetup.sh
 lunch aosp_arm64 trunk_staging eng
-ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m crosvm_device_only -j8 || { echo 'BUILD FAILED'; exit 1; }
+ALLOW_MISSING_DEPENDENCIES=true TARGET_BUILD_UNBUNDLED=true m crosvm_device_only -j"${JOBS:-8}" || { echo 'BUILD FAILED'; exit 1; }
 ../2-1_collect_crosvm.sh
 mv out/crosvm_pkg/* ../crosvm_out/
 rm ../crosvm_out/libaaudio.so
