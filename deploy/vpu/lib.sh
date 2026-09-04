@@ -71,23 +71,48 @@ daemon_pid() {
     echo "$pid"
 }
 
+pkg_apk() {  # the installed base.apk -- the CLASSPATH a freshly started daemon would get
+    ash "pm path cn.classfun.droidvm" | sed -n 's/^package://p' | head -1
+}
+
+# The CLASSPATH the RUNNING daemon was started with. It is not in /proc/<pid>/cmdline: the pid in
+# run/droidvmd.pid is the `app_process64` DaemonHelper execs through `env`, so its cmdline is only
+# "/system/bin/app_process64 / cn.classfun.droidvm.daemon.Daemon [--force]" and the CLASSPATH is
+# in its ENVIRONMENT (DaemonHelper.java:143-151). Root-only read, hence asu.
+daemon_classpath() {  # daemon_classpath <pid>
+    asu "tr '\0' '\n' < /proc/$1/environ" | sed -n 's/^CLASSPATH=//p' | head -1
+}
+
 # Start the daemon exactly the way the UI does (DaemonHelper.java:138-151), with the stdio
 # redirection that DaemonHelper does not need and an adb shell does: bin/daemon is a
 # double-fork+setsid wrapper that never touches its fds (unixhelper/daemon.c), so without
 # </dev/null >/dev/null 2>&1 the adb shell hangs until it is killed.
-daemon_start() {
-    local apk libdir
-    apk=$(ash "pm path cn.classfun.droidvm" | sed -n 's/^package://p' | head -1)
+#
+# --force appends the same trailing argument DaemonHelper.startDaemon(true) does: the new daemon
+# takes the single-instance lock away from the running one and replaces it. That is the only way
+# to move a daemon onto a freshly installed base.apk (defect D12, B3-acceptance.md §3).
+daemon_start() {  # daemon_start [--force]
+    local apk libdir force="" old=""
+    if [ "${1:-}" = --force ]; then
+        force=" --force"
+        old=$(daemon_pid) || old=""
+    fi
+    apk=$(pkg_apk)
     [ -n "$apk" ] || die "daemon: cn.classfun.droidvm is not installed on $PHONE"
     libdir="$(dirname "$apk")/lib/arm64"
-    note "daemon: starting (apk=$apk)"
+    note "daemon: starting${force} (apk=$apk)"
     asu "env CLASSPATH=$apk LD_LIBRARY_PATH=$libdir:$APP/lib \
-         $APP/bin/daemon /system/bin/app_process64 / cn.classfun.droidvm.daemon.Daemon \
+         $APP/bin/daemon /system/bin/app_process64 / cn.classfun.droidvm.daemon.Daemon$force \
          </dev/null >/dev/null 2>&1"
-    local _
+    local _ pid
     for _ in $(seq 1 20); do
         sleep 1
-        daemon_pid >/dev/null 2>&1 && { note "daemon: pid $(daemon_pid)"; return 0; }
+        pid=$(daemon_pid) || continue
+        # With --force the old pid stays in the file until the newcomer wins the lock and
+        # rewrites it, so "some daemon is running" is not enough -- wait for a different one.
+        [ -n "$old" ] && [ "$pid" = "$old" ] && continue
+        note "daemon: pid $pid"
+        return 0
     done
     die "daemon: did not come up within 20s"
 }
@@ -95,6 +120,43 @@ daemon_start() {
 daemon_ensure() {
     daemon_pid >/dev/null 2>&1 && return 0
     daemon_start
+}
+
+# D12: an `adb install -r` does not kill the daemon (it is a bare root app_process64 started
+# through su), so it happily keeps executing the base.apk the update replaced. Compare what it
+# runs against what is installed; 0 = fresh, 1 = stale or not running.
+daemon_check() {
+    local apk pid cp
+    apk=$(pkg_apk)
+    [ -n "$apk" ] || die "daemon-check: cn.classfun.droidvm is not installed on $PHONE"
+    if ! pid=$(daemon_pid); then
+        echo "daemon:    not running"
+        echo "installed: $apk"
+        echo "verdict:   absent -- the next rig verb starts it on the installed APK"
+        return 1
+    fi
+    cp=$(daemon_classpath "$pid")
+    echo "daemon:    pid $pid"
+    echo "running:   ${cp:-<no CLASSPATH in /proc/$pid/environ>}"
+    echo "installed: $apk"
+    if [ -n "$cp" ] && [ "$cp" = "$apk" ]; then
+        echo "verdict:   fresh"
+        return 0
+    fi
+    echo "verdict:   STALE -- the daemon predates the installed APK; run: vm.sh daemon-restart"
+    return 1
+}
+
+# Restart the daemon onto the installed APK. Daemon.cleanup stops every VM anyway
+# (device-5566-vm.md §2.1), so stop them through the daemon's own orderly path FIRST rather than
+# letting a takeover tear them down: never kill -9 a crosvm (deploy/SETUP.md).
+daemon_restart() {
+    vm_stop_all || return 1
+    daemon_start --force
+    # Both are regenerated on every start (Daemon.java:177, Server.java:98); drop the cache so
+    # the next dvm call re-reads them and re-forwards the new port.
+    _DVM_PORT=""
+    _DVM_TOKEN=""
 }
 
 dvm_port()  { asu "cat $RUN/droidvmd-port.txt"  | tr -dc '0-9'; }
@@ -148,6 +210,33 @@ print(sys.argv[2] if v is None else (v if isinstance(v, str) else json.dumps(v))
 # vm_list reports the state as the VMState enum NAME ("RUNNING"), while vm_status lowercases it
 # (StatusHandler.java:36-37). Normalise, so callers only ever compare against lowercase.
 vm_state() { vm_field "$1" state STOPPED | tr '[:upper:]' '[:lower:]'; }
+
+vm_running() {  # names of every VM the daemon currently has running, one per line
+    dvm list | python3 -c '
+import json,sys
+for vm in json.load(sys.stdin).get("data") or []:
+    if str(vm.get("state","")).lower() == "running":
+        print(vm.get("name") or vm.get("id"))'
+}
+
+# Stop every running VM through the daemon's own StopAllHandler (vm_stop_all -> VMs.stopAll) and
+# wait for the daemon to report them stopped. Used before an APK install and before a daemon
+# restart: a daemon that is replaced takes its VMs down with it (Daemon.cleanup), and a crosvm
+# that dies any way but vm_stop leaks RM memparcels until the phone is rebooted (deploy/SETUP.md).
+vm_stop_all() {
+    local running _
+    running=$(vm_running) || return 1
+    [ -n "$running" ] || { note "stop-all: nothing running"; return 0; }
+    note "stop-all: stopping $(echo "$running" | tr '\n' ' ')"
+    dvm stop-all >/dev/null || return 1
+    for _ in $(seq 1 30); do
+        sleep 2
+        running=$(vm_running)
+        [ -n "$running" ] || { note "stop-all: all stopped"; return 0; }
+    done
+    note "stop-all: still running after 60s: $(echo "$running" | tr '\n' ' ')"
+    return 1
+}
 
 # --- guest address ------------------------------------------------------------------------------
 # The guest gets a SLAAC address from the phone's own /64, with an EUI-64 interface id derived

@@ -72,6 +72,26 @@ class Daemon:
         if not resp.get("success"):
             raise SystemExit("auth failed: %s" % resp.get("message", resp))
 
+    def resolve(self, key):
+        """Accept a VM name where the daemon insists on a vm_id.
+
+        Every ipc/vm handler reads a bare `vm_id` out of the request and looks it up by id
+        (GetHandler.java:27-30 and friends) -- unlike the `droidvm` CLI, which resolves names
+        first. So `dvmipc.py get Ubuntu-resolute` used to answer "VM not found" while
+        `vm.sh`/`vm_extra.sh` worked, because those resolve through vm_list themselves
+        (lib.sh's vm_info). Do the same here; an exact id match wins and costs one extra call.
+        """
+        resp = self.call("vm_list")
+        vms = resp.get("data") or []
+        for vm in vms:
+            if vm.get("id") == key:
+                return key
+        for vm in vms:
+            if vm.get("name") == key:
+                return vm["id"]
+        raise SystemExit("no VM named or id %r (have: %s)"
+                         % (key, ", ".join(vm.get("name", "?") for vm in vms)))
+
 
 def decode_console(blob):
     """The console history blob is %XX-encoded (VMInstance.java:611-620)."""
@@ -88,10 +108,11 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="vm_list: every VM, config + live state/pid/streams")
+    sub.add_parser("stop-all", help="vm_stop_all: stop every running VM (takes no id)")
     for name, helptext in (
         ("status", "vm_status: the lowercase VMState"),
         ("stop", "vm_stop"),
-        ("get", "vm_get: the stored config"),
+        ("get", "vm_get: the stored config (name or id)"),
     ):
         p = sub.add_parser(name, help=helptext)
         p.add_argument("vm_id")
@@ -99,7 +120,9 @@ def main():
     p.add_argument("vm_id")
     p.add_argument("--clear-logs", action="store_true")
     p.add_argument("--boot-entry")
-    p = sub.add_parser("modify", help="vm_modify: replace a stored config (VM must be STOPPED)")
+    p = sub.add_parser("modify",
+                       help="vm_modify: replace a stored config (VM must be STOPPED); the "
+                            "config's own 'id' may be a name")
     p.add_argument("config", help="path to a whole VMConfig JSON object, or - for stdin")
     p = sub.add_parser("console-history", help="vm_console_history, %%XX-decoded")
     p.add_argument("vm_id")
@@ -117,7 +140,9 @@ def main():
     elif args.cmd == "stop":
         resp = d.call("vm_stop", vm_id=args.vm_id)
     elif args.cmd == "get":
-        resp = d.call("vm_get", vm_id=args.vm_id)
+        resp = d.call("vm_get", vm_id=d.resolve(args.vm_id))
+    elif args.cmd == "stop-all":
+        resp = d.call("vm_stop_all")
     elif args.cmd == "start":
         extra = {}
         if args.clear_logs:
@@ -130,6 +155,7 @@ def main():
         cfg = json.loads(text)
         if not cfg.get("id"):
             raise SystemExit("modify: the config must carry its own 'id' (ModifyHandler.java:59-70)")
+        cfg["id"] = d.resolve(cfg["id"])
         resp = d.call("vm_modify", config=cfg)
     elif args.cmd == "console-history":
         resp = d.call("vm_console_history", vm_id=args.vm_id, stream=args.stream)
