@@ -379,13 +379,53 @@ capture-result callbacks（`ACameraCaptureSession_captureCallbacks`，8 欄位�
 gst `v4l2src ! fakesink` 跑通；另跑 `driver_owned_queues=all`（幀寫進 `media_guest`）與 pseudo-unprotected 各一輪。
 前置 smoke：先用既有 `camera_probe capture --uid <app uid>` 在 5566 上確認 app 前景 + FGS 下相機開得了（舊 plan §0 的量測從未在 5566 做過）。
 
-### 7.2 編解碼（WP-M6/M7）
+### 7.2 解碼器（WP-M6 = 舊 plan B1–B3，2026-09-04 定案）
 
-* `AMediaCodecStore` API 36 在 5566 上齊全（含 `findNext*ForFormat`、`AMediaCodecInfo_getVideoCapabilities`）；`AMediaCodec_getOutputImage` **不存在**，
-  YUV 版面靠 `getOutputFormat` 的 `stride`/`slice-height`（+ 以字串鍵讀 `"image-data"`）。Store 的名字要用 `AMediaCodecInfo_getCanonicalName()` 再 `createCodecByName`。
-  色彩格式與 profile/level 清單 NDK 不給，用 `AMediaCodecInfo_isFormatSupported` 探測固定候選集。
-* 軟體 codec（VP8、AV1 編）：預設過濾 `HARDWARE_ACCELERATED`，以 `--virtio-media` 參數 `allow_sw=true` 打開。→ §11 Q5。
-* codec 裝置同樣跑在 helper；細節在 M4 之後寫。
+事實來源：`logs/vpu_survey/mediacodec-ndk.md` §1–§5、`device-5566-host.md` §3–§4。
+
+* **`android_codec` crate（crosvm）**：抄 `android_camera` 的 `ndk_api!` 形狀，只開 `libmediandk.so` + `libbinder_ndk.so`；
+  API 36 的 `AMediaCodecStore_*` / `AMediaCodecInfo_*` / `ACodec*Capabilities_*` 一律**可選符號**（缺了不致命，退化成固定候選 + `isFormatSupported` 探測）；
+  binder threadpool 照樣起（MediaCodec 反向服務 `BnResourceManagerClient`）。附 `codec_probe` 二進位（同 `camera_probe` 的 build/phony 形狀）：
+  `list`（Store 列舉 + 每個 codec 的能力）、`decode --in x.h264 --out y.nv12`（真機驗證 `image-data` 版面與 `getOutputBuffer` 指標是否已含 `mPlane[0].mOffset`，survey 開放問題 1）。
+* **能力列舉（回答「不寫死」）**：`AMediaCodecStore_getSupportedMediaTypes` 取 `FLAG_DECODER` 的 mime → 每個 mime `findNextDecoderForFormat` 迭代 →
+  預設只留 `HARDWARE_ACCELERATED`（`allow_sw=true` 才含軟體）→ `getCanonicalName` 才是 `createCodecByName` 用的名字 →
+  `getVideoCapabilities` 的 width/height range + alignment → `ENUM_FRAMESIZES`（stepwise）、`getSupportedFrameRatesFor` → `ENUM_FRAMEINTERVALS`。
+  mime ↔ V4L2 OUTPUT fourcc：`video/avc`→`H264`、`video/hevc`→`HEVC`、`video/x-vnd.on2.vp9`→`VP90`、`video/av01`→`AV10`、`video/x-vnd.on2.vp8`→`VP80`。
+  Store 的 lazy static 無鎖 → 裝置建立時單執行緒暖機一次。
+* **一個解碼裝置 = 全部硬體解碼器**：`ENUM_FMT(OUTPUT)` 列所有 mime；`S_FMT(OUTPUT)` 選 codec；`STREAMON(OUTPUT)` 才 `createCodecByName` + configure
+  （`surface = NULL`、`KEY_COLOR_FORMAT = YUV420Flexible`、`KEY_MAX_INPUT_SIZE`、低延遲可選）+ `setAsyncNotifyCallback` + start。
+* **CAPTURE 格式政策**：對 guest 只廣告 **NV12 單 plane、緊排**（`bytesperline = width`）。每個輸出 buffer 用 `AMediaCodec_getBufferFormat(idx)` +
+  `AMediaFormat_getBuffer("image-data")` 讀 `MediaImage2`（104 bytes、`#[repr(C, packed)]`），用通用 plane walk 拷進池內 CAPTURE buffer 並重排成 NV12。
+  一次拷貝（與相機同），不嘗試以 `bytesperline`/`sizeimage` 表達 QC 的 stride/slice 版面（舊 plan D29 的「零拷貝表達」放棄：copy 反正要做）。
+  `crop` 由 `KEY_DISPLAY_CROP`/`display-width/height` 導出 → `G_SELECTION`。
+* **crate 端**：沿用 `video_decoder.rs`（整套 stateful 狀態機），補：OUTPUT queue 接受 USERPTR（guest-owned 位元流；`new_mapping_for(readonly)`，持有到 `InputBufferDone`）、
+  CAPTURE 接受 USERPTR（`all` 模式）、`streamoff(OUTPUT)` 通知 backend flush（seek，舊 TODO :1054）、`subscribe_event` 加 `Eos`/`SourceChange` 的 `SEND_INITIAL`、
+  `StreamFormatChanged` 事件填 sequence/timestamp。`VideoDecoderBackend` trait 依實作需要微調（例如 `flush()`）。
+* **backend `MediaCodecDecoderBackend`（crosvm，android）**：**async 模式**（舊 plan D26）；四個 callback 在 NDK looper thread 上只做入列 +
+  eventfd（`poll_fd`），不做重活；Worker 的 `process_events` 取事件：`onAsyncInputAvailable` → 把待送的 guest 位元流拷進 `getInputBuffer` 並 `queueInputBuffer(pts µs, flags)`；
+  `onAsyncOutputAvailable` → 取下一個排隊的 CAPTURE buffer 重排拷貝 → `releaseOutputBuffer(render=false)` → `FrameCompleted{bytes_used, timestamp, is_last: EOS flag}`；
+  `onAsyncFormatChanged` → `StreamFormatChanged`（coded size、`min_output_buffers` = 4 + 保守值）；`onAsyncError` → `AMEDIACODEC_ERROR_RECLAIMED` 等 → error event、session dead。
+  `drain()` = `queueInputBuffer(EOS)`；seek = `AMediaCodec_flush()` **然後 `start()`**（async 規則）；`AMediaCodec_stop` 阻塞，只在 Worker 上呼叫。
+* **驗收**：舊 plan B1（`codec_probe decode` 出正確 YUV、列出 Store 清單）、B2（guest `ffmpeg -c:v h264_v4l2m2m` 解成 rawvideo 對軟解做 md5/SSIM；DRC 片；中途 seek）、
+  B3（VP9、HEVC；AV1 待 guest 的 gst 1.28.1+ `v4l2av1dec`，5566 的 gst 是 1.28.2 → 可試）。全部在 helper（app uid）內跑；codec 不需要 FGS。
+
+### 7.3 編碼器（WP-M7 = 舊 plan C1–C3）
+
+* crate 新 `devices/video_encoder.rs`：形狀鏡像 `video_decoder.rs`（OUTPUT = 原始 NV12、guest-owned；CAPTURE = 位元流、host-owned）；
+  `ENCODER_CMD`/`TRY_ENCODER_CMD`（`STOP` → drain → LAST + EOS）；控制項用 `v4l2r::controls::codec` 現成型別：`BITRATE`、`BITRATE_MODE`、`GOP_SIZE`、
+  `FORCE_KEY_FRAME`、`HEADER_MODE`、`H264/HEVC_PROFILE/LEVEL`、`PREPEND_SPSPPS_TO_IDR`；`queryctrl`/`query_ext_ctrl`/`querymenu`/`g|s|try_ext_ctrls` 由裝置實作。
+* backend：`createEncoderByType`/`createCodecByName` + configure（`KEY_COLOR_FORMAT = YUV420SemiPlanar` 具體值、`KEY_BIT_RATE`、`KEY_BITRATE_MODE`（`ABitrateMode` 直接寫）、
+  `KEY_I_FRAME_INTERVAL`、`KEY_FRAME_RATE`、`KEY_PROFILE/LEVEL`），**`getInputFormat` 讀 `stride`/`slice-height`**（缺 `slice-height` 表示 chroma offset 不是 stride 的整數倍 → 拒絕該 codec 或退回 planar），
+  把 guest 的緊排 NV12 逐行填進 `getInputBuffer`（padding 到 stride，chroma 從 `stride*sliceHeight` 起），`queueInputBuffer` 整個 padded size；輸出 `BUFFER_FLAG_CODEC_CONFIG`
+  依 `HEADER_MODE` 決定另發或併入第一幀，`KEY_FRAME` flag → `V4L2_BUF_FLAG_KEYFRAME`；動態改碼率/強制 I 幀用 `setParameters`（`video-bitrate`、`request-sync`）。
+* 驗收：舊 plan C2（guest `ffmpeg -c:v h264_v4l2m2m out.mp4` 可播、釘時脈後 CPU ≤ libx264 的 1/3）、C3（kdenlive profile）。
+
+### 7.4 codec 共同事項
+
+* 兩個 codec 裝置都跑在 M3 helper；`--virtio-media kind=decoder[,allow_sw=true]` / `kind=encoder[,...]`，`uid=` 必填（一致的行程模型；codec 本身不需 FGS）。
+* driver 端的 G/S_PARM 衝突（D6.4）：decoder 裝置對 v4l2-compliance 要 ENOTTY、encoder 要有；解法是 fork 擴充 config 區塊（40 bytes 之後加一個「host 實作的 ioctl 位圖」），
+  driver 據此 `v4l2_disable_ioctl`；舊 host（沒有欄位，讀到 0）視為全支援。在 M6 與 M7 之間做。
+* `ResourceManagerService` 搶回：helper 是 app uid 的子行程、AM 看得到 app 但看不到 helper → 按舊 plan §2.2 估價不到、不易被選為受害者；被搶回時 `AMEDIACODEC_ERROR_RECLAIMED` → session dead。
 
 ## 8. app / daemon（WP-A1）
 
