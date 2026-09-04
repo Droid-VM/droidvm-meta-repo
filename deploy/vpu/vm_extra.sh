@@ -3,42 +3,86 @@
 # app does not know about yet (VPU_DESIGN.md §9). Until the app grows real VPU settings (WP A1),
 # this is how --pre-alloc media pools and --virtio-media get onto the command line.
 #
-#   vm_extra.sh show  <name|id>
-#   vm_extra.sh set   <name|id> <arg> [arg...]        replaces the whole array
-#   vm_extra.sh merge <name|id> <k=v[,k=v...]> [arg]  the daemon's own --pre-alloc + these keys
-#   vm_extra.sh clear <name|id>
+#   vm_extra.sh show     <name|id>
+#   vm_extra.sh set      <name|id> <arg> [arg...]      replaces the whole array
+#   vm_extra.sh takeover <name|id> <k=v[,k=v...]>... [-- <extra options...>]
+#   vm_extra.sh restore  <name|id>                     undo a takeover
+#   vm_extra.sh clear    <name|id>
 #
 # Example:
-#   vm_extra.sh merge Ubuntu-resolute media-host-mb=256,media-guest-mb=128 \
+#   vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb=128 -- \
 #     --virtio-media kind=loopback,card=lb0
 #
-# `merge` is the one to use. It reads the daemon's own --pre-alloc off the running crosvm
-# (`vm.sh argv`) or, when the VM is stopped, off the last "Executing:" line the daemon logged,
-# merges the keys given on the command line into it (same key given twice: the command line
-# wins, key order otherwise preserved) and stores the result plus any further arguments. That
-# is the whole point: nobody can drop the GPU pools by typing only the media keys.
+# WHY THERE IS A `takeover` AND NOT A `merge` (defect D2, logs/vpu_wp/B1-acceptance.md §8).
 #
-# TWO THINGS TO KNOW.
+# `--pre-alloc` is `Option<PreAllocConfig>` in argh (crosvm/src/crosvm/cmdline.rs:2073). A
+# repeated flag is NOT an override and NOT a merge: argh fails the whole parse with
 #
-# 1. `--pre-alloc` IS SINGLE-VALUED. extra_options are appended AFTER the daemon's own arguments,
-#    so a second --pre-alloc overrides the daemon's rather than merging with it. The daemon emits
-#    one built from the VM's gpu_*/drm_* fields (on the lab VM today:
-#    drm-host-mb=64,gpu-guest-mb=1024,gpu-guest-prealloc-mb=1024,gpu-guest-step-mb=0,
-#    gpu-guest-max-grants=0 -- read it back with `vm.sh argv <name>`). If you add media keys with
-#    `set` you MUST pass the full merged string; passing only the media keys silently drops the
-#    GPU pools and the guest loses its GPU. `merge` does that merge for you.
+#   arg parsing failed: Error parsing option '--pre-alloc' with value '...': duplicate values
+#   provided
 #
-#    Once the WP A1 APK is installed and the VM's VPU switch is on, the daemon emits the media
-#    keys itself: extra_options must then carry NO --pre-alloc at all, only --virtio-media.
+# before crosvm runs anything, and the VM goes straight back to `stopped`. So `extra_options` may
+# carry a --pre-alloc only when the daemon emits NONE, and the daemon emits one whenever any of
+# the pool keys of a Gunyah VM is non-zero (CrosvmBackendInstance.java:421-470).
 #
-# 2. `vm_modify` refuses a VM that is not STOPPED (VMInstanceStore.java:105-108), and it writes
+# `takeover` is therefore exactly the B1 workaround, mechanised: it reads the daemon's own
+# --pre-alloc, saves the config keys that produce it into deploy/vpu/state/<vm>.json, sets those
+# keys to 0 so the daemon emits no --pre-alloc at all, and stores the WHOLE string -- the
+# daemon's GPU keys plus the media keys you asked for -- in extra_options. The command line is
+# byte-identical to what the daemon would have emitted, and `vm.sh argv | grep -c -- --pre-alloc`
+# is 1. `restore` puts the saved keys back and empties extra_options.
+#
+# THREE THINGS TO KNOW.
+#
+# 1. WHILE A TAKEOVER IS ACTIVE THE HUGE-PAGE PREFLIGHT UNDER-COUNTS. PoolPreflight sizes the
+#    reserve from the config keys (GuestPoolSizing.bootGuestPreallocMb), which takeover just set
+#    to 0, not from the string on the command line. The VM still asks the RM for the guest pool,
+#    so the reserve must cover it and nobody checked that it does. On the lab VM that is 1024 MiB
+#    of the 6 GiB reserve. Keep an eye on `gh_hugepage_reserve`'s pool_avail.
+#
+# 2. `takeover` IS BRING-UP ONLY -- for the window before the WP A1 APK is installed. With that
+#    APK and the VM's VPU switch on, the daemon emits media-host-mb/media-guest-mb itself and
+#    extra_options must carry NO --pre-alloc, only --virtio-media. takeover refuses in that world
+#    (it sees the media keys in the daemon's string and stops).
+#
+# 3. `vm_modify` refuses a VM that is not STOPPED (VMInstanceStore.java:105-108), and it writes
 #    only the daemon's in-memory store -- vms.json on disk is written by the app's editor alone
 #    (app-daemon.md §5.4). So a change made here survives until the daemon restarts, and a daemon
-#    restart stops every VM (Daemon.cleanup). Re-apply after any restart.
+#    restart stops every VM (Daemon.cleanup). Re-apply after any restart -- and note that a
+#    daemon restart also makes `restore` unnecessary, since it drops the zeroed keys with
+#    everything else.
 set -u
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$SP/lib.sh"
+
+STATE_DIR="$SP/state"
+
+# The keys the daemon reads to build its own --pre-alloc, checked against
+# CrosvmBackendInstance.java at HEAD: gpu_host_pool_mb -> gfx-host-mb (gfxstream branch, :426),
+# gpu_drm2kgsl_pool_mb -> drm-host-mb (drm2kgsl branch, :443), gpu_venus_pool_mb -> venus-host-mb
+# (venus branch, :458), and gpu_guest_pool_mb -> the four gpu-guest-* keys appendGuestPoolOptions
+# emits (:342-352, gated on GuestPoolSizing.bootGuestPoolMb, i.e. on gpu_guest_pool_mb itself);
+# gpu_guest_prealloc_mb only sizes those, but is saved and zeroed too so a restore is exact.
+# gpu_guest_step_mb / gpu_guest_max_grants are emitted only alongside a non-zero pool, so zeroing
+# the pool is enough. The media keys (vpu_*) are deliberately NOT here: see note 2 above.
+TAKEOVER_KEYS="gpu_host_pool_mb gpu_guest_pool_mb gpu_guest_prealloc_mb gpu_drm2kgsl_pool_mb gpu_venus_pool_mb"
+
+# D3: the temp file apply() writes is cleaned up by a trap on a SCRIPT-level variable. It used to
+# be a `local tmp` with the trap set inside the function, so the trap body ran after the function
+# had returned and died with "tmp: unbound variable" under `set -u`, leaving the file behind.
+TMPFILE=""
+# A state file written by a takeover whose vm_modify then failed would refuse every later
+# takeover while describing a config that was never changed, so it is rolled back on a failing
+# exit and only kept when the whole verb succeeded.
+STATE_PENDING=""
+cleanup() {
+    local rc=$?
+    [ -n "$TMPFILE" ] && rm -f "$TMPFILE"
+    [ "$rc" != 0 ] && [ -n "$STATE_PENDING" ] && rm -f "$STATE_PENDING"
+    return "$rc"
+}
+trap cleanup EXIT
 
 USAGE_RC=2
 usage() {  # print the file's own header comment, up to the first line of code
@@ -53,8 +97,14 @@ adb_wait
 
 INFO=$(vm_info "$NAME") || exit 1
 ID=$(vm_field "$INFO" id)
+VMNAME=$(vm_field "$INFO" name)
 STATE=$(vm_state "$INFO")
 PID=$(vm_field "$INFO" pid 0)
+STATE_FILE="$STATE_DIR/$VMNAME.json"
+
+require_stopped() {  # require_stopped <verb>
+    [ "$STATE" = stopped ] || die "$1: $NAME is $STATE; vm_modify only accepts a STOPPED VM (VMInstanceStore.java:105-108) -- run: $SP/vm.sh stop $NAME"
+}
 
 show() {
     local cfg
@@ -65,29 +115,44 @@ opts = (json.load(sys.stdin).get("data") or {}).get("extra_options") or []
 print("extra_options: %d" % len(opts))
 for o in opts:
     print("  %s" % o)'
+    [ -f "$STATE_FILE" ] && { echo "takeover: ACTIVE, saved state in $STATE_FILE:"; sed 's/^/  /' "$STATE_FILE"; }
+    return 0
 }
 
-apply() {  # apply <new option>...
-    [ "$STATE" = stopped ] || die "$NAME is $STATE; vm_modify only accepts a STOPPED VM (VMInstanceStore.java:105-108) -- run: $SP/vm.sh stop $NAME"
-    local cfg tmp
+# store <python program> <argv...> -- pipe the VM's config through the program and vm_modify the
+# result. The program gets the config object (not the response envelope) as JSON on stdin and
+# writes the new one to stdout; anything it prints on stderr is the operator's.
+store() {
+    local prog=$1; shift
+    local cfg
     cfg=$(dvm get "$ID") || exit 1
-    tmp=$(mktemp -t vm_extra.XXXXXX.json) || die "mktemp failed"
-    trap 'rm -f "$tmp"' EXIT
+    TMPFILE=$(mktemp -t vm_extra.XXXXXX.json) || die "mktemp failed"
     printf '%s' "$cfg" | python3 -c '
 import json,sys
 cfg = json.load(sys.stdin).get("data")
 if not cfg:
     sys.exit("vm_get returned no config")
+json.dump(cfg, sys.stdout)' | python3 -c "$prog" "$@" > "$TMPFILE" || exit 1
+    dvm modify "$TMPFILE" >/dev/null || exit 1
+    show
+}
+
+SET_PROG='
+import json,sys
+cfg = json.load(sys.stdin)
 # python3 -c CODE a b c  =>  sys.argv == ["-c", "a", "b", "c"]
 cfg["extra_options"] = sys.argv[1:]
-sys.stdout.write(json.dumps(cfg))' "$@" > "$tmp" || exit 1
-    dvm modify "$tmp" >/dev/null || exit 1
-    show
+json.dump(cfg, sys.stdout)'
+
+apply() {  # apply <new extra_options>...
+    require_stopped "${VERB}"
+    [ ! -f "$STATE_FILE" ] || note "warning: a takeover is active on $VMNAME ($STATE_FILE); '$VERB' does not undo it -- 'restore' does"
+    store "$SET_PROG" "$@"
 }
 
 # The daemon's own --pre-alloc value: from the live crosvm while the VM runs, else from the last
 # argv the daemon logged before exec (CrosvmBackendInstance.java:183). In both cases the FIRST
-# --pre-alloc is the daemon's -- a second one is what a previous `set` appended.
+# --pre-alloc is the daemon's -- a second one cannot exist, argh refuses the parse (D2).
 daemon_prealloc() {
     local src txt
     if [ "$STATE" = running ] && [ "${PID:-0}" -gt 0 ] 2>/dev/null; then
@@ -95,20 +160,78 @@ daemon_prealloc() {
         txt=$(asu "tr '\\0' ' ' < /proc/$PID/cmdline")
     else
         src="$DAEMON_LOG (last Executing: line)"
-        txt=$(asu "grep 'Executing:' $DAEMON_LOG" | grep -- "--name $(vm_field "$INFO" name) " | tail -1)
+        txt=$(asu "grep 'Executing:' $DAEMON_LOG" | grep -- "--name $VMNAME " | tail -1)
     fi
     local val
     val=$(printf '%s\n' "$txt" | tr ' ' '\n' | grep -A1 -m1 -x -- '--pre-alloc' | tail -1)
     case "$val" in
-        ""|--*) die "merge: no --pre-alloc found in $src -- start the VM once, or use 'set' with the full string" ;;
+        ""|--*) die "takeover: no --pre-alloc found in $src -- start the VM once, or use 'set' with the full string" ;;
     esac
-    note "merge: daemon --pre-alloc from $src:"
+    note "takeover: daemon --pre-alloc from $src:"
     note "  $val"
     printf '%s' "$val"
 }
 
-merge() {  # merge <k=v[,k=v...]> [further extra_options...]
-    local keys=$1; shift
+TAKEOVER_PROG='
+import json, os, sys, time
+state_path, keys, base, merged = sys.argv[1:5]
+extra = sys.argv[5:]
+cfg = json.load(sys.stdin)
+
+# The daemon already builds the media keys itself (WP A1 APK + VPU switch, or a camera row):
+# extra_options must then carry no --pre-alloc at all, so there is nothing to take over.
+for k in ("media-host-mb", "media-guest-mb"):
+    if k in [item.split("=")[0] for item in base.split(",")]:
+        sys.exit("takeover: the daemon already emits %s -- this VM does not need a takeover; "
+                 "use: vm_extra.sh set %s --virtio-media <...>" % (k, cfg.get("name", "")))
+# gfxstream emits gfx-host-mb whenever udmabuf is on, whatever gpu_host_pool_mb says
+# (CrosvmBackendInstance.java:426-431), so zeroing the keys would NOT silence the daemon.
+if "gfx-host-mb" in [item.split("=")[0] for item in base.split(",")] \
+        and cfg.get("gpu_udmabuf", True):
+    sys.exit("takeover: this VM is on the gfxstream route with gpu_udmabuf on, and the daemon "
+             "emits gfx-host-mb even at size 0 (CrosvmBackendInstance.java:426-431) -- takeover "
+             "cannot silence it. Turn udmabuf off in the app, or run this VM without media pools.")
+
+saved = {"vm": cfg.get("name"), "id": cfg.get("id"), "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+         "daemon_pre_alloc": base, "extra_options": cfg.get("extra_options") or [],
+         "keys": {k: cfg.get(k, None) for k in keys.split()}}
+for k in keys.split():
+    cfg[k] = 0
+cfg["extra_options"] = ["--pre-alloc", merged] + extra
+os.makedirs(os.path.dirname(state_path), exist_ok=True)
+with open(state_path, "w") as f:
+    json.dump(saved, f, indent=2)
+    f.write("\n")
+sys.stderr.write("takeover: saved %s\n" % state_path)
+json.dump(cfg, sys.stdout)'
+
+RESTORE_PROG='
+import json, os, sys
+state_path = sys.argv[1]
+cfg = json.load(sys.stdin)
+saved = json.load(open(state_path))
+for k, v in (saved.get("keys") or {}).items():
+    if v is None:
+        cfg.pop(k, None)
+    else:
+        cfg[k] = v
+cfg["extra_options"] = []
+os.rename(state_path, state_path + ".restored")
+sys.stderr.write("restore: put back %s; %s kept as %s.restored\n"
+                 % (", ".join(sorted((saved.get("keys") or {}).keys())), state_path, state_path))
+json.dump(cfg, sys.stdout)'
+
+takeover() {  # takeover <k=v[,k=v...]>... [-- <extra options...>]
+    require_stopped takeover
+    local keys="" extra=()
+    while [ "$#" -gt 0 ]; do
+        case $1 in
+            --) shift; extra=("$@"); break ;;
+            *)  keys="${keys:+$keys,}$1"; shift ;;
+        esac
+    done
+    [ -n "$keys" ] || die "takeover: give me the --pre-alloc keys to add, e.g. media-host-mb=256,media-guest-mb=128"
+    [ ! -f "$STATE_FILE" ] || die "takeover: $VMNAME is already taken over ($STATE_FILE) -- run 'restore' first, or the saved config keys are lost"
     local base merged
     base=$(daemon_prealloc) || exit 1
     merged=$(python3 -c '
@@ -125,16 +248,32 @@ def parse(s):
 base, extra = parse(sys.argv[1]), parse(sys.argv[2])
 base.update(extra)
 print(",".join(k + "=" + v for k, v in base.items()))' "$base" "$keys") || exit 1
-    note "merge: storing --pre-alloc $merged"
-    apply --pre-alloc "$merged" "$@"
+    note "takeover: storing --pre-alloc $merged"
+    STATE_PENDING=$STATE_FILE
+    store "$TAKEOVER_PROG" "$STATE_FILE" "$TAKEOVER_KEYS" "$base" "$merged" ${extra[0]+"${extra[@]}"}
+    note ""
+    note "!! TAKEOVER ACTIVE on $VMNAME -- $TAKEOVER_KEYS are 0 in the daemon's store."
+    note "!! PoolPreflight now UNDER-COUNTS the huge-page reserve by the zeroed guest pool: it"
+    note "!! sizes from those keys, not from the string above, while crosvm still asks the RM for"
+    note "!! the pool. Watch gh_hugepage_reserve's pool_avail before you start the VM."
+    note "!! This lives in the daemon's MEMORY only (vm_modify never writes files/vms.json), so a"
+    note "!! daemon restart reverts it -- and stops every VM. Undo with: $0 restore $NAME"
+    STATE_PENDING=""
+}
+
+restore() {
+    require_stopped restore
+    [ -f "$STATE_FILE" ] || die "restore: no takeover recorded for $VMNAME ($STATE_FILE does not exist)"
+    store "$RESTORE_PROG" "$STATE_FILE"
+    note "restore: extra_options cleared and the pool keys are back; PoolPreflight counts them again."
 }
 
 case "$VERB" in
-show)  show ;;
-set)   [ "$#" -gt 0 ] || die "set: give me the arguments to store (use 'clear' to empty the array)"
-       apply "$@" ;;
-merge) [ "$#" -gt 0 ] || die "merge: give me the --pre-alloc keys to add, e.g. media-host-mb=256,media-guest-mb=128"
-       merge "$@" ;;
-clear) apply ;;
-*)     usage ;;
+show)     show ;;
+set)      [ "$#" -gt 0 ] || die "set: give me the arguments to store (use 'clear' to empty the array)"
+          apply "$@" ;;
+takeover) takeover "$@" ;;
+restore)  restore ;;
+clear)    apply ;;
+*)        usage ;;
 esac

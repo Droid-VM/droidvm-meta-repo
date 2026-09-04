@@ -1,0 +1,3 @@
+# Takeover state files (vm_extra.sh takeover/restore) are local to one phone.
+*.json
+*.json.restored

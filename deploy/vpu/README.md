@@ -53,7 +53,7 @@ restart stops every VM (`Daemon.cleanup`).
 | `vm.sh` | `start\|stop\|status\|argv\|log\|wait-ssh <name>` |
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
-| `vm_extra.sh` | `show\|set\|merge\|clear <name>` — the VM's `extra_options` array |
+| `vm_extra.sh` | `show\|set\|takeover\|restore\|clear <name>` — the VM's `extra_options` array |
 | `tests/smoke_media.sh` | `[--mode output\|none\|all] <name>` — is there a working virtio-media device in the guest? |
 
 A VM is named by either its `name` or its `id`; both go through one `vm_list` lookup.
@@ -142,38 +142,78 @@ The only seam for handing crosvm a flag the app does not know about yet — whic
 pools and the media device get onto the command line until WP A1 lands.
 
 ```sh
-deploy/vpu/vm_extra.sh show  Ubuntu-resolute
-deploy/vpu/vm_extra.sh merge Ubuntu-resolute media-host-mb=256,media-guest-mb=128 --virtio-media kind=loopback,card=lb0
-deploy/vpu/vm_extra.sh set   Ubuntu-resolute --pre-alloc <FULL MERGED STRING> --virtio-media kind=loopback
-deploy/vpu/vm_extra.sh clear Ubuntu-resolute
+deploy/vpu/vm_extra.sh show     Ubuntu-resolute
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb=128 -- --virtio-media kind=loopback,card=lb0
+deploy/vpu/vm_extra.sh restore  Ubuntu-resolute
+deploy/vpu/vm_extra.sh set      Ubuntu-resolute --pre-alloc <FULL MERGED STRING> --virtio-media kind=loopback
+deploy/vpu/vm_extra.sh clear    Ubuntu-resolute
 ```
 
-**`--pre-alloc` is single-valued.** `extra_options` are appended *after* the daemon's own
-arguments, so a second `--pre-alloc` **overrides** the daemon's instead of merging with it. With
-`set` you must read the daemon's own string off `vm.sh argv <name>` and pass the whole merged
-value; passing only the media keys silently drops the GPU pools and the guest loses its GPU. On
-the lab VM today the daemon emits:
+**`--pre-alloc` cannot appear twice on a crosvm command line.** It is
+`Option<PreAllocConfig>` in argh (`crosvm/src/crosvm/cmdline.rs:2073`), and argh answers a
+repeated `Option` flag with a fatal parse error before crosvm runs anything:
+
+```
+ERROR crosvm] arg parsing failed: Error parsing option '--pre-alloc' with value '...':
+  duplicate values provided
+INFO  crosvm] invalid argument
+```
+
+The VM goes straight back to `stopped`. So a second `--pre-alloc` is **not** an override and
+**not** a merge — an earlier version of this file and of `vm_extra.sh merge` claimed it was, and
+WP B1 found out on the phone (`logs/vpu_wp/B1-acceptance.md` §8, defect **D2**). `extra_options`
+may carry a `--pre-alloc` only while the daemon emits **none**, and the daemon emits one whenever
+any pool key of a Gunyah VM is non-zero (`CrosvmBackendInstance.java:421-470`). On the lab VM
+today that is:
 
 ```
 --pre-alloc drm-host-mb=64,gpu-guest-mb=1024,gpu-guest-prealloc-mb=1024,gpu-guest-step-mb=0,gpu-guest-max-grants=0
 ```
 
-**So use `merge`, not `set`.** It reads that string itself — off `/proc/<pid>/cmdline` while the
-VM runs, off the last `Executing:` line in `daemon.log` when it is stopped — merges the keys you
-give into it (a key given twice: yours wins) and stores the result plus any further arguments:
+**`takeover` is the way in.** It mechanises the workaround B1 used by hand: it reads the daemon's
+own `--pre-alloc` (off `/proc/<pid>/cmdline` while the VM runs, off the last `Executing:` line in
+`daemon.log` when it is stopped), **saves** the config keys that produce it —
+`gpu_host_pool_mb`, `gpu_guest_pool_mb`, `gpu_guest_prealloc_mb`, `gpu_drm2kgsl_pool_mb`,
+`gpu_venus_pool_mb` — into `deploy/vpu/state/<vm>.json`, **sets them to 0** so the daemon emits no
+`--pre-alloc` at all, and stores the whole string (the daemon's GPU keys plus your media keys)
+plus everything after `--` in `extra_options`:
 
 ```sh
-deploy/vpu/vm_extra.sh merge Ubuntu-resolute media-host-mb=256,media-guest-mb=128 \
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb=128 -- \
   --virtio-media kind=loopback,card=lb0
+deploy/vpu/vm_extra.sh restore  Ubuntu-resolute      # keys back, extra_options emptied
 ```
+
+The resulting command line is byte-identical to what a working merge would have produced, and
+`vm.sh argv <name> | grep -c -- --pre-alloc` is 1.
+
+**Two things a takeover costs you.**
+
+* `PoolPreflight` sizes the huge-page reserve from those config keys
+  (`GuestPoolSizing.bootGuestPreallocMb`), not from the string on the command line, so **while a
+  takeover is active it under-counts by the zeroed guest pool** — 1024 MiB on the lab VM. crosvm
+  still asks the RM for that memory. Check `gh_hugepage_reserve`'s `pool_avail` before starting.
+* `vm_modify` writes only the daemon's **in-memory** store (`files/vms.json` is the app editor's
+  alone, `app-daemon.md` §5.4), so both the zeroed keys and `extra_options` vanish on a daemon
+  restart — which also stops every VM (`Daemon.cleanup`). After a restart, delete the stale
+  `state/<vm>.json` and re-run `takeover`; running `restore` on it instead is harmless but
+  pointless — it writes back the values the reloaded config already has.
+
+`takeover` refuses the two configurations it cannot silence: one whose daemon string already
+carries `media-host-mb`/`media-guest-mb` (the WP A1 world — use `set` with only `--virtio-media`),
+and a gfxstream VM with `gpu_udmabuf` on, where the daemon emits `gfx-host-mb` even at size 0
+(`CrosvmBackendInstance.java:426-431`).
 
 **Once the WP A1 APK is installed and the VM's VPU switch is on, `extra_options` must carry no
 `--pre-alloc` at all** — only `--virtio-media ...`. The daemon then emits `media-host-mb` /
-`media-guest-mb` itself, and any `--pre-alloc` here would override that whole string (review B3).
+`media-guest-mb` itself, and any second one is the fatal parse error above (review B3).
 Check with `vm.sh argv <name> | grep -c -- --pre-alloc`: it must be 1.
 
-`vm_modify` refuses a VM that is not `STOPPED`, so `vm_extra.sh set|merge|clear` does too — `merge`
-still reads the running crosvm's argv first, so it tells you the daemon's string before it refuses.
+`set` is the escape hatch: it replaces the whole array with exactly what you type, and it is on
+you to have zeroed the daemon's keys first.
+
+`vm_modify` refuses a VM that is not `STOPPED`, so every writing verb of `vm_extra.sh` refuses
+first, before it reads or sends anything.
 
 ### `tests/smoke_media.sh`
 
@@ -212,21 +252,39 @@ cd deploy/vpu && shellcheck -x ./*.sh tests/*.sh && cd -   # before committing a
 JOBS=8 taskset -c 0-7 ./2_build_crosvm.sh          # never unpinned, never more than 8 jobs
 deploy/vpu/vm.sh   stop  Ubuntu-resolute
 deploy/vpu/push_crosvm.sh
-deploy/vpu/vm_extra.sh merge Ubuntu-resolute media-host-mb=256,media-guest-mb=128 \
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb=128 -- \
   --virtio-media kind=loopback,card=lb0
 deploy/vpu/vm.sh   start Ubuntu-resolute
 deploy/vpu/vm.sh   argv  Ubuntu-resolute | grep -E 'pre-alloc|media'
 deploy/vpu/tests/smoke_media.sh Ubuntu-resolute
 ```
 
-`merge` stores exactly what the review's test plan asks for:
+`takeover` stores exactly what the review's test plan asks for:
 
 ```
 --pre-alloc <daemon string>,media-host-mb=256,media-guest-mb=128 --virtio-media kind=loopback,card=lb0
 ```
 
-Order matters when a whole batch lands (review B3): push crosvm first, then the guest-additions
-deb, then the APK.
+### Deployment order for a whole batch
+
+Review B3's order, confirmed by WP B1 on the phone (`logs/vpu_wp/B1-acceptance.md` §2). Each step
+is a different half of the same contract, and a later one assumes the earlier one is in place:
+
+1. **crosvm** — `vm.sh stop`, then `push_crosvm.sh` (it refuses while a crosvm runs), then
+   `vm.sh start` with the **old** `extra_options` and check the guest still boots. That separates
+   "the new binary is broken" from "the new flags are wrong".
+2. **the guest-additions deb** — `guest.sh install-deb <deb>`, then `dkms status` and
+   `modinfo virtio-media`. The guest driver has to be the one that matches the host crate before
+   any media flag is worth passing.
+3. **`extra_options`** — `vm.sh stop`, `vm_extra.sh takeover ...`, `vm.sh start`, then
+   `vm.sh argv | grep -c -- --pre-alloc` (must be 1).
+4. **the APK**, last. It is what makes step 3 unnecessary: with the WP A1 APK installed and the
+   VM's VPU switch on, the daemon emits the media keys itself, so `restore` the takeover and put
+   only `--virtio-media` in `extra_options`.
+
+**`takeover` is bring-up only** — it exists for the window before that APK is installed. It
+reaches into the VM's GPU pool sizes to buy one command-line slot, and nothing outside this rig
+knows it did.
 
 ### `media-host-mb` is not optional on Gunyah
 
@@ -237,7 +295,7 @@ included** — a mode in which the guest owns every queue and never maps a singl
 The switch is a guest-side policy the host cannot see or rely on: the device has to be able to
 serve a host-owned `MMAP` buffer the moment some program in the guest asks for one, and on Gunyah
 the pool is the only place it can put one (the 64-bit MMIO window has room for one 4 GiB
-shared-memory BAR and the GPU already has it, design §0.2/§3.3). So always merge
+shared-memory BAR and the GPU already has it, design §0.2/§3.3). So always pass
 `media-host-mb=256` in, even for an `--mode all` run. `media-guest-mb` is the one that is
 genuinely optional: without it the guest driver falls back to `dma_alloc_pages` behind the
 restricted-dma-pool. All the media devices of one VM share the one `media_host` pool.
