@@ -5,7 +5,7 @@
 #
 #   vm_extra.sh show     <name|id>
 #   vm_extra.sh set      <name|id> <arg> [arg...]      replaces the whole array
-#   vm_extra.sh takeover <name|id> <k=v[,k=v...]>... [-- <extra options...>]
+#   vm_extra.sh takeover <name|id> [--show] [--base <string>] <k=v[,k=v...]>... [-- <opts...>]
 #   vm_extra.sh restore  <name|id>                     undo a takeover
 #   vm_extra.sh clear    <name|id>
 #
@@ -24,6 +24,14 @@
 # before crosvm runs anything, and the VM goes straight back to `stopped`. So `extra_options` may
 # carry a --pre-alloc only when the daemon emits NONE, and the daemon emits one whenever any of
 # the pool keys of a Gunyah VM is non-zero (CrosvmBackendInstance.java:421-470).
+#
+# `takeover` IS REPEATABLE (defect D7, logs/vpu_wp/B2-acceptance.md §12). Running it a second
+# time re-uses the daemon's own string from state/<vm>.json instead of re-reading the daemon log
+# -- because after a takeover-launched boot the last `Executing:` line in that log is the
+# TAKEOVER'S OWN command line, media keys and all, and the old code fed it back to itself and
+# then refused it. The saved config keys are never overwritten by a re-takeover, so one `restore`
+# still undoes any number of them. `--base <string>` overrides the whole search, and `--show`
+# prints what would be sent and sends nothing.
 #
 # `takeover` is therefore exactly the B1 workaround, mechanised: it reads the daemon's own
 # --pre-alloc, saves the config keys that produce it into deploy/vpu/state/<vm>.json, sets those
@@ -76,6 +84,8 @@ TMPFILE=""
 # takeover while describing a config that was never changed, so it is rolled back on a failing
 # exit and only kept when the whole verb succeeded.
 STATE_PENDING=""
+# takeover --show: run every guard and every computation, send nothing.
+SHOW=0
 cleanup() {
     local rc=$?
     [ -n "$TMPFILE" ] && rm -f "$TMPFILE"
@@ -121,7 +131,9 @@ for o in opts:
 
 # store <python program> <argv...> -- pipe the VM's config through the program and vm_modify the
 # result. The program gets the config object (not the response envelope) as JSON on stdin and
-# writes the new one to stdout; anything it prints on stderr is the operator's.
+# writes the new one to stdout; anything it prints on stderr is the operator's. Under SHOW=1
+# (takeover --show) the program still runs -- so its guards still speak -- but the result is
+# printed instead of sent, and nothing on the phone or in state/ is touched.
 store() {
     local prog=$1; shift
     local cfg
@@ -133,6 +145,20 @@ cfg = json.load(sys.stdin).get("data")
 if not cfg:
     sys.exit("vm_get returned no config")
 json.dump(cfg, sys.stdout)' | python3 -c "$prog" "$@" > "$TMPFILE" || exit 1
+    if [ "$SHOW" = 1 ]; then
+        note "takeover --show: NOTHING WAS SENT. The config that would be stored:"
+        python3 -c '
+import json, sys
+cfg = json.load(sys.stdin)
+keys = sys.argv[1].split()
+print("extra_options: %d" % len(cfg.get("extra_options") or []))
+for o in cfg.get("extra_options") or []:
+    print("  %s" % o)
+print("config keys that would be zeroed:")
+for k in keys:
+    print("  %s = %s" % (k, cfg.get(k)))' "$TAKEOVER_KEYS" < "$TMPFILE"
+        return 0
+    fi
     dvm modify "$TMPFILE" >/dev/null || exit 1
     show
 }
@@ -148,6 +174,23 @@ apply() {  # apply <new extra_options>...
     require_stopped "${VERB}"
     [ ! -f "$STATE_FILE" ] || note "warning: a takeover is active on $VMNAME ($STATE_FILE); '$VERB' does not undo it -- 'restore' does"
     store "$SET_PROG" "$@"
+}
+
+# Every media-* key, dropped. D7: what a live crosvm or the daemon log shows is the command line
+# that was ACTUALLY exec'd, which after a takeover is the takeover's own merged string -- so the
+# media keys in it are ours, not the daemon's, and feeding them back in would both double them
+# and trip the WP A1 guard. Only a string the operator passed with --base, or the one saved in
+# state/<vm>.json at the first takeover, is the daemon's untouched output.
+strip_media_keys() {  # strip_media_keys <k=v,...>
+    python3 -c '
+import sys
+items = [i for i in sys.argv[1].split(",") if i]
+kept = [i for i in items if not i.split("=")[0].startswith("media-")]
+dropped = [i for i in items if i.split("=")[0].startswith("media-")]
+if dropped:
+    sys.stderr.write("takeover: dropped %s from the observed command line "
+                     "(a takeover put them there, the daemon did not)\n" % ", ".join(dropped))
+print(",".join(kept))' "$1"
 }
 
 # The daemon's own --pre-alloc value: from the live crosvm while the VM runs, else from the last
@@ -167,23 +210,56 @@ daemon_prealloc() {
     case "$val" in
         ""|--*) die "takeover: no --pre-alloc found in $src -- start the VM once, or use 'set' with the full string" ;;
     esac
-    note "takeover: daemon --pre-alloc from $src:"
+    note "takeover: --pre-alloc observed in $src:"
     note "  $val"
+    val=$(strip_media_keys "$val") || exit 1
     printf '%s' "$val"
+}
+
+# The base string for the merge, in the order the operator would want it: an explicit --base wins;
+# then the daemon's own string as saved by the FIRST takeover (D7: this is what makes a second
+# takeover work, and it is exact -- it was read before anything was zeroed); then a live read.
+takeover_base() {  # takeover_base <explicit --base or empty>
+    if [ -n "$1" ]; then
+        note "takeover: base from --base:"
+        note "  $1"
+        printf '%s' "$1"
+        return 0
+    fi
+    if [ -f "$STATE_FILE" ]; then
+        local saved
+        saved=$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1])).get("daemon_pre_alloc") or "")' "$STATE_FILE") || exit 1
+        if [ -n "$saved" ]; then
+            note "takeover: base from the active takeover ($STATE_FILE):"
+            note "  $saved"
+            printf '%s' "$saved"
+            return 0
+        fi
+        note "takeover: $STATE_FILE has no daemon_pre_alloc -- falling back to the live command line"
+    fi
+    daemon_prealloc
 }
 
 TAKEOVER_PROG='
 import json, os, sys, time
-state_path, keys, base, merged = sys.argv[1:5]
-extra = sys.argv[5:]
+state_path, keys, base, merged, show = sys.argv[1:6]
+extra = sys.argv[6:]
+show = show == "1"
 cfg = json.load(sys.stdin)
 
 # The daemon already builds the media keys itself (WP A1 APK + VPU switch, or a camera row):
-# extra_options must then carry no --pre-alloc at all, so there is nothing to take over.
-for k in ("media-host-mb", "media-guest-mb"):
-    if k in [item.split("=")[0] for item in base.split(",")]:
-        sys.exit("takeover: the daemon already emits %s -- this VM does not need a takeover; "
-                 "use: vm_extra.sh set %s --virtio-media <...>" % (k, cfg.get("name", "")))
+# extra_options must then carry no --pre-alloc at all, so there is nothing to take over. D7: ask
+# the VM CONFIG, which is what the daemon actually reads, and not the observed command line, which
+# after one takeover is our own string. vpu_enabled is the switch the WP A1 APK sets; the pool
+# sizes beside it (vpu_host_pool_mb / vpu_guest_pool_mb) are what it then emits.
+if cfg.get("vpu_enabled"):
+    sys.exit("takeover: %s has vpu_enabled=true, so the daemon emits media-host-mb/media-guest-mb "
+             "itself (host=%s guest=%s) -- this VM does not need a takeover; use: "
+             "vm_extra.sh set %s --virtio-media <...>"
+             % (cfg.get("name", ""), cfg.get("vpu_host_pool_mb"), cfg.get("vpu_guest_pool_mb"),
+                cfg.get("name", "")))
 # gfxstream emits gfx-host-mb whenever udmabuf is on, whatever gpu_host_pool_mb says
 # (CrosvmBackendInstance.java:426-431), so zeroing the keys would NOT silence the daemon.
 if "gfx-host-mb" in [item.split("=")[0] for item in base.split(",")] \
@@ -192,17 +268,32 @@ if "gfx-host-mb" in [item.split("=")[0] for item in base.split(",")] \
              "emits gfx-host-mb even at size 0 (CrosvmBackendInstance.java:426-431) -- takeover "
              "cannot silence it. Turn udmabuf off in the app, or run this VM without media pools.")
 
-saved = {"vm": cfg.get("name"), "id": cfg.get("id"), "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-         "daemon_pre_alloc": base, "extra_options": cfg.get("extra_options") or [],
-         "keys": {k: cfg.get(k, None) for k in keys.split()}}
+now = time.strftime("%Y-%m-%dT%H:%M:%S")
+# D7: a re-takeover must NOT re-save the config -- the keys are 0 and extra_options is ours by
+# now, so saving them again would make "restore" put the takeover back. The first save is the only
+# true one; later ones only append to the trail.
+prior = None
+if os.path.exists(state_path):
+    with open(state_path) as f:
+        prior = json.load(f)
+if prior:
+    saved = dict(prior)
+    saved["reapplied_at"] = now
+    saved["takeovers"] = int(prior.get("takeovers") or 1) + 1
+else:
+    saved = {"vm": cfg.get("name"), "id": cfg.get("id"), "saved_at": now,
+             "daemon_pre_alloc": base, "extra_options": cfg.get("extra_options") or [],
+             "keys": {k: cfg.get(k, None) for k in keys.split()}, "takeovers": 1}
 for k in keys.split():
     cfg[k] = 0
 cfg["extra_options"] = ["--pre-alloc", merged] + extra
-os.makedirs(os.path.dirname(state_path), exist_ok=True)
-with open(state_path, "w") as f:
-    json.dump(saved, f, indent=2)
-    f.write("\n")
-sys.stderr.write("takeover: saved %s\n" % state_path)
+if not show:
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    with open(state_path, "w") as f:
+        json.dump(saved, f, indent=2)
+        f.write("\n")
+    sys.stderr.write("takeover: %s %s\n"
+                     % ("re-applied, keeping the config saved in" if prior else "saved", state_path))
 json.dump(cfg, sys.stdout)'
 
 RESTORE_PROG='
@@ -221,19 +312,24 @@ sys.stderr.write("restore: put back %s; %s kept as %s.restored\n"
                  % (", ".join(sorted((saved.get("keys") or {}).keys())), state_path, state_path))
 json.dump(cfg, sys.stdout)'
 
-takeover() {  # takeover <k=v[,k=v...]>... [-- <extra options...>]
-    require_stopped takeover
-    local keys="" extra=()
+takeover() {  # takeover [--show] [--base <string>] <k=v[,k=v...]>... [-- <extra options...>]
+    local keys="" explicit_base="" extra=()
     while [ "$#" -gt 0 ]; do
         case $1 in
             --) shift; extra=("$@"); break ;;
+            --show) SHOW=1; shift ;;
+            --base) explicit_base=${2:-}; [ -n "$explicit_base" ] || die "--base needs a --pre-alloc string"; shift 2 ;;
+            --base=*) explicit_base=${1#--base=}; shift ;;
+            -*) die "takeover: unknown flag '$1'" ;;
             *)  keys="${keys:+$keys,}$1"; shift ;;
         esac
     done
     [ -n "$keys" ] || die "takeover: give me the --pre-alloc keys to add, e.g. media-host-mb=256,media-guest-mb=128"
-    [ ! -f "$STATE_FILE" ] || die "takeover: $VMNAME is already taken over ($STATE_FILE) -- run 'restore' first, or the saved config keys are lost"
+    # --show reads and prints only, so it does not care whether the VM is running.
+    [ "$SHOW" = 1 ] || require_stopped takeover
+    [ ! -f "$STATE_FILE" ] || note "takeover: a takeover is already active on $VMNAME -- re-applying on top of it (the config saved in $STATE_FILE is kept, so one 'restore' still undoes it)"
     local base merged
-    base=$(daemon_prealloc) || exit 1
+    base=$(takeover_base "$explicit_base") || exit 1
     merged=$(python3 -c '
 import sys
 from collections import OrderedDict
@@ -248,9 +344,16 @@ def parse(s):
 base, extra = parse(sys.argv[1]), parse(sys.argv[2])
 base.update(extra)
 print(",".join(k + "=" + v for k, v in base.items()))' "$base" "$keys") || exit 1
-    note "takeover: storing --pre-alloc $merged"
-    STATE_PENDING=$STATE_FILE
-    store "$TAKEOVER_PROG" "$STATE_FILE" "$TAKEOVER_KEYS" "$base" "$merged" ${extra[0]+"${extra[@]}"}
+    if [ "$SHOW" = 1 ]; then note "takeover: would store --pre-alloc $merged"
+    else note "takeover: storing --pre-alloc $merged"; fi
+    # A state file that already existed is the operator's, not this run's: only roll back one this
+    # run created (and --show creates nothing at all).
+    [ "$SHOW" = 1 ] || [ -f "$STATE_FILE" ] || STATE_PENDING=$STATE_FILE
+    store "$TAKEOVER_PROG" "$STATE_FILE" "$TAKEOVER_KEYS" "$base" "$merged" "$SHOW" ${extra[0]+"${extra[@]}"}
+    if [ "$SHOW" = 1 ]; then
+        note "takeover --show: done, nothing changed."
+        return 0
+    fi
     note ""
     note "!! TAKEOVER ACTIVE on $VMNAME -- $TAKEOVER_KEYS are 0 in the daemon's store."
     note "!! PoolPreflight now UNDER-COUNTS the huge-page reserve by the zeroed guest pool: it"

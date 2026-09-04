@@ -54,7 +54,10 @@ restart stops every VM (`Daemon.cleanup`).
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
 | `vm_extra.sh` | `show\|set\|takeover\|restore\|clear <name>` — the VM's `extra_options` array |
+| `tests/pick_device.sh` | not a test: the guest-side snippet the three below prepend to their remote script to pick `/dev/videoN` **by capability** |
 | `tests/smoke_media.sh` | `[--mode output\|none\|all] <name>` — is there a working virtio-media device in the guest? |
+| `tests/compliance.sh` | `<name> [/dev/videoN]` — `v4l2-compliance -s` in the guest; the test for **D6** |
+| `tests/drain.sh` | `<name> [/dev/videoN]` — one frame in, `--stream-count=10`: the **D5** reproduction |
 
 A VM is named by either its `name` or its `id`; both go through one `vm_list` lookup.
 
@@ -171,8 +174,9 @@ today that is:
 ```
 
 **`takeover` is the way in.** It mechanises the workaround B1 used by hand: it reads the daemon's
-own `--pre-alloc` (off `/proc/<pid>/cmdline` while the VM runs, off the last `Executing:` line in
-`daemon.log` when it is stopped), **saves** the config keys that produce it —
+own `--pre-alloc` (off `state/<vm>.json` when a takeover is already active, else off
+`/proc/<pid>/cmdline` while the VM runs, else off the last `Executing:` line in `daemon.log`),
+**saves** the config keys that produce it —
 `gpu_host_pool_mb`, `gpu_guest_pool_mb`, `gpu_guest_prealloc_mb`, `gpu_drm2kgsl_pool_mb`,
 `gpu_venus_pool_mb` — into `deploy/vpu/state/<vm>.json`, **sets them to 0** so the daemon emits no
 `--pre-alloc` at all, and stores the whole string (the daemon's GPU keys plus your media keys)
@@ -183,6 +187,25 @@ deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb
   --virtio-media kind=loopback,card=lb0
 deploy/vpu/vm_extra.sh restore  Ubuntu-resolute      # keys back, extra_options emptied
 ```
+
+**It is repeatable** (defect D7). Re-running `takeover` on a VM that is already taken over is how
+you change the media sizes or the `--virtio-media` line, and it costs no boot: the base string
+comes from the `daemon_pre_alloc` saved at the *first* takeover, and the saved config keys are
+never overwritten, so one `restore` still undoes any number of takeovers. The reason this needs
+saying: after a takeover-launched boot the live command line and the last `Executing:` line are
+**the takeover's own**, media keys and all — so anything read from them has its `media-*` keys
+stripped before use, and the script says which it dropped.
+
+```sh
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute --show media-host-mb=256,media-guest-mb=128 -- \
+  --virtio-media kind=loopback,card=lb0        # print what would be sent; send nothing
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute --base 'drm-host-mb=64,gpu-guest-mb=1024' \
+  media-host-mb=256                            # skip the search: this string is the daemon's
+```
+
+`--show` runs every guard and the whole merge and then prints the `extra_options` and the keys it
+would zero, without touching the daemon or `state/` — so it is safe on a **running** VM, which is
+the one case the writing verbs refuse outright.
 
 The resulting command line is byte-identical to what a working merge would have produced, and
 `vm.sh argv <name> | grep -c -- --pre-alloc` is 1.
@@ -199,9 +222,9 @@ The resulting command line is byte-identical to what a working merge would have 
   `state/<vm>.json` and re-run `takeover`; running `restore` on it instead is harmless but
   pointless — it writes back the values the reloaded config already has.
 
-`takeover` refuses the two configurations it cannot silence: one whose daemon string already
-carries `media-host-mb`/`media-guest-mb` (the WP A1 world — use `set` with only `--virtio-media`),
-and a gfxstream VM with `gpu_udmabuf` on, where the daemon emits `gfx-host-mb` even at size 0
+`takeover` refuses the two configurations it cannot silence: one with `vpu_enabled` set in the
+VM's **config** (the WP A1 world — the daemon emits `media-host-mb`/`media-guest-mb` itself, so
+use `set` with only `--virtio-media`), and a gfxstream VM with `gpu_udmabuf` on, where the daemon emits `gfx-host-mb` even at size 0
 (`CrosvmBackendInstance.java:426-431`).
 
 **Once the WP A1 APK is installed and the VM's VPU switch is on, `extra_options` must carry no
@@ -225,12 +248,21 @@ deploy/vpu/tests/smoke_media.sh --mode all Ubuntu-resolute    # or --mode output
 Waits for ssh, then checks the driver is loaded, a `/dev/video*` node exists, dmesg mentions the
 driver, and `v4l2-ctl --all` answers on every node. Then it moves real bytes:
 
-* card `simple_device` — 30 frames to `/tmp/simple.raw`, which must be **exactly 30 × 921600**
-  bytes (640×480 RGB3) with **at least two distinct frames** (the device paints a changing
-  uniform colour, so 30 identical frames means nothing arrived);
-* card `loopback` — 460800 random bytes (640×480 NV12) in through `--stream-from`, out through
-  `--stream-to`, `--stream-count=10`, and `cmp -n 460800` between the two. This is the only step
-  that proves bytes crossed the queues rather than that an ioctl returned 0.
+* the **capture-only** node — 30 frames to `/tmp/simple.raw`, which must be **exactly 30 ×
+  921600** bytes (640×480 RGB3) with **at least two distinct frames** (the device paints a
+  changing uniform colour, so 30 identical frames means nothing arrived);
+* the **m2m** node — ten frames of 640×480 NV12 random bytes in through `--stream-from`, out
+  through `--stream-to`, `--stream-count=10`, and `cmp -n 460800` on the first frame. This is the
+  only step that proves bytes crossed the queues rather than that an ioctl returned 0. Ten frames
+  in, not one: a shorter file than `--stream-count` makes `v4l2-ctl` ask for a drain and hang,
+  which is D5 — `tests/drain.sh` is where that belongs.
+
+**Devices are picked by capability, never by card name** (defect D8). The m2m node —
+`V4L2_CAP_VIDEO_M2M_MPLANE` or `V4L2_CAP_VIDEO_M2M` in the `Device Caps` word — is the loopback
+device; a node with `V4L2_CAP_VIDEO_CAPTURE`(`_MPLANE`) and no m2m bit is the simple one. The
+script prints the word, the card string and its choice for every `/dev/video*`. Until this was
+fixed the byte steps matched on the card names `loopback` / `simple_device`, so the standard
+launch line (`card=lb0`) skipped both of them and the run still printed `PASS`.
 
 `--mode output|none|all` reloads the guest module first (`modprobe -r virtio-media; modprobe
 virtio-media driver_owned_queues=<mode> pool_debug=1`) — that is how the three driver-owned-buffer
@@ -239,9 +271,36 @@ Either way the run ends by printing the guest's `virtio-media` dmesg lines, whic
 `pool_debug`'s dbuf alloc/free traces show up. (Reloading a module is fine **in the guest**; the
 "never `rmmod`/`insmod`" rule is about the phone.)
 
-Missing card types are skipped, not failed — which one exists depends on how crosvm was launched.
-Any real failure makes the script exit non-zero. Run `guest.sh install-tools` once first: the test
-needs `v4l2-ctl`.
+A device kind the launch did not create is a skip, not a failure — which of the two exists depends
+on how crosvm was launched. Finding **neither** is a failure: that is the state in which the old
+script printed `PASS` having streamed nothing. Any real failure makes the script exit non-zero.
+Run `guest.sh install-tools` once first: the test needs `v4l2-ctl`.
+
+### `tests/compliance.sh`
+
+```sh
+deploy/vpu/tests/compliance.sh Ubuntu-resolute                 # picks the m2m node itself
+deploy/vpu/tests/compliance.sh Ubuntu-resolute /dev/video0
+```
+
+Runs `v4l2-compliance -d <dev> -s` (the streaming suite, ~40 s) in the guest, installing
+`v4l-utils` first if `v4l2-compliance` is missing, and prints the `Total for` line, every failed
+subtest and the tool's own exit code. This is the test for **D6**. Baseline on the B2 build
+(crosvm `22d14c5`, fork `2ae6bc0`): **59, Succeeded: 48, Failed: 11** — eight of the eleven cascade
+from an unimplemented `VIDIOC_PREPARE_BUF`. So a non-zero exit is *expected* until the host fix
+lands: read the totals, do not just look at the exit code.
+
+### `tests/drain.sh`
+
+```sh
+deploy/vpu/tests/drain.sh Ubuntu-resolute        # DRAIN_TIMEOUT=60 by default
+```
+
+The **D5** reproduction, deliberately: one frame of input, `--stream-count=10`, so `v4l2-ctl`
+issues `V4L2_DEC_CMD_STOP` and waits for a buffer flagged `V4L2_BUF_FLAG_LAST` that the host
+`loopback_device` never sends. `FAIL` with `stream rc=124` means D5 is still there; `PASS` means it
+is fixed. Either way the script then runs `v4l2-ctl --info` — the hang must not leave the device
+wedged, and a change that does is worse than D5.
 
 ---
 
