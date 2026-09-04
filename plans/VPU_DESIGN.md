@@ -325,14 +325,67 @@ struct vmedia_dbuf {                 /* 每個 driver-owned plane 一個 */
 
 ## 7. 相機與編解碼（沿用舊 plan §3–§5，修訂如下）
 
-* 相機裝置（`vmedia/device/src/devices/camera.rs`）：CAPTURE-only、MPLANE NV12（host 從 NV21 swap chroma，舊 plan D33）、`poll_fd` = eventfd 由 `AImageReader` callback 觸發、`process_events` 把幀拷進池內 CAPTURE buffer 並發 DQBUF。`Camera` 是 `!Send`（raw pointers）→ 在 worker thread 內開、關。
-* `android_camera` 要補：`ACaptureRequest_setEntry_i64`、AF_TRIGGER / 各 AVAILABLE_* 特性讀取、rational 讀取（AE compensation step）、capture-result callback（A3）、`open()` 錯誤路徑的資源釋放（今天會漏，`android-camera-crate.md` §1.13）。
-* **stream use case 沒有 NDK API**（只有 Java `OutputConfiguration#setStreamUseCase`）→ 舊 plan D18(2) 改列為「待 JNI 或放棄」。
-* 數值 ABI：5566 曝光下限 85 µs < 舊 plan 的 100 µs 單位；ISO 上限 16000。→ §11 Q4。
-* codec：`AMediaCodecStore` API 36 在 5566 上齊全（含 `findNext*ForFormat`、`AMediaCodecInfo_getVideoCapabilities`）；`AMediaCodec_getOutputImage` **不存在**，YUV 版面要靠 `getOutputFormat` 的 `stride`/`slice-height`（+ 以字串鍵讀 `"image-data"`）。Store 的名字要用 `AMediaCodecInfo_getCanonicalName()` 再 `createCodecByName`。色彩格式與 profile/level 清單 NDK 不給，用 `AMediaCodecInfo_isFormatSupported` 探測固定候選集。
-* 軟體 codec（VP8、AV1 編）：預設過濾 `HARDWARE_ACCELERATED`，以 `--virtio-media` 參數 `allow_sw=true` 打開。→ §11 Q5。
+### 7.1 相機裝置（WP-M4 = 舊 plan A1，2026-09-04 定案）
 
----
+**分層**：crate 內的 `devices/camera.rs` 是通用的 V4L2 capture 裝置，透過 `CameraBackend` trait 取幀與控制，
+不含任何 Android 程式碼；Android 實作 `AndroidCameraBackend` 放在 crosvm（`devices/src/virtio/media/android_camera_backend.rs`，
+`cfg(target_os = "android")`，用既有的 `android_camera` crate）。裝置永遠跑在 M3 的 helper（app uid）裡；
+in-VMM 的 `kind=camera` 沒有 `uid=` 一律拒絕（root 開不了相機，plan §2.2）。
+
+**crate trait**（形狀，實作時以編譯為準）：
+
+```rust
+pub struct CameraInfo { id, name, sizes: Vec<(u32,u32)>, frame_intervals: per size, zoom_range, af_modes, flash, ae_modes,
+                        fps_ranges, exposure_range_ns, iso_range, awb_modes, antibanding, effects, scenes, stabilization,
+                        max_regions, active_array }
+pub trait CameraBackend: Send { type Stream: CameraStream;
+    fn info(&self) -> &CameraInfo;
+    fn open_stream(&mut self, w, h, fps: (u32,u32), sink: CaptureSink) -> Result<Self::Stream, i32>; }
+pub trait CameraStream: Send {
+    fn poll_fd(&self) -> BorrowedFd;                       // eventfd：每幀 / 每個事件 +1
+    fn take_filled(&mut self) -> Vec<FilledBuffer>;        // {index, bytesused, timestamp_ns, sequence}
+    fn give_empty(&mut self, b: EmptyBuffer);              // {index, ptr(SendPtr), len, stride}
+    fn set_controls(&mut self, ctrls: &[CameraControl]) -> Result<(), i32>;   // 一次 submit
+    fn get_control(&self, id) -> ...; fn take_events(&mut self) -> Vec<CameraEvent>;  // AF_STATE 等變更（A3）
+    fn close(self); }
+```
+
+**執行緒與資料流**（依 M3 survey 的約束：`Camera` 是 `!Send`、`next_frame` 阻塞、executor 單執行緒）：
+`AndroidCameraBackend::open_stream` 起一條**擷取執行緒**擁有 `Camera`；Worker（裝置執行緒）把空的 CAPTURE buffer
+（池內 host 指標 + 長度）經 channel 借給擷取執行緒；擷取執行緒在 `AImageReader` callback/`next_frame` 後**直接拷進池 buffer**
+（逐行、緊排 `bytesperline = width`、NV21 → NV12 chroma swap；`dump_frame` 記錄的最後一列少一 byte 的怪癖要處理），
+回傳 `FilledBuffer` 並對 eventfd `+1`；Worker 的 `process_events` 收回、發 DQBUF 事件。一次拷貝。
+借出中的 buffer 由擷取執行緒獨占；STREAMOFF/REQBUFS(0)/CLOSE 先 `close()` 擷取執行緒（join）再釋放 buffer（§2.5）。
+
+**V4L2 面**：`V4L2_CAP_VIDEO_CAPTURE_MPLANE | STREAMING`；格式只有 `NV12`（1 plane）；ENUM_FRAMESIZES = characteristics 的
+YUV_420_888 尺寸；ENUM_FRAMEINTERVALS 由 `SCALER_AVAILABLE_MIN_FRAME_DURATIONS` + `AE_AVAILABLE_TARGET_FPS_RANGES` 導出；
+S_FMT 串流中回 EBUSY；G/S_PARM 的單值 fps → 最寬且 max==V 的支援區間（舊 plan D12 第 12 列）；REQBUFS 接受 MMAP（host-owned，池）
+與 USERPTR（guest-owned CAPTURE，`driver_owned_queues=all`）；STREAMON 才 `open_stream`（首幀 ~256 ms），STREAMOFF 就關（把相機還給 Android）。
+多裝置 = 多相機 id（一裝置一 session）；Main/Aux 分組（舊 plan §3.2）留到 M5。
+
+**控制項（M5 = 舊 plan A2/A3）**：照舊 plan §3.1 表；數值約定：zoom ×100（min 67 on 5566）；**曝光採 V4L2 標準單位 100 µs**
+（5566 的 85 µs 下限取整為 1，損失可忽略；不另立私有單位）；ISO 從 `SENSOR_INFO_SENSITIVITY_RANGE` 合成選單（100/200/…/16000）。
+AE 狀態機 `(EXPOSURE_AUTO, FLASH_LED_MODE) → AE_MODE` 在 backend；`V4L2_EVENT_CTRL` 由 capture-result callback 產生、
+只在值變更時發（AF_STATE、AE_STATE、active physical id）。**stream use case 沒有 NDK API → 放棄**（舊 plan D18(2)）。
+
+**`android_camera` 要補**（crosvm，同一 WP）：Cargo workspace member、`libc` 進 `[dependencies]`、`libandroid_camera` 進
+`devices/Android.bp` 與 `crosvm_device_only/Android.bp` 的 rustlibs；`open()` 錯誤路徑的資源釋放（RAII）；state callbacks 帶 context
+（斷線/錯誤 → 事件 → session dead）；`ACaptureRequest_setEntry_i64`、AF_TRIGGER、各 `AVAILABLE_*` 與 range 讀取、rational 讀取；
+capture-result callbacks（`ACameraCaptureSession_captureCallbacks`，8 欄位，在 callback 內讀 result）；
+可選 `AImageReader_acquireLatestImage`（慢 guest 時丟舊幀）。
+
+**驗收（= 舊 plan A1）**：在 5566 pVM、helper 以 app uid 執行、app 的 FGS 已撐著：guest `v4l2-ctl --all` 認得、
+`--stream-mmap --stream-count=60 --stream-to=` 60 張幀非黑且會動（luma digest 不同）、`ffmpeg -f v4l2 -i /dev/videoN -t 5` 錄到會動的畫面、
+gst `v4l2src ! fakesink` 跑通；另跑 `driver_owned_queues=all`（幀寫進 `media_guest`）與 pseudo-unprotected 各一輪。
+前置 smoke：先用既有 `camera_probe capture --uid <app uid>` 在 5566 上確認 app 前景 + FGS 下相機開得了（舊 plan §0 的量測從未在 5566 做過）。
+
+### 7.2 編解碼（WP-M6/M7）
+
+* `AMediaCodecStore` API 36 在 5566 上齊全（含 `findNext*ForFormat`、`AMediaCodecInfo_getVideoCapabilities`）；`AMediaCodec_getOutputImage` **不存在**，
+  YUV 版面靠 `getOutputFormat` 的 `stride`/`slice-height`（+ 以字串鍵讀 `"image-data"`）。Store 的名字要用 `AMediaCodecInfo_getCanonicalName()` 再 `createCodecByName`。
+  色彩格式與 profile/level 清單 NDK 不給，用 `AMediaCodecInfo_isFormatSupported` 探測固定候選集。
+* 軟體 codec（VP8、AV1 編）：預設過濾 `HARDWARE_ACCELERATED`，以 `--virtio-media` 參數 `allow_sw=true` 打開。→ §11 Q5。
+* codec 裝置同樣跑在 helper；細節在 M4 之後寫。
 
 ## 8. app / daemon（WP-A1）
 
