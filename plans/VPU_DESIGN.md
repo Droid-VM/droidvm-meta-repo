@@ -274,14 +274,54 @@ struct vmedia_dbuf {                 /* 每個 driver-owned plane 一個 */
 
 ## 6. 行程模型（WP-M3）
 
-* 新 vhost-user 裝置 `crosvm device media --fd N --config-json ...`（`devices/src/virtio/vhost/user/device/media.rs`）：
-  用同一個 `VirtioMediaDeviceRunner` + `Worker`，queue 由 vhost-user 框架給；shm region 由 backend request 連線映射（gpu 先例）；池 handle 由 `--pool-fd/--pool-gpa/--pool-size` 傳入（fd 繼承）。
-* frontend：`--vhost-user type=media` 支援（`DeviceType::Media`、2 條 queue、shm region 轉發）。
-* `snd_helper.rs` 泛化為 `device_helper::launch(kind, params)`，camera / decoder / encoder 帶 `uid=` 時走它；**exec 不是 fork**（binder 狀態不過 fork，`snd_helper.rs:15-19`）。
-* backend 一律 `base_features(protection_type)`（不要學 `snd.rs:95` 寫死 `Unprotected`，否則 pVM 下 virtqueue 落 lent RAM，`VIRTIO_SND_PROTECTED_VM.md`）。
-* `/dev/udmabuf` 是 `0600 root`：helper 內的 `dmabuf()` 會失敗，屆時走 backend request 請 VMM 代建；v1 無消費者，先不做。
+2026-09-04 依 `logs/vpu_survey/m3-vhost-user.md` 修訂。目標：`--virtio-media ...,uid=N` 時，media 裝置跑在一個
+以 app uid 執行的 vhost-user backend 行程裡（`crosvm device media`），VMM 端是既有的 vhost-user frontend。
+相機（M4）需要它；codec 也一律走它（一個行程模型）。
 
----
+### 6.1 已核實的框架事實
+
+* `DeviceType::Media` 在 frontend 已完整接好（variant、`min_queues()==2`、PCI class），`--vhost-user type=media,socket=`
+  今天就能 parse；`MediaDeviceConfig` 已帶 `uid`/`gid`，只差 `device_helpers.rs:1284-1289` 那個 bail。
+* backend 端的 `GuestMemory` 由 `SET_MEM_TABLE` 重建（`vhost/user/device/handler.rs:245-258`），**region 沒有 purpose、
+  `protected` 永遠 false**（`guest_memory.rs:468-483, :764`）→ `check_host_access` 無條件 Ok、`MediaPoolHandle::from_guest_memory`
+  永遠 None、`pool_ref_iovecs` 為 no-op。`find_region` / `shm_region` / `get_slice_at_addr` / udmabuf 都正常。
+* frontend 把**所有** region 原樣送給 backend（含 memfd，`vhost_user_frontend/mod.rs:257-275`），只掉 purpose。所以池的 fd 不必繼承，
+  給 GPA 就能在 backend 的 region 表找到那條 region（`start == pool_gpa`），fd / fd_offset / size 全部可得。
+* frontend 的 shm-region 轉發寫死 `device_type == Gpu`（`vhost_user_frontend/mod.rs:170-176`）→ backend 的 `Bar` 模式拿不到 BAR。
+* `access_platform`：snd 的做法是 backend 寫死 `Unprotected`，**由 VMM 把 `access_platform` 蓋進序列化的 params**
+  （`snd.rs:98-106` + `device_helpers.rs:631`）；helper 內拿不到 `ProtectionType`，media 照抄。
+* `start_queue` 一次給一條 queue；media 的 `Worker` 要兩條 → gpu 的 stash-and-start（`gpu.rs:219-244`）。
+* 沒有 jail：app 一律 `--disable-sandbox`，fork 的 `EMBEDDED_BPFS` 是空的，`crosvm device` 不套 jail。`LD_LIBRARY_PATH`/`LD_PRELOAD`
+  整組繼承（`$APP/usr/lib` 會遮蔽 `/system/lib64`，`6_build_apk_prepare.sh:28-52` 的舊坑）。
+* helper 死掉：VMM 當 crash 處理、VM 結束（`linux.rs:4831-4840`）。v1 接受。
+
+### 6.2 決定
+
+| 題目 | 決定 |
+|---|---|
+| 池的交接 | `--pool-gpa <gpa>` 一個數字；backend 在第一次 `start_queue`（mem table 已到）時從 region 表重建 `MediaPoolHandle`，allocator 懶初始化 |
+| Bar 模式 out-of-process | **不支援**。`uid=` 且無 `media_host` 池 → 裝置建立時拒絕（訊息說明）。Gunyah 與有池的 KVM 都走池模式 |
+| host 存取的重新閘門 | VMM 從自己的 `GuestMemory`（有 purpose、有 protected）算出「host 可碰的 GPA 視窗」清單（所有池、`StaticSwiotlbRegion`、`SharedGuestRam`、`ShimHandoff`、`SharedFramebuffer`；非保護 VM 則整段 RAM），放進 JSON config；backend 的 `GuestMemoryMapper` 以 `HostAccessPolicy::Windows` 對每條 SG entry range-check，越界回 `EFAULT`。in-VMM 用 `HostAccessPolicy::GuestMemory`（今天的 `check_host_access`）。同一個 trait，兩個實作 |
+| 兩條 queue | stash-and-start：兩條都 `start_queue` 後才起 `Worker` 執行緒（與 in-VMM 同一個 `Worker`，抽成共用） |
+| 執行緒 | `Worker` 仍是獨立 OS thread（executor 只管 vhost-user 控制面）；相機（M4）另有自己的擷取執行緒 + eventfd 餵 `poll_fd` |
+| `access_platform` | VMM 依 `ProtectionType` 蓋進 params，backend 據此加 `VIRTIO_F_ACCESS_PLATFORM`（不重蹈 virtio-snd lent-memory 事故） |
+| udmabuf | helper 內 `/dev/udmabuf` 開不了（0600 root）→ `dmabuf()` 回 Err；v1 無消費者，維持 |
+| 啟動 | `snd_helper.rs` 泛化為 `device_helper::launch(subcommand, params_json, uid, gid, supp_gids)`；exec 不 fork；`PR_SET_PDEATHSIG`；pid 進 `worker_process_pids` 與 `pid_debug_label_map`（crash log 才有名字） |
+
+### 6.3 WP M3 清單
+
+1. `devices/src/virtio/media.rs`：把 `Worker`、`EventQueue`、`HostMapper`、`PoolBufferAllocator`、`GuestMemoryMapper` 抽成 in-VMM 與 backend 共用；
+   `GuestMemoryMapper` 加 `HostAccessPolicy`。
+2. 新 `devices/src/virtio/vhost/user/device/media.rs`（+ `sys/linux.rs`）：`MediaBackend` 實作 `VhostUserDevice`
+   （features 含 access_platform、protocol features、`max_queue_num=2`、`read_config` 回 `VirtioMediaDeviceConfig`、stash-and-start、`reset` 停 Worker）；
+   `run_media_device(opts)`：`--fd N --config-json ...`，config 帶 `MediaDeviceConfig` + `pool_gpa` + `access_windows` + `access_platform`。
+3. `src/crosvm/cmdline.rs` `DevicesSubcommand::Media`、`main.rs` 分派。
+4. `src/crosvm/sys/linux/device_helper.rs`（泛化自 `snd_helper.rs`；snd 改用它）；`device_helpers.rs::create_virtio_media_device` 的 `uid` 分支：
+   算視窗、組 params、launch、以 VMM 端 socket 建 vhost-user frontend（`type=media`）；`sys/linux.rs` 記 pid。
+5. app 端不用改（`uid=` 已出）。
+6. 驗收：`--virtio-media kind=loopback,card=lb0,uid=<app uid>` 與 `kind=simple,uid=` 各跑一次 smoke（三種 driver 模式）+ v4l2-compliance；
+   `ps` 看到 `crosvm device media` 以 app uid 執行；SG 越界（假 USERPTR）回 EFAULT 而非 helper 死亡；helper 被 SIGTERM 時 VMM 的處置與 log；
+   in-VMM 路徑（無 `uid=`）不退化。
 
 ## 7. 相機與編解碼（沿用舊 plan §3–§5，修訂如下）
 
