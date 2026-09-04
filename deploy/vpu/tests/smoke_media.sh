@@ -10,17 +10,23 @@
 #   1. lsmod | grep virtio_media          -- the driver is loaded
 #   2. ls -l /dev/video*                  -- at least one V4L2 node exists
 #   3. dmesg | grep -i virtio[-_]media    -- the driver said something
-#   4. v4l2-ctl -d <each node> --all      -- first 40 lines per node
-#   5. card "simple_device": --stream-mmap --stream-count=30 --stream-to=/tmp/simple.raw, then
+#   4. v4l2-ctl -d <each node> --all      -- first 40 lines per node, then pick the devices BY
+#                                            CAPABILITY (tests/pick_device.sh): the m2m node is
+#                                            the loopback device, a capture-only node is the
+#                                            simple device. Card names are not consulted (D8).
+#   5. capture-only node: --stream-mmap --stream-count=30 --stream-to=/tmp/simple.raw, then
 #      exactly 30 x 921600 bytes (640x480 RGB3) and at least two frames that differ -- the
 #      device paints a changing uniform colour, so 30 identical frames means nothing arrived
-#   6. card "loopback": 460800 random bytes (640x480 NV12) in through --stream-from,
-#      --stream-to out, and `cmp` on the first frame. This is the only step that proves bytes
-#      cross the queues rather than that an ioctl returned 0
+#   6. m2m node: 10 frames of 640x480 NV12 random bytes in through --stream-from, --stream-to
+#      out, and `cmp` on the first frame. This is the only step that proves bytes cross the
+#      queues rather than that an ioctl returned 0. The input is ten frames deep on purpose:
+#      with a SHORTER file than --stream-count v4l2-ctl asks for a drain and hangs, which is
+#      defect D5 -- tests/drain.sh reproduces that deliberately, this step must not trip over it
 #   7. dmesg | grep -i virtio[-_]media    -- again, so the run's own pool_debug lines are visible
 #
-# Exits non-zero if any step fails. Steps 5 and 6 are skipped, not failed, when no device
-# advertises that card name -- which of the two exists depends on how crosvm was launched.
+# Exits non-zero if any step fails. A device the launch did not create is a SKIP for its own
+# step (which of the two exists depends on how crosvm was launched) -- but finding NEITHER is a
+# FAILURE: before D8 was fixed this script printed PASS on a run where nothing had streamed.
 #
 # Needs v4l-utils in the guest: run `guest.sh install-tools <name>` once first.
 set -u
@@ -54,9 +60,10 @@ ADDR=$("$SP/vm.sh" wait-ssh "$NAME") || exit 1
 echo "guest: $ADDR"
 
 # One guest-side script, one ssh round trip: every step records its own pass/fail into $fail so
-# a late failure cannot hide behind an early one. MODE is validated above, so interpolating it
-# into the remote command line is safe.
-"$SP/guest.sh" ssh "$NAME" "MODE='$MODE' bash -s" <<'GUEST'
+# a late failure cannot hide behind an early one. The capability-based device picker is prepended
+# from its own file rather than copied into each test's heredoc. MODE is validated above, so
+# interpolating it into the remote command line is safe.
+{ cat "$SP/tests/pick_device.sh"; cat <<'GUEST'
 set -u
 fail=0
 step() { echo; echo "=== $* ==="; }
@@ -64,6 +71,7 @@ bad()  { echo "FAIL: $*"; fail=$((fail+1)); }
 
 NV12=460800    # 640x480 NV12, the loopback device's default format
 RGB3=921600    # 640x480 RGB3, the simple device's only format
+FRAMES=10      # loopback frames in and out; see the header on D5
 
 if [ -n "$MODE" ]; then
     step "0. reload virtio-media with driver_owned_queues=$MODE pool_debug=1"
@@ -90,21 +98,21 @@ if ! command -v v4l2-ctl >/dev/null 2>&1; then
     echo; echo "failures: $fail"; exit 1
 fi
 
-simple=""; loop=""
 for dev in /dev/video*; do
     [ -e "$dev" ] || continue
     step "4. v4l2-ctl -d $dev --all (first 40 lines)"
     if ! v4l2-ctl -d "$dev" --all 2>&1 | head -40; then bad "v4l2-ctl --all failed on $dev"; fi
-    card=$(v4l2-ctl -d "$dev" --info 2>/dev/null | sed -n 's/^[[:space:]]*Card type[[:space:]]*:[[:space:]]*//p')
-    echo "card: ${card:-<none>}"
-    case "$card" in
-        *simple_device*) [ -n "$simple" ] || simple=$dev ;;
-        *loopback*)      [ -n "$loop" ]   || loop=$dev ;;
-    esac
 done
 
+step "4b. pick the devices by capability"
+pick_devices
+if [ -z "$loop" ] && [ -z "$simple" ]; then
+    # D8: this is the case that used to print two "skipped" lines and then PASS.
+    bad "no device advertises V4L2_CAP_VIDEO_M2M(_MPLANE) or V4L2_CAP_VIDEO_CAPTURE -- nothing to stream, so nothing below proves anything"
+fi
+
 if [ -n "$simple" ]; then
-    step "5. capture 30 frames from $simple (simple_device)"
+    step "5. capture 30 frames from $simple (capture-only device)"
     rm -f /tmp/simple.raw
     if v4l2-ctl -d "$simple" --stream-mmap --stream-count=30 --stream-to=/tmp/simple.raw; then
         n=$(stat -c %s /tmp/simple.raw 2>/dev/null || echo 0)
@@ -126,16 +134,16 @@ if [ -n "$simple" ]; then
         bad "capture from $simple failed"
     fi
 else
-    step "5. skipped -- no device with card 'simple_device'"
+    step "5. skipped -- no capture-only device on this launch"
 fi
 
 if [ -n "$loop" ]; then
-    step "6. loopback 10 frames through $loop, comparing bytes"
+    step "6. loopback $FRAMES frames through $loop, comparing bytes"
     rm -f /tmp/lb_in.raw /tmp/lb_out.raw
-    head -c "$NV12" /dev/urandom > /tmp/lb_in.raw
+    head -c "$((FRAMES * NV12))" /dev/urandom > /tmp/lb_in.raw
     v4l2-ctl -d "$loop" --get-fmt-video --get-fmt-video-out 2>&1 | sed -n '1,12p'
-    if v4l2-ctl -d "$loop" --stream-mmap --stream-out-mmap \
-                --stream-from=/tmp/lb_in.raw --stream-to=/tmp/lb_out.raw --stream-count=10; then
+    if timeout 120 v4l2-ctl -d "$loop" --stream-mmap --stream-out-mmap \
+                --stream-from=/tmp/lb_in.raw --stream-to=/tmp/lb_out.raw --stream-count="$FRAMES"; then
         n=$(stat -c %s /tmp/lb_out.raw 2>/dev/null || echo 0)
         echo "captured bytes: $n (need at least $NV12)"
         if [ "$n" -lt "$NV12" ]; then
@@ -146,10 +154,10 @@ if [ -n "$loop" ]; then
             bad "loopback output differs from the input in the first $NV12 bytes"
         fi
     else
-        bad "loopback stream on $loop failed"
+        bad "loopback stream on $loop failed (rc $?; 124 is the 120 s timeout)"
     fi
 else
-    step "6. skipped -- no device with card 'loopback'"
+    step "6. skipped -- no m2m device on this launch"
 fi
 
 step "7. dmesg after the run"
@@ -158,6 +166,7 @@ dmesg | grep -i 'virtio[-_]media' | tail -60
 echo; echo "failures: $fail"
 [ "$fail" = 0 ]
 GUEST
+} | "$SP/guest.sh" ssh "$NAME" "MODE='$MODE' bash -s"
 rc=$?
 echo
 if [ "$rc" = 0 ]; then echo "smoke_media: PASS"; else echo "smoke_media: FAIL (rc=$rc)"; fi
