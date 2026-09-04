@@ -226,7 +226,21 @@ deploy/vpu/tests/smoke_media.sh Ubuntu-resolute
 ```
 
 Order matters when a whole batch lands (review B3): push crosvm first, then the guest-additions
-deb, then the APK. One media device per VM until the shared pool allocator is fixed.
+deb, then the APK.
+
+### `media-host-mb` is not optional on Gunyah
+
+On a Gunyah host, crosvm refuses to start a VM that has a `--virtio-media` device and no
+`--pre-alloc media-host-mb` (`virtio-media on gunyah needs --pre-alloc media-host-mb` in
+`vm.sh log`). That holds **whatever the guest driver's `driver_owned_queues` is set to, `all`
+included** — a mode in which the guest owns every queue and never maps a single host buffer.
+The switch is a guest-side policy the host cannot see or rely on: the device has to be able to
+serve a host-owned `MMAP` buffer the moment some program in the guest asks for one, and on Gunyah
+the pool is the only place it can put one (the 64-bit MMIO window has room for one 4 GiB
+shared-memory BAR and the GPU already has it, design §0.2/§3.3). So always merge
+`media-host-mb=256` in, even for an `--mode all` run. `media-guest-mb` is the one that is
+genuinely optional: without it the guest driver falls back to `dma_alloc_pages` behind the
+restricted-dma-pool. All the media devices of one VM share the one `media_host` pool.
 
 If `start` comes back "went back to stopped", `vm.sh log` has the reason: crosvm rejects an
 unknown flag before the guest ever runs, and that lands in the `stdio` history.
