@@ -25,7 +25,10 @@ VPU_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$VPU_DIR/../.." && pwd)"
 DVMIPC="$VPU_DIR/dvmipc.py"
 
-SSH_OPTS=${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes}
+# ~8 s is the budget for deciding that the direct IPv6 route is dead and going through the
+# phone instead (see "reaching the guest" at the bottom of this file).
+SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-8}
+SSH_OPTS=${SSH_OPTS:--o StrictHostKeyChecking=accept-new -o ConnectTimeout=$SSH_CONNECT_TIMEOUT -o BatchMode=yes}
 
 die()  { echo "$*" >&2; exit 1; }
 note() { echo "$*" >&2; }
@@ -182,7 +185,80 @@ print(n[0]["mac_address"] if n else "")')
     echo "$prefix:$(eui64_suffix "$mac")"
 }
 
-guest_ssh_ready() {  # guest_ssh_ready <addr>
+# --- reaching the guest ---------------------------------------------------------------------------
+# There are two ways in, and which one works is a property of the lab network on the day:
+#
+#   direct  ssh -6 root@<guest>  -- needs the router's NDP entry for the /128 the phone proxies on
+#           wlan0 to have resolved. It usually has.
+#   proxy   ssh -o ProxyCommand='adb -s $PHONE shell -T su -c "<nc> -w 30 %h %p"' -- the phone
+#           itself always reaches its own guest (1.5 ms), so bridging one TCP stream through its
+#           root shell works even when this box has no route to the guest at all. WP G1 lost the
+#           direct route for a whole session and used exactly this for every ssh/scp/make
+#           (logs/vpu_wp/G1.md §1).
+#
+# The choice is made once per process by probing the direct path with SSH_CONNECT_TIMEOUT, is
+# announced on stderr once, and is only cached when a path actually answered -- so wait-ssh's poll
+# loop keeps retrying both while the guest is still booting instead of pinning itself to the path
+# that happened to fail first. GUEST_SSH_VIA=direct|proxy skips the probe.
+
+# The netcat to run in the phone's root shell. KernelSU ships busybox under /data/adb/ksu/bin,
+# Android ships toybox in /system/bin; both are on root's PATH and both bridge a TCP stream.
+_PHONE_NC=""
+phone_nc() {
+    # shellcheck disable=SC2016  # $n is for the phone's shell, not this one
+    [ -n "$_PHONE_NC" ] || _PHONE_NC=$(asu 'for n in busybox toybox; do command -v $n >/dev/null 2>&1 && { echo "$n nc"; break; }; done')
+    [ -n "$_PHONE_NC" ] || die "ssh fallback: no busybox and no toybox in the root shell on $PHONE"
+    printf '%s' "$_PHONE_NC"
+}
+
+GUEST_SSH_PATH=""
+GUEST_SSH_EXTRA=(-6)   # ssh/scp arguments for the chosen path; the direct one just forces IPv6
+
+_guest_ssh_probe() {  # _guest_ssh_probe <addr> -- one connect attempt with the current path
+    # shellcheck disable=SC2086  # SSH_OPTS is a deliberate word list
+    timeout "$(( SSH_CONNECT_TIMEOUT + 5 ))" \
+        ssh $SSH_OPTS "${GUEST_SSH_EXTRA[@]}" "root@$1" true </dev/null >/dev/null 2>&1
+}
+
+guest_ssh_select() {  # guest_ssh_select <addr> -- 0 if some path answered, 1 if neither did
+    [ -n "$GUEST_SSH_PATH" ] && return 0
+    if [ "${GUEST_SSH_VIA:-auto}" != proxy ]; then
+        GUEST_SSH_EXTRA=(-6)
+        if [ "${GUEST_SSH_VIA:-auto}" = direct ] || _guest_ssh_probe "$1"; then
+            GUEST_SSH_PATH=direct
+            note "guest: ssh via the direct IPv6 route to $1${GUEST_SSH_VIA:+ (GUEST_SSH_VIA=$GUEST_SSH_VIA)}"
+            return 0
+        fi
+    fi
+    GUEST_SSH_EXTRA=(-o "ProxyCommand=adb -s $PHONE shell -T su -c \"$(phone_nc) -w 30 %h %p\"")
+    if [ "${GUEST_SSH_VIA:-auto}" = proxy ] || _guest_ssh_probe "$1"; then
+        GUEST_SSH_PATH=proxy
+        if [ "${GUEST_SSH_VIA:-auto}" = proxy ]; then
+            note "guest: ssh to $1 via adb+nc through $PHONE (GUEST_SSH_VIA=proxy)"
+        else
+            note "guest: no direct IPv6 route to $1 within ${SSH_CONNECT_TIMEOUT}s, ssh via adb+nc through $PHONE"
+        fi
+        return 0
+    fi
+    # Nothing answered: leave the choice uncached (the guest may still be booting) but keep the
+    # proxy arguments, so a caller that runs anyway gets the error from the path most likely to work.
+    return 1
+}
+
+guest_ssh() {  # guest_ssh <addr> [command...] -- stdin is passed through
+    local addr=$1; shift
+    guest_ssh_select "$addr" || true
+    # shellcheck disable=SC2086,SC2029  # SSH_OPTS is a word list; the command is meant for the guest
+    ssh $SSH_OPTS "${GUEST_SSH_EXTRA[@]}" "root@$addr" "$@"
+}
+
+guest_scp() {  # guest_scp <addr> <scp args...> -- the caller has already built the remote paths
+    local addr=$1; shift
+    guest_ssh_select "$addr" || true
     # shellcheck disable=SC2086
-    timeout 20 ssh -6 $SSH_OPTS "root@$1" true </dev/null >/dev/null 2>&1
+    scp $SSH_OPTS "${GUEST_SSH_EXTRA[@]}" "$@"
+}
+
+guest_ssh_ready() {  # guest_ssh_ready <addr>
+    guest_ssh_select "$1"
 }
