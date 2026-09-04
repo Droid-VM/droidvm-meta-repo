@@ -49,8 +49,9 @@ restart stops every VM (`Daemon.cleanup`).
 | script | what it does |
 |---|---|
 | `lib.sh` | sourced by the rest: `PHONE`, root-shell helpers, daemon start/port/token, `adb forward`, VM lookup, EUI-64 guest address |
-| `dvmipc.py` | the JSON IPC client: `list`, `status`, `start`, `stop`, `modify`, `get`, `console-history` |
-| `vm.sh` | `start\|stop\|status\|argv\|log\|wait-ssh <name>` |
+| `dvmipc.py` | the JSON IPC client: `list`, `status`, `start`, `stop`, `stop-all`, `modify`, `get`, `console-history` |
+| `vm.sh` | `start\|stop\|status\|argv\|log\|wait-ssh <name>`, plus `stop-all\|daemon-check\|daemon-restart` |
+| `install_apk.sh` | `<apk>` → stop every VM, install, unpack the payload, restart the daemon, verify all of it |
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
 | `vm_extra.sh` | `show\|set\|takeover\|restore\|clear <name>` — the VM's `extra_options` array |
@@ -59,7 +60,9 @@ restart stops every VM (`Daemon.cleanup`).
 | `tests/compliance.sh` | `<name> [/dev/videoN]` — `v4l2-compliance -s` in the guest; the test for **D6** |
 | `tests/drain.sh` | `<name> [/dev/videoN]` — one frame in, `--stream-count=10`: the **D5** reproduction |
 
-A VM is named by either its `name` or its `id`; both go through one `vm_list` lookup.
+A VM is named by either its `name` or its `id`; both go through one `vm_list` lookup — in the
+shell scripts via `lib.sh`'s `vm_info`, and in `dvmipc.py get|modify` via `Daemon.resolve`, since
+the daemon's own handlers take a bare `vm_id` and never resolve a name (`GetHandler.java:27-30`).
 
 `shellcheck -x` is run **from `deploy/vpu/`** — the `# shellcheck source=lib.sh` directives are
 relative, so from anywhere else `-x` cannot follow them and the run is not meaningful:
@@ -85,6 +88,26 @@ rejected flag shows up. If the daemon is not running, any verb starts it first, 
 the UI does (`DaemonHelper.java:138-151`) with the stdio redirection an `adb shell` needs.
 
 Budget **90–120 s** from `vm_start` to ssh answering.
+
+Three verbs take no VM name:
+
+```sh
+deploy/vpu/vm.sh stop-all          # vm_stop_all, then wait until vm_list shows none running
+deploy/vpu/vm.sh daemon-check      # is the running daemon the installed APK's code?  (defect D12)
+deploy/vpu/vm.sh daemon-restart    # stop-all, then start with --force, then daemon-check
+```
+
+`daemon-check` prints the CLASSPATH the running daemon was started with next to `pm path
+cn.classfun.droidvm`, and exits non-zero when they differ (`STALE`) or when no daemon is running.
+The CLASSPATH is read from `/proc/<pid>/environ`, **not** `cmdline`: the pid in
+`run/droidvmd.pid` is the `app_process64` that `env` exec'd, so its cmdline is only
+`/system/bin/app_process64 / cn.classfun.droidvm.daemon.Daemon [--force]`.
+
+`daemon-restart` is `DaemonHelper.startDaemon(true)` — the same command line with a trailing
+`--force`, which takes the single-instance lock away from the running daemon. It runs `stop-all`
+first: the replaced daemon takes its VMs down with it (`Daemon.cleanup`), and a crosvm that ends
+any way other than `vm_stop` leaks RM memparcels until the phone is rebooted. Remember that a
+daemon restart also drops everything `vm_extra.sh` put in the in-memory store.
 
 ### `guest.sh`
 
@@ -138,6 +161,41 @@ reason; this script must never put one back. Today that means `crosvm_out/`'s
 `libbase/libc++/libcap/libcutils/liblog/libminijail/libnativewindow/libprocessgroup` are skipped.
 
 The previous binary is kept as `usr/bin/crosvm.bak.<YYYYmmdd-HHMM>` before it is replaced.
+
+### `install_apk.sh`
+
+```sh
+deploy/vpu/install_apk.sh DroidVM/app/build/outputs/apk/debug/app-debug.apk
+```
+
+**An `adb install -r` alone leaves the phone running the OLD crosvm and the OLD daemon** (defect
+**D12**, `logs/vpu_wp/B3-acceptance.md` §3). Both halves look fine if nobody checks — `pm path`
+and `droidvm --version` answer, the VM starts, and its argv was built by the code you thought you
+replaced. The two reasons:
+
+* the native payload under `$APP/usr` is unpacked by the app's **UI** — `SplashActivity:72` →
+  `AssetUtils.needsExtractPrebuilt` → `ExtractStepFragment.runCheck`, which runs without any
+  button press — and not by the install or the daemon;
+* the daemon is a bare root `app_process64` started through `su`, so the package update does not
+  kill it and it keeps executing the `base.apk` that was replaced. (`ps -A | grep droidvm` finds
+  nothing, which is what makes it look gone.)
+
+So the script does, in order, and verifies each step:
+
+1. `vm_stop_all` — every VM down through the daemon's own path, and waited for;
+2. `adb install -r <apk>`;
+3. `monkey -p cn.classfun.droidvm -c android.intent.category.LAUNCHER 1` — one launch, which is
+   what triggers the extraction;
+4. poll up to 60 s (B3 measured ~15 s) until `sha256sum $APP/usr/bin/crosvm` equals the hash the
+   APK itself claims: `assets/prebuilts/prebuilt-<abi>.json`'s `usr/bin/crosvm` entry, read out of
+   the APK with `zipfile`. If it never matches, the app is probably sitting on a prompt on the
+   phone — the script says so and stops;
+5. `daemon-restart` — `stop-all` plus a `--force` start onto the new `base.apk`;
+6. print `droidvm --version`, the package's `versionCode`/`versionName`, the crosvm hash, and a
+   final `daemon-check`.
+
+Doing it by hand is the same six steps; `vm.sh daemon-check` is the one that catches the mistake
+afterwards.
 
 ### `vm_extra.sh`
 
@@ -337,9 +395,11 @@ is a different half of the same contract, and a later one assumes the earlier on
    any media flag is worth passing.
 3. **`extra_options`** — `vm.sh stop`, `vm_extra.sh takeover ...`, `vm.sh start`, then
    `vm.sh argv | grep -c -- --pre-alloc` (must be 1).
-4. **the APK**, last. It is what makes step 3 unnecessary: with the WP A1 APK installed and the
-   VM's VPU switch on, the daemon emits the media keys itself, so `restore` the takeover and put
-   only `--virtio-media` in `extra_options`.
+4. **the APK**, last, with `install_apk.sh` — never a bare `adb install -r` (**D12**). It is what
+   makes step 3 unnecessary: with the WP A1 APK installed and the VM's VPU switch on, the daemon
+   emits the media keys itself, so `restore` the takeover and put only `--virtio-media` in
+   `extra_options`. Note that the daemon restart it performs also drops any `vm_extra.sh` change,
+   so re-apply after it, not before.
 
 **`takeover` is bring-up only** — it exists for the window before that APK is installed. It
 reaches into the VM's GPU pool sizes to buy one command-line slot, and nothing outside this rig

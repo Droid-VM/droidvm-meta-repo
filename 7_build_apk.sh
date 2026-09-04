@@ -12,5 +12,9 @@ cd DroidVM-Prebuilt-Root
 ./auto-build.py
 
 cd ..
+# D13 (logs/vpu_wp/B3-acceptance.md §2): zipflinger repacks an existing APK in place, so a
+# changed assets/prebuilts/*.tar.xz is appended and the old one is left behind as a dead entry --
+# 214 MB shipped instead of 135 MB from the same inputs, 79 MB of it moved by every adb install.
+rm -f app/build/outputs/apk/debug/app-debug.apk
 ./build.sh
 ls -la app/build/outputs/apk/debug/app-debug.apk

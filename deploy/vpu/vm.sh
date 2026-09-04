@@ -8,6 +8,12 @@
 #   vm.sh log      <name|id>   the daemon's "Executing:" line + the VM's stdio history
 #   vm.sh wait-ssh <name|id>   block until the guest answers ssh (default 240s)
 #
+# Three verbs take no VM name and act on the daemon as a whole:
+#
+#   vm.sh stop-all             vm_stop_all -- stop every running VM cleanly, and wait
+#   vm.sh daemon-check         is the running daemon the code the INSTALLED APK carries? (D12)
+#   vm.sh daemon-restart       stop every VM, then restart the daemon with --force onto that APK
+#
 # PHONE=<host:port> overrides the device (default 172.22.74.2:5566).
 # The daemon is started if it is not running; see lib.sh's daemon_start.
 set -u
@@ -22,9 +28,18 @@ usage() {  # print the file's own header comment, up to the first line of code
 }
 
 VERB=${1:-}; NAME=${2:-}
-if [ -z "$VERB" ] || [ -z "$NAME" ]; then usage; fi
+[ -n "$VERB" ] || usage
 adb_wait
 
+# The daemon-wide verbs resolve no VM, so they run before the vm_list lookup below -- which
+# matters for daemon-check in particular: it must stay usable when the daemon is not running.
+case "$VERB" in
+stop-all)       vm_stop_all;   exit ;;
+daemon-check)   daemon_check;  exit ;;
+daemon-restart) daemon_restart && daemon_check; exit ;;
+esac
+
+[ -n "$NAME" ] || usage
 INFO=$(vm_info "$NAME") || exit 1
 ID=$(vm_field "$INFO" id)
 STATE=$(vm_state "$INFO")
