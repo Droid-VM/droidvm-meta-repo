@@ -53,10 +53,17 @@ restart stops every VM (`Daemon.cleanup`).
 | `vm.sh` | `start\|stop\|status\|argv\|log\|wait-ssh <name>` |
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
-| `vm_extra.sh` | `show\|set\|clear <name>` — the VM's `extra_options` array |
-| `tests/smoke_media.sh` | `<name>` — is there a working virtio-media device in the guest? |
+| `vm_extra.sh` | `show\|set\|merge\|clear <name>` — the VM's `extra_options` array |
+| `tests/smoke_media.sh` | `[--mode output\|none\|all] <name>` — is there a working virtio-media device in the guest? |
 
 A VM is named by either its `name` or its `id`; both go through one `vm_list` lookup.
+
+`shellcheck -x` is run **from `deploy/vpu/`** — the `# shellcheck source=lib.sh` directives are
+relative, so from anywhere else `-x` cannot follow them and the run is not meaningful:
+
+```sh
+cd deploy/vpu && shellcheck -x ./*.sh tests/*.sh
+```
 
 ### `vm.sh`
 
@@ -91,6 +98,21 @@ The address is derived, not discovered: the guest's SLAAC address is the EUI-64 
 the VM config, on the phone's own `/64` (read live off `wlan0`). So it is known before the guest
 boots. `GUEST6=<addr>` overrides.
 
+**Two routes in, chosen automatically.** Normally ssh goes straight to that address. When the
+direct route is dead — the lab router's NDP entry for the `/128` the phone proxies on `wlan0`
+sometimes never resolves, and WP G1 lost the route for a whole session while the phone itself
+pinged the guest at 1.5 ms (`logs/vpu_wp/G1.md` §1) — the rig falls back on its own to a
+`ProxyCommand` through the phone's root shell:
+
+```sh
+ssh -o ProxyCommand='adb -s $PHONE shell -T su -c "busybox nc -w 30 %h %p"' root@<guest>
+```
+
+The direct path is probed once per run with `ConnectTimeout=$SSH_CONNECT_TIMEOUT` (8 s); which
+path was taken is printed on stderr once. `scp`, `install-deb` and `vm.sh wait-ssh` use the same
+choice. `GUEST_SSH_VIA=direct|proxy` skips the probe; the netcat is whichever of `busybox` /
+`toybox` the phone's root shell has (KernelSU's `/data/adb/ksu/bin/busybox` on the lab device).
+
 ### `push_crosvm.sh`
 
 ```sh
@@ -121,48 +143,90 @@ pools and the media device get onto the command line until WP A1 lands.
 
 ```sh
 deploy/vpu/vm_extra.sh show  Ubuntu-resolute
+deploy/vpu/vm_extra.sh merge Ubuntu-resolute media-host-mb=256,media-guest-mb=128 --virtio-media kind=loopback,card=lb0
 deploy/vpu/vm_extra.sh set   Ubuntu-resolute --pre-alloc <FULL MERGED STRING> --virtio-media kind=loopback
 deploy/vpu/vm_extra.sh clear Ubuntu-resolute
 ```
 
 **`--pre-alloc` is single-valued.** `extra_options` are appended *after* the daemon's own
-arguments, so a second `--pre-alloc` **overrides** the daemon's instead of merging with it. Read
-the daemon's own string off `vm.sh argv <name>` and pass the whole merged value; passing only the
-media keys silently drops the GPU pools and the guest loses its GPU. On the lab VM today the
-daemon emits:
+arguments, so a second `--pre-alloc` **overrides** the daemon's instead of merging with it. With
+`set` you must read the daemon's own string off `vm.sh argv <name>` and pass the whole merged
+value; passing only the media keys silently drops the GPU pools and the guest loses its GPU. On
+the lab VM today the daemon emits:
 
 ```
 --pre-alloc drm-host-mb=64,gpu-guest-mb=1024,gpu-guest-prealloc-mb=1024,gpu-guest-step-mb=0,gpu-guest-max-grants=0
 ```
 
-`vm_modify` refuses a VM that is not `STOPPED`, so `vm_extra.sh set|clear` does too.
+**So use `merge`, not `set`.** It reads that string itself — off `/proc/<pid>/cmdline` while the
+VM runs, off the last `Executing:` line in `daemon.log` when it is stopped — merges the keys you
+give into it (a key given twice: yours wins) and stores the result plus any further arguments:
+
+```sh
+deploy/vpu/vm_extra.sh merge Ubuntu-resolute media-host-mb=256,media-guest-mb=128 \
+  --virtio-media kind=loopback,card=lb0
+```
+
+**Once the WP A1 APK is installed and the VM's VPU switch is on, `extra_options` must carry no
+`--pre-alloc` at all** — only `--virtio-media ...`. The daemon then emits `media-host-mb` /
+`media-guest-mb` itself, and any `--pre-alloc` here would override that whole string (review B3).
+Check with `vm.sh argv <name> | grep -c -- --pre-alloc`: it must be 1.
+
+`vm_modify` refuses a VM that is not `STOPPED`, so `vm_extra.sh set|merge|clear` does too — `merge`
+still reads the running crosvm's argv first, so it tells you the daemon's string before it refuses.
 
 ### `tests/smoke_media.sh`
 
 ```sh
 deploy/vpu/tests/smoke_media.sh Ubuntu-resolute
+deploy/vpu/tests/smoke_media.sh --mode all Ubuntu-resolute    # or --mode output | --mode none
 ```
 
 Waits for ssh, then checks the driver is loaded, a `/dev/video*` node exists, dmesg mentions the
-driver, and `v4l2-ctl --all` answers on every node. If a node's card type is `simple_device` it
-captures 30 frames to `/tmp/simple.raw` and prints the byte count; if one is `loopback` it runs 10
-frames through the m2m queues. Missing card types are skipped, not failed — which one exists
-depends on how crosvm was launched. Any real failure makes the script exit non-zero.
-Run `guest.sh install-tools` once first: the test needs `v4l2-ctl`.
+driver, and `v4l2-ctl --all` answers on every node. Then it moves real bytes:
+
+* card `simple_device` — 30 frames to `/tmp/simple.raw`, which must be **exactly 30 × 921600**
+  bytes (640×480 RGB3) with **at least two distinct frames** (the device paints a changing
+  uniform colour, so 30 identical frames means nothing arrived);
+* card `loopback` — 460800 random bytes (640×480 NV12) in through `--stream-from`, out through
+  `--stream-to`, `--stream-count=10`, and `cmp -n 460800` between the two. This is the only step
+  that proves bytes crossed the queues rather than that an ioctl returned 0.
+
+`--mode output|none|all` reloads the guest module first (`modprobe -r virtio-media; modprobe
+virtio-media driver_owned_queues=<mode> pool_debug=1`) — that is how the three driver-owned-buffer
+policies of design §2.1 get exercised in turn. Without `--mode` the module is left untouched.
+Either way the run ends by printing the guest's `virtio-media` dmesg lines, which is where
+`pool_debug`'s dbuf alloc/free traces show up. (Reloading a module is fine **in the guest**; the
+"never `rmmod`/`insmod`" rule is about the phone.)
+
+Missing card types are skipped, not failed — which one exists depends on how crosvm was launched.
+Any real failure makes the script exit non-zero. Run `guest.sh install-tools` once first: the test
+needs `v4l2-ctl`.
 
 ---
 
 ## A typical loop
 
 ```sh
+cd deploy/vpu && shellcheck -x ./*.sh tests/*.sh && cd -   # before committing anything here
 JOBS=8 taskset -c 0-7 ./2_build_crosvm.sh          # never unpinned, never more than 8 jobs
 deploy/vpu/vm.sh   stop  Ubuntu-resolute
 deploy/vpu/push_crosvm.sh
-deploy/vpu/vm_extra.sh set Ubuntu-resolute --pre-alloc <merged> --virtio-media kind=loopback
+deploy/vpu/vm_extra.sh merge Ubuntu-resolute media-host-mb=256,media-guest-mb=128 \
+  --virtio-media kind=loopback,card=lb0
 deploy/vpu/vm.sh   start Ubuntu-resolute
 deploy/vpu/vm.sh   argv  Ubuntu-resolute | grep -E 'pre-alloc|media'
 deploy/vpu/tests/smoke_media.sh Ubuntu-resolute
 ```
+
+`merge` stores exactly what the review's test plan asks for:
+
+```
+--pre-alloc <daemon string>,media-host-mb=256,media-guest-mb=128 --virtio-media kind=loopback,card=lb0
+```
+
+Order matters when a whole batch lands (review B3): push crosvm first, then the guest-additions
+deb, then the APK. One media device per VM until the shared pool allocator is fixed.
 
 If `start` comes back "went back to stopped", `vm.sh log` has the reason: crosvm rejects an
 unknown flag before the guest ever runs, and that lands in the `stdio` history.

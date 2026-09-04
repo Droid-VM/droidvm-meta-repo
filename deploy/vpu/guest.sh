@@ -10,6 +10,11 @@
 #
 # The address is the EUI-64 of the VM's NIC MAC on the phone's own /64 (lib.sh guest_addr), so it
 # is known before the guest boots. GUEST6=<addr> overrides it; PHONE=<host:port> the device.
+#
+# ssh goes straight to that address when the route works and falls back to a ProxyCommand through
+# the phone's own root shell (adb + busybox/toybox nc) when it does not -- the fallback is
+# automatic, costs one ~8 s probe, and says on stderr which path it took. GUEST_SSH_VIA=direct or
+# =proxy skips the probe.
 set -u
 SP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -32,10 +37,10 @@ shift 2
 adb_wait
 ADDR=$(guest_addr "$NAME") || exit 1
 
-gssh() {
-    # shellcheck disable=SC2086  # SSH_OPTS is a deliberate word list
-    ssh -6 $SSH_OPTS "root@$ADDR" "$@"
-}
+# Both wrappers go through lib.sh's guest_ssh_select: direct IPv6 if it connects inside
+# ~8 s, otherwise tunnelled through the phone's root shell with adb + nc. Which path was
+# taken is printed on stderr once per run.
+gssh() { guest_ssh "$ADDR" "$@"; }
 
 case "$VERB" in
 ssh)
@@ -49,8 +54,7 @@ scp)
             *)  args+=("$a") ;;
         esac
     done
-    # shellcheck disable=SC2086
-    scp -6 $SSH_OPTS "${args[@]}"
+    guest_scp "$ADDR" "${args[@]}"
     ;;
 install-tools)
     # DEBIAN_FRONTEND=noninteractive because there is no tty on the far end of BatchMode ssh.
@@ -65,8 +69,7 @@ install-deb)
     remote=()
     for f in "$@"; do
         [ -f "$f" ] || die "install-deb: no such file: $f"
-        # shellcheck disable=SC2086
-        scp -6 $SSH_OPTS "$f" "root@[$ADDR]:/tmp/" || die "install-deb: scp $f failed"
+        guest_scp "$ADDR" "$f" "root@[$ADDR]:/tmp/" || die "install-deb: scp $f failed"
         remote+=("/tmp/$(basename "$f")")
     done
     gssh "set -e
