@@ -682,7 +682,9 @@ Two fields on that line are worth knowing by name:
   with no `--log-level` at all and crosvm's syslog reads no environment variable, so every helper
   ran pinned at `info` and every `debug!` in a device backend was dead weight — which is exactly
   how the D37 investigation lost its device-side instrument. `log level info (default)` on this
-  line means nothing forwarded a filter and the old behaviour applies.
+  line means nothing forwarded a filter and the old behaviour applies. What puts a filter on the
+  VMM in the first place is `vm.sh log-level <name> debug` (**D60**): before that verb existed,
+  D57's forwarding was correct and unusable, and this line read `log level info` on every build.
 
 **On the phone, by cmdline.** `/proc/<pid>/cmdline` is NUL-separated, so `device media` is only
 there once the NULs are spaces:
