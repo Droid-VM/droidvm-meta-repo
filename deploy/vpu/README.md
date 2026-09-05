@@ -377,10 +377,10 @@ stale copy quietly passing.
 | `kvt` | `MediaDeviceKind` (+ its support table) and `MediaDeviceConfig`: the `--virtio-media` command-line surface | 3 |
 | `kst` | `devices/src/virtio/media/kill.rs` — the worker's kill signal | 5 |
 | `mpt` | `devices/src/virtio/media/pool.rs` — the `media_host` pool allocator and its leases | 4 |
-| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (the camera and the video decoder devices included) | 65 |
+| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (the camera and the two video codec devices included) | 83 |
 | `acb` | `android_camera` (lib + `probe.rs`) and both halves of `media/android_camera_backend/` | 0 — a type-check; a failure here is a compile error |
 | `acc` | `android_codec` (lib + `codec_probe`), `-p android_codec`: the MediaImage2 / Annex-B / IVF / synth unit tests | 29 |
-| `acd` | both halves of `media/android_codec_backend/` -- the MediaCodec decoder backend -- against the fork's `video_decoder` device | 0 — a type-check, like `acb` |
+| `acd` | both halves of `media/android_codec_backend/` -- the MediaCodec decoder and encoder backends -- against the fork's `video_decoder` and `video_encoder` devices | 0 — a type-check, like `acb` |
 
 Each is staged into `${TMPDIR:-/tmp}/droidvm-harness/<name>` and built there, so the repo stays
 clean and `target/` survives between runs; the full log of each run is `<that dir>/<name>.log`.
