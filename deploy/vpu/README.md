@@ -51,6 +51,7 @@ restart stops every VM (`Daemon.cleanup`).
 | `lib.sh` | sourced by the rest: `PHONE`, root-shell helpers, daemon start/port/token, `adb forward`, VM lookup, EUI-64 guest address |
 | `dvmipc.py` | the JSON IPC client: `list`, `status`, `start`, `stop`, `stop-all`, `modify`, `get`, `console-history` |
 | `vm.sh` | `start\|stop\|status\|argv\|log\|wait-ssh <name>`, plus `stop-all\|daemon-check\|daemon-restart` |
+| `hp.sh` | `status\|expect on\|expect off\|reclaim` — the hugepage watchdog: assert the VM state instead of sleeping |
 | `install_apk.sh` | `<apk>` → stop every VM, install, unpack the payload, restart the daemon, verify all of it |
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
@@ -109,6 +110,57 @@ The CLASSPATH is read from `/proc/<pid>/environ`, **not** `cmdline`: the pid in
 first: the replaced daemon takes its VMs down with it (`Daemon.cleanup`), and a crosvm that ends
 any way other than `vm_stop` leaks RM memparcels until the phone is rebooted. Remember that a
 daemon restart also drops everything `vm_extra.sh` put in the in-memory store.
+
+### Waiting on VM state: `hp.sh`
+
+Every VM on the phone runs on memory the `gh_hugepage_reserve` module hands out, so the module's
+counters *are* the VM state — and they move when `crosvm` takes or frees the memory, seconds
+before `vm_list` changes its mind and a minute or two before ssh answers. `hp.sh` compares the
+state you **expect** against the counters, so an acceptance step asserts instead of sleeping
+(`W/debugloop.md` is the rule in the user's own words).
+
+One hugepage is **2 MiB**; on 5566 `pool_want` is **3072** pages = 6 GiB. Everything is read from
+`/sys/module/gh_hugepage_reserve/parameters/` through `lib.sh`'s root helper, one adb round trip
+per sample — `refill_stat` and `vm_owners` are read in the *same* root shell, so a verdict never
+mixes two instants. `POOL_DESIGN.md` §10 is the sysfs contract.
+
+```sh
+deploy/vpu/hp.sh status                                   # one screen of the counters
+deploy/vpu/hp.sh expect off [--wait 30]                   # expected: no VM
+deploy/vpu/hp.sh expect on  [--min-mb 4096] [--wait 20]   # expected: a VM is up
+deploy/vpu/hp.sh reclaim --yes                            # the remedy for "not reclaimed"
+```
+
+**The two expected states.**
+
+| after | `served` | `pool_avail` |
+|---|---|---|
+| the VM is stopped | `0` | `== pool_want` — the pool is full again |
+| the VM is up | `>=` the VM's configured memory (the guest pools take more on top) | `< pool_want` |
+
+Every answer is one line, `hp: <verdict>: <details>`, and the verdict **is** the exit code:
+
+| exit | verdict | what it means, and what to do about it |
+|---|---|---|
+| 0 | `OK` | the expected state |
+| 2 | `not reclaimed` | `served=0` but `pool_avail < pool_want`: the memory the last VM freed has not come back to the pool yet, and the next `start` is the one that will fail. Remedy: `hp.sh reclaim --yes` — it writes `1 > manual_release`, re-checks after 10 s, and if the pool is still short writes `3 > acquire` (CONTIG_AT+EVICT_ISOLATE) and waits for `acquire_active` to fall back to 0. |
+| 3 | `vm still up` | `served != 0` where none was expected: the previous VM has not finished stopping, or something else is running. The remedy block prints the `vm_owners` line (pid / comm); confirm with `vm.sh status <name>` and stop it with `vm.sh stop`. A leftover `crosvm` the daemon has lost gets a `kill -TERM` — **never** `kill -9`, which leaks Gunyah RM memparcels until the phone is rebooted. |
+| 4 | `not started` | `served=0` where a VM was expected: it never got off the ground, or it exited. Read the VM log **now** — `vm.sh log <name>`, or the app's stderr if the app launched it. Do not wait for `wait-ssh`: ssh will never answer. |
+| 5 | `short` | `served > 0` but under `--min-pages` / `--min-mb`. Read it the same way as 4. |
+| 1 | — | the module is not loaded, or its parameters are not readable |
+| 64 | — | usage — including `reclaim` without `--yes`, which prints the two writes it would make and stops |
+
+`--wait SECS` samples once a second until the verdict is `OK` or the time runs out, and prints a
+line only when the verdict **changes** — so the last line printed is always the one it exits on,
+and a slow-but-fine stop is two lines rather than thirty. `reclaim` refuses outright while
+`served != 0`: pulling pages out from under a live VM is not a repair.
+
+**`vm.sh` runs it for you.** `start` ends with `hp expect on --wait 20 --min-pages <memory_mb/2>`;
+`stop` and `stop-all` end with `hp expect off --wait 30`. Those verdicts are printed and are never
+fatal — the watchdog reports, `vm.sh`'s exit code still comes from the daemon. `wait-ssh` is the
+one exception: it runs `hp expect on --wait 20` *before* the ssh loop and dies immediately on
+`not started`, because 240 s of ssh retries against a VM that is not there only hides the reason.
+`HP_CHECK=0` skips every one of these (a phone without the module).
 
 ### `guest.sh`
 
@@ -274,7 +326,8 @@ The resulting command line is byte-identical to what a working merge would have 
 * `PoolPreflight` sizes the huge-page reserve from those config keys
   (`GuestPoolSizing.bootGuestPreallocMb`), not from the string on the command line, so **while a
   takeover is active it under-counts by the zeroed guest pool** — 1024 MiB on the lab VM. crosvm
-  still asks the RM for that memory. Check `gh_hugepage_reserve`'s `pool_avail` before starting.
+  still asks the RM for that memory. Check `gh_hugepage_reserve`'s `pool_avail` before starting
+  (`hp.sh status`).
 * `vm_modify` writes only the daemon's **in-memory** store (`files/vms.json` is the app editor's
   alone, `app-daemon.md` §5.4), so both the zeroed keys and `extra_options` vanish on a daemon
   restart — which also stops every VM (`Daemon.cleanup`). After a restart, delete the stale
