@@ -43,6 +43,7 @@ ln -sfn crosvm_build/packages/modules/Virtualization Virtualization
 # to its stable branch (see lib_branch.sh). If a fork has neither, the manifest revision
 # is kept rather than failing the sync.
 for p in external/crosvm hardware/google/gfxstream external/virglrenderer packages/modules/Virtualization \
-         external/libvncserver external/zstd external/virtio-media; do
+         external/libvncserver external/zstd external/virtio-media \
+         external/rust/crates/v4l2r; do
     checkout_soong "crosvm_build/$p" "$(basename "$p")"
 done
