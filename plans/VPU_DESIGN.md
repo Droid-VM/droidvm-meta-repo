@@ -454,7 +454,9 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 * **能力列舉（回答「不寫死」）**：`AMediaCodecStore_getSupportedMediaTypes` 取 `FLAG_DECODER` 的 mime → 每個 mime `findNextDecoderForFormat` 迭代 →
   預設只留 `HARDWARE_ACCELERATED`（`allow_sw=true` 才含軟體）→ `getCanonicalName` 才是 `createCodecByName` 用的名字 →
   `getVideoCapabilities` 的 width/height range + alignment → `ENUM_FRAMESIZES`（stepwise）、`getSupportedFrameRatesFor` → `ENUM_FRAMEINTERVALS`。
-  mime ↔ V4L2 OUTPUT fourcc：`video/avc`→`H264`、`video/hevc`→`HEVC`、`video/x-vnd.on2.vp9`→`VP90`、`video/av01`→`AV10`、`video/x-vnd.on2.vp8`→`VP80`。
+  mime ↔ V4L2 OUTPUT fourcc：`video/avc`→`H264`、`video/hevc`→`HEVC`、`video/x-vnd.on2.vp9`→`VP90`、`video/av01`→**`AV01`**、`video/x-vnd.on2.vp8`→`VP80`。
+  （`AV01` 是 `videodev2.h` 的 `V4L2_PIX_FMT_AV1` = `0x31305641`。這裡原本寫 `AV10`，是 **D54**，2026-09-06 由 polish 修在四個站點；
+  改對之後 `v4l2-ctl --list-formats-out` 與 compliance 的 `-v` 都讀得到 `AV01`，但 census 沒有動——原因見下面的 **D59**。）
   Store 的 lazy static 無鎖 → 裝置建立時單執行緒暖機一次。
 * **一個解碼裝置 = 全部硬體解碼器**：`ENUM_FMT(OUTPUT)` 列所有 mime；`S_FMT(OUTPUT)` 選 codec；`STREAMON(OUTPUT)` 才 `createCodecByName` + configure
   （`surface = NULL`、`KEY_COLOR_FORMAT = YUV420Flexible`、`KEY_MAX_INPUT_SIZE`、低延遲可選）+ `setAsyncNotifyCallback` + start。
@@ -486,25 +488,36 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
     錄出來的 mp4 一張都出不來（D44：ffmpeg 的 muxer 把 SPS/PPS 寫成 31 bytes 的獨立 sample，正好是那個「宣告不出來」的輸入）。
     **這是唯一擋出貨的一條**，驗收門檻三條都要過：`pollrace.py /dev/video1 /tmp/small.h264` 要回得到 POLLOUT、
     `ffmpeg -c:v h264_v4l2m2m -i cam.mp4` 要跑完、`v4l2-compliance -d /dev/video1 -s` 要過得了第一個 streaming 子測試。
-  * **`v4l2-compliance` 的預期值**（2026-09-06 依 `logs/vpu_wp/B10-acceptance.md` §2 改寫成 B10 在修好 D48/D50 的
-    版本上實測到的數字；先前這裡寫的是 B9 的量測加一個「D50 修好之後應回到 48 / 47 / 1」的預測，**那個預測被 B10 證偽**）：
+  * **`v4l2-compliance` 的預期值**（2026-09-06 依 `logs/vpu_wp/B11-acceptance.md` §3 改寫。這一格的歷史值得記著：
+    B9 之後這裡寫過「D50 修好之後應回到 48 / 47 / 1」，被 B10 證偽；B10 之後又寫了一次同一個預測，
+    理由換成 D54，**再度被 B11 證偽**。兩次都是在沒有讀過 `v4l2-compliance` 原始碼的情況下對它的行為下注。
+    下面全部是量測，沒有預測）：
 
     | 節點 | 呼叫 | Total / Succeeded / Failed | 失敗的來由 |
     |---|---|---|---|
-    | 解碼器 `/dev/video1` | 不帶 `-s` | **48 / 46 / 2** | **D30**（`VIDIOC_G/S_PARM`，接受）與 **D54**（見下）|
-    | 解碼器 `/dev/video1` | 帶 `-s` | **跑不完**：1500 s `rc=124`，停在 `Frame #002` | **D56** |
+    | 解碼器 `/dev/video1` | 不帶 `-s` | **48 / 46 / 2** | **D30**（`VIDIOC_G/S_PARM`，接受）與 **D59**（工具側，見下）|
+    | 解碼器 `/dev/video1` | 帶 `-s` | **跑不完**：`rc=124`（900 s），停在 `Video Output Multiplanar: Frame #002`，卡在 `virtio_media_dqbuf` | **D58**：宣告（`SOURCE_CHANGE`）之後的 `DQBUF(OUTPUT)` 不回來——**F15 / B13 的目標** |
     | 編碼器 `/dev/video2` | 不帶 `-s` | **48 / 48 / 0** | — |
     | 編碼器 `/dev/video2` | 帶 `-s` | **55 / 50 / 5** | 一個根因 `v4l2-test-buffers.cpp(398): !g_bytesused(p)` 加四條連鎖 = **D43**，接受 |
     | 相機 `/dev/video0` | 帶 `-s` | **59 / 56 / 3** | §7.1 那三條，接受 |
 
-    解碼器不帶 `-s` 的分數沒動，但**失敗的那一條換了人**：D50 修好以後訂閱迴圈確實過了
-    （`v4l2-test-controls.cpp(1128)` 那行不見了），測試往下走到同一個子測試的 `(1180)` —— `testEvents` 的分類斷言。
-    它會炸是因為節點**沒有被認成 stateful decoder**卻帶著 D29 給的 `V4L2_CID_MIN_BUFFERS_FOR_CAPTURE`：
-    `determine_codec_mask()` 走 `ENUM_FMT`，碰到第一個它不認得的壓縮格式就 `return`，於是 `codec_mask = 0`。
-    那個格式是 AV1：本節上面的對照表把 `video/av01` 對到 **`AV10`**，而 `videodev2.h` 的
-    `V4L2_PIX_FMT_AV1` 是 **`AV01`**。這是 **D54**，一個寫錯的線上常數（四個站點：`android.rs:173`、
-    `android_encoder.rs:189`、fork 的 `fourcc_description` 兩處），順帶讓任何以 fourcc 比對的客戶端看不到 AV1。
-    修好它以後這一格應該是 **48 / 47 / 1**（只剩 D30）——**這句是預測，不是量測**。
+    **為什麼不帶 `-s` 停在 48 / 46 / 2，而且會一直停在這裡（D59）。** 失敗的第二條是
+    `v4l2-test-controls.cpp(1180)` —— `testEvents` 的分類斷言。它會炸是因為節點**沒有被認成 stateful
+    decoder** 卻帶著 D29 給的 `V4L2_CID_MIN_BUFFERS_FOR_CAPTURE`，而分類是 `determine_codec_mask()`
+    走 `ENUM_FMT` 決定的：碰到第一個它不認得的壓縮格式就 `default: return`，`codec_mask` 留在 0。
+    那個格式是 AV1。**D54 是真的，也修好了**（`AV10` → `AV01`，四個站點：crosvm 的
+    `android_codec_backend/android.rs:265`、`android_codec_backend/android_encoder.rs:190`，fork 的
+    `video_decoder.rs:209` 與 `video_encoder.rs:293` 的 `fourcc_description`；binary 裡 `AV10` 0 命中），任何以 fourcc 比對的客戶端現在看得到 AV1；
+    但它買不到這一分：`v4l2-compliance` **1.32.0** 的 `determine_codec_mask()`
+    （`v4l2-compliance.cpp:511-610`，B11 整段讀過）在 OUTPUT 側只認
+    `H263 / H264 / H264_NO_SC / H264_MVC / MPEG1 / MPEG2 / MPEG4 / XVID / VC1_* / VP8 / VP9 / HEVC / FWHT`
+    → `STATEFUL_DECODER`，以及 `MPEG2_SLICE / H264_SLICE / HEVC_SLICE / VP8_FRAME / VP9_FRAME /
+    AV1_FRAME / FWHT_STATELESS` → `STATELESS_DECODER`。**`V4L2_PIX_FMT_AV1` 在整個函式裡不存在**
+    （`grep -n AV1` 只有一筆，line 596，是 stateless 的 `AV1_FRAME`），所以拼對的 `AV01` 和拼錯的 `AV10`
+    落在同一個 `default`。這是 **D59**，工具的限制，不是裝置的缺陷。
+    **處置：AV1 繼續廣告**（客戶端看得到才是重點），這一格的預期值就是 **48 / 46 / 2**；
+    要它變成 48 / 47 / 1 只有兩條路，都不划算：等 upstream v4l-utils 加一個 case，或把 AV1 從
+    `CODED_FORMATS` 拿掉——後者是為了工具的分數而讓真客戶端看不到一個真格式。
   * **D48 修好了，但同一個提前釋放開了兩個新洞；D55 + D56 是 WP-F13 的題目，要當成一件事修**
     （2026-09-06 依 B10-acceptance §1.4、§2.2、§13 補）：
     * **D55**：SOURCE_CHANGE 之前的提前釋放會把「正在等第一個 SOURCE_CHANGE、因此停止餵資料」的客戶端的 OUTPUT queue
@@ -523,6 +536,27 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
     * F13 的驗收門檻（全部是已有的量測設施）：gst DRC **20/20**、20 KB `pollrace.py` 仍拿得到 POLLOUT、
       200 KB 仍是 POLLPRI 先到、解碼器 `-s` **會結束**（分數不拘，這個節點從來沒有過一個分數）、
       不帶 `-s` 回到 48 / 47 / 1、故事的 decode-back 仍與軟解逐位元相同。
+  * **F13 交出了什麼，還剩什麼**（2026-09-06 依 `logs/vpu_wp/B11-acceptance.md` 補，六條門檻過了四條）：
+    * **D55 修好**：gst DRC **20 / 20**（B10 是 16/20），零 `poll error`，二十跑同一個 md5。
+      規則是「宣告即釋放」——能宣告的串流二十跑**沒有一次**走到 grace（§1）。
+    * **D56 在它自己的案例上修好**：`GraceTimer`（每個 session 一條執行緒、真時鐘）在 250 ms 放行，
+      20 KB 的 `pollrace.py` 五跑都在 **0.287–0.299 s** 拿到 POLLOUT，POLLERR 從未出現；
+      200 KB 五跑 POLLPRI 與 POLLOUT 同一次喚醒（D45 的順序完好）。
+    * **但 `-s` 還是跑不完，缺陷換成 D58**：楔子往後挪了一個 buffer——codec 現在**會**宣告
+      （`3 bitstream buffers in, 0 frames out, 0 seek(s), 1 format change(s)`），客戶端卡在
+      `SOURCE_CHANGE` **之後**的 `DQBUF(OUTPUT)`，正是 `awaiting_format()` 為 false、grace 蓋不到的窗。
+      兩跑同形，節點事後完全恢復。這條是「guest 今天碰得到的無限期停擺」的殘餘，也是這個節點
+      **從來沒有過一個 `-s` 分數**的原因。
+    * **不帶 `-s` 沒有回到 48 / 47 / 1，而且不會**：見上面的 **D59**。這條門檻本身是錯的，不是沒達成。
+    * **D53 不是「只發生在冷 codec」**：B11 連續解同一個檔十次，**1 次**丟了 49 張
+      （`seek #1: 12 pending input(s) and 6 held output(s) dropped`），重啟後的三次冷解都逐張正確；
+      同樣的簽名在 F13 之前的 F12 版本上也找得到，所以 250 ms 的扣住沒有把它變大。
+      機制是 ffmpeg 在 reinit 時對 OUTPUT 下 `STREAMOFF`，`flush()` 依約丟掉 staged 的位元流。
+      F13 §4 的規格論證（`STREAMOFF(OUTPUT)` 是 seek，`dev-decoder.rst` 說客戶端不該在第一個
+      `SOURCE_CHANGE` 停 OUTPUT queue，所以裝置丟得對）**仍然成立**；被證偽的是它的經驗前提
+      ——「只在冷 codec 上出現，因為冷 codec 宣告得慢」。**修法歸 WP F15-decoder**：那條
+      reinit 規則要怎麼把「還沒出過一張 CAPTURE 的 reinit」與真正的 seek 分開，由該 WP 定案並寫回這裡。
+      在那之前它是一次性的、重試就好的 1-in-10。
 
 ### 7.3 編碼器（WP-M7 = 舊 plan C1–C3）
 
@@ -560,6 +594,18 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 * udmabuf `size_limit_mb` 的 sysfs 提高（`:1156-1158`）對 `vpu_enabled` 的 VM 也做。
 * `droidvm up <vm_id|name>` CLI 動詞（`app/src/main/cpp/console/commands/`，送 `vm_start`）— 開發迭代必需。
 * Java 與 crosvm 必須一起上裝置（`deny_unknown_fields`，`config.rs:755-756`）。
+* **`log_level`（每台 VM 一個字串，預設 `info`；WP F15，缺陷 D60）**：`VmmLogLevel.java` 持有這個 key 與它的語法，
+  `buildCommand` 把它出成**頂層** `--log-level <filter>`——在 crosvm 執行檔與 `run` 之間，和 `--extended-status` 並排。
+  位置就是這個 key 存在的理由：`--log-level` 屬於 `CrosvmCmdlineArgs` 而不是 `run` 子命令，放在 `run` 之後
+  argh 會讓整個 parse 失敗（`Unrecognized argument: --log-level`，VM 直接回 stopped），所以 `extra_options`
+  這個縫**做不到**這件事（B11-acceptance §8 實測）。預設值不出旗標（crosvm 自己的預設就是 `info`），
+  所以現有的命令列一個 token 都不會變。值是 env_logger 的 filter：一個 level 名，或 `info,base=debug` 這樣的複合式；
+  沒有 `=` 的 directive 必須**本身是一個 level**（`verbose` 在這裡被拒，而不是變成一個叫 verbose 的模組 filter，
+  因為 env_logger 從不讓 parse 失敗，讀不懂就丟掉繼續跑）。setter 會丟例外（打字的人看得到），
+  命令列這一端只警告並退回預設（一個 log level 不該是 VM 開不起來的理由）。
+  這條與 **D57**（VMM 把自己的 level 轉給每個 helper：`/proc/self/exe --log-level <filter> device media …`）
+  合起來才是完整的一條鏈：在 F15 之前 D57 是對的但無從啟動，媒體堆疊裡每一個 `debug!` 在手機上都是死重。
+  rig 的動詞是 `deploy/vpu/vm.sh log-level <name> <value>`（§9）。
 
 ---
 
@@ -567,7 +613,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 
 * `deploy/vpu/` 新 rig：
   * `push_crosvm.sh`：`crosvm_out/` → `/data/local/tmp/crosvm_vpu.new` → `su cp` 到 `/data/data/cn.classfun.droidvm/usr/bin/crosvm`（先備份 `crosvm.bak.<date>`），逐檔 md5 驗證（`deploy/SETUP.md` 的 adb push 陷阱）。
-  * `vm.sh start|stop|status|argv|log <name>`：讀 `run/droidvmd-port.txt` + token，走 IPC（`logs/vpu_survey/raw-5566-vm/dvmipc.py` 的形狀，改成 repo 內腳本）；daemon 沒起就用 `DaemonHelper.java:138-151` 的指令拉起（記得 `>/dev/null 2>&1 </dev/null`）。
+  * `vm.sh start|stop|status|argv|log|log-level <name>`（`log-level` 是 WP F15 加的，見 §8 的 `log_level`）：讀 `run/droidvmd-port.txt` + token，走 IPC（`logs/vpu_survey/raw-5566-vm/dvmipc.py` 的形狀，改成 repo 內腳本）；daemon 沒起就用 `DaemonHelper.java:138-151` 的指令拉起（記得 `>/dev/null 2>&1 </dev/null`）。
   * `guest.sh ssh|scp|install-tools|install-deb`：從 `vms.json` 的 MAC 算 EUI-64（`poolvm.sh` 的 `eui()`），`apt-get install v4l-utils ffmpeg gstreamer1.0-tools gstreamer1.0-plugins-bad`。
   * `vm_extra.sh`：用 `vm_modify` 改 `extra_options`（VM 需 STOPPED），在 app 還沒接線前塞 `--pre-alloc media-host-mb=256,media-guest-mb=128 --virtio-media kind=loopback`。注意 `--pre-alloc` 單值：要把 daemon 自己出的 GPU 池那串合併（`extra_options` 排在 daemon 參數之後 → 後者覆蓋前者），所以 rig 要重組完整的一串。
 * 建置：`systemd-run --unit=droidvm-step2 --collect -p AllowedCPUs=0-7 -p Nice=10 --setenv=JOBS=8 bash -c 'taskset -c 0-7 ./2_build_crosvm.sh'`。
@@ -616,3 +662,23 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
    * **只有**當這批工作要成為預設（合併進各 fork 的 `droidvm`，或希望一個沒有 `wip/vpu` 的 meta 分支也能建出它）時，
      才需要動 manifest 的 `revision=`。那是一個獨立的決定，不是推送的前置。
    在你決定以前，這份建置（含 DKMS r21 的 deb）只存在於這台機器和那支手機上。
+
+   **七個 repo 上都有一個本地（未推送）的 tag `accepted-b11-2026-09-06`**（2026-09-06 WP F15 記錄）。
+   那是 **B11 驗收實際跑過的七個 head**，也是 `logs/vpu_wp/B11-acceptance.md` 裡每一個數字所屬的建置：
+
+   | repo | commit |
+   |---|---|
+   | `crosvm` | `114de78` |
+   | `crosvm_build/external/virtio-media`（fork） | `b19f620` |
+   | `crosvm_build/external/rust/crates/v4l2r` | `7eb3afa` |
+   | `droidvm-guest-additions` | `2c7f6ef` |
+   | `DroidVM`（app） | `b13bb2e` |
+   | `crosvm-minimal-manifest` | `8143624` |
+   | meta（本 repo） | `30ef120` |
+
+   分支名記不住一個建置——`wip/vpu` 會動，報告裡的「crosvm `114de78`」在下一個 WP commit 之後就找不回來了；
+   七個 tag 一起下才記得住。約定是 `accepted-<wp>-<date>`，七個全下或一個都不下
+   （只下一部分比不下更糟：讀的人會以為沒下的那幾個沒動過）。怎麼從 tag 重建，見
+   `deploy/vpu/README.md` 的「The `accepted-*` tags」。
+   **但 tag 只是配方，不是成品**：B11 驗收過的那顆二進位（md5 `a289e03fe6e16c6f7a1d8825cc99989a`、
+   14 271 944 bytes）現在**只存在於手機上**，這台機器的 `crosvm_out/` 早已被後續建置覆蓋。
