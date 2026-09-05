@@ -8,6 +8,18 @@
 #   vm.sh log      <name|id>   the daemon's "Executing:" line + the VM's stdio history
 #   vm.sh wait-ssh <name|id>   block until the guest answers ssh (default 240s)
 #
+#   vm.sh log-level <name|id> <filter|->   how loud the VMM is for this VM (defect D60)
+#
+# log-level stores the app's `log_level` key, which CrosvmBackendInstance emits as the TOP-LEVEL
+# `--log-level <filter>` -- between the crosvm binary and `run`, which is the only place argh
+# accepts it, and the reason extra_options cannot do this job. The filter is env_logger's: a level
+# name (`off error warn info debug trace`) or a compound (`info,devices::virtio::media=debug`).
+# `-` (or `info`) removes the key, which is crosvm's own default. The VM must be STOPPED, and
+# every helper crosvm launches inherits the level -- so this is what makes a `debug!` in the
+# camera, decoder or encoder backend reachable at all. Confirm after the next start with
+# `vm.sh argv <name> | grep -A1 -- --log-level`; a value the app refuses is dropped with a
+# warning in daemon.log and the VM starts at info.
+#
 # start, stop and stop-all end by asking hp.sh whether the hugepage module agrees: the memory a
 # VM holds is the first thing to move and the last thing to come back, so it says "it is really
 # up" / "it is really gone" long before ssh or vm_list do. The verdict is printed and never
@@ -105,6 +117,27 @@ stop)
         [ "$(vm_state "$(vm_info "$ID")")" = stopped ] && { echo stopped; hp expect off --wait 30 || true; exit 0; }
     done
     echo "still not stopped after 60s"; hp expect off --wait 0 || true; exit 1
+    ;;
+log-level)
+    VALUE=${3:-}
+    [ -n "$VALUE" ] || usage
+    # No validation here on purpose: VmmLogLevel.java is the one parser, and a second one in
+    # python would be a second answer to drift away from it. What this owes the operator is the
+    # way to see which answer the app gave -- hence the argv line below.
+    vm_config_edit "$NAME" '
+import json,sys
+cfg = json.load(sys.stdin)
+v = sys.argv[1]
+if v in ("-", "default", "info"):
+    cfg.pop("log_level", None)
+else:
+    cfg["log_level"] = v
+json.dump(cfg, sys.stdout)' "$VALUE" || exit 1
+    dvm get "$ID" | python3 -c '
+import json,sys
+v = (json.load(sys.stdin).get("data") or {}).get("log_level")
+print("log_level: %s" % (v if v else "(unset -- crosvm defaults to info)"))'
+    note "on the next start: $0 argv $NAME | grep -A1 -- --log-level"
     ;;
 argv)
     [ "$STATE" = running ] || die "$NAME is $STATE, no crosvm to inspect"
