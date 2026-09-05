@@ -56,7 +56,7 @@ restart stops every VM (`Daemon.cleanup`).
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
 | `vm_extra.sh` | `show\|set\|takeover\|restore\|clear <name>` — the VM's `extra_options` array |
-| `harness.sh` | `<gbt\|kvt\|kst\|mpt\|vmt\|acb\|all>` — the host-side cargo harnesses; no phone, no network |
+| `harness.sh` | `<gbt\|kvt\|kst\|mpt\|vmt\|acb\|acc\|acd\|all>` — the host-side cargo harnesses; no phone, no network |
 | `tests/pick_device.sh` | not a test: the guest-side snippet the three below prepend to their remote script to pick `/dev/videoN` **by capability** |
 | `tests/smoke_media.sh` | `[--mode output\|none\|all] <name>` — is there a working virtio-media device in the guest? |
 | `tests/compliance.sh` | `<name> [/dev/videoN]` — `v4l2-compliance -s` in the guest; the test for **D6** |
@@ -354,7 +354,7 @@ first, before it reads or sends anything.
 
 ```sh
 deploy/vpu/harness.sh vmt     # one harness
-deploy/vpu/harness.sh all     # all six, well under a minute from cold
+deploy/vpu/harness.sh all     # all eight, well under a minute from cold
 ```
 
 The only part of this rig that never touches the phone. Three crates that hold VPU code cannot
@@ -366,7 +366,8 @@ in those files run **here or nowhere**, and until now the little packages that r
 retyped by hand each work package (`M3.md` §9 item 5).
 
 `harness/<name>/` holds each one. Nothing in there is a copy of code under test: every harness
-names the real file, by `#[path]` include (`gbt`, `mpt`, `kst`, `acb`), by `[lib] path` (`vmt`), or by
+names the real file, by `#[path]` include (`gbt`, `mpt`, `kst`, `acb`, `acd`), as a path dependency
+(`acc`), by `[lib] path` (`vmt`), or by
 lifting the item out by name in a `build.rs` (`kvt`) — so a rename is a build failure, never a
 stale copy quietly passing.
 
@@ -376,13 +377,15 @@ stale copy quietly passing.
 | `kvt` | `MediaDeviceKind` (+ its support table) and `MediaDeviceConfig`: the `--virtio-media` command-line surface | 3 |
 | `kst` | `devices/src/virtio/media/kill.rs` — the worker's kill signal | 5 |
 | `mpt` | `devices/src/virtio/media/pool.rs` — the `media_host` pool allocator and its leases | 4 |
-| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (includes the camera device) | 37 |
+| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (the camera and the video decoder devices included) | 65 |
 | `acb` | `android_camera` (lib + `probe.rs`) and both halves of `media/android_camera_backend/` | 0 — a type-check; a failure here is a compile error |
+| `acc` | `android_codec` (lib + `codec_probe`), `-p android_codec`: the MediaImage2 / Annex-B / IVF / synth unit tests | 29 |
+| `acd` | both halves of `media/android_codec_backend/` -- the MediaCodec decoder backend -- against the fork's `video_decoder` device | 0 — a type-check, like `acb` |
 
 Each is staged into `${TMPDIR:-/tmp}/droidvm-harness/<name>` and built there, so the repo stays
 clean and `target/` survives between runs; the full log of each run is `<that dir>/<name>.log`.
-All of them are staged whichever one you ask for, because `mpt`'s and `acb`'s manifests point at
-`vmt`'s packages next door. `@W@` in a manifest is rewritten to this checkout's root as it is
+All of them are staged whichever one you ask for, because `mpt`'s, `acb`'s and `acd`'s manifests
+point at `vmt`'s packages next door. `@W@` in a manifest is rewritten to this checkout's root as it is
 staged — do not hardcode a path in one.
 
 Two things the harnesses depend on, and what to do when they break:

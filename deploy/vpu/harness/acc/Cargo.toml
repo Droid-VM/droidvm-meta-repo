@@ -1,0 +1,26 @@
+# acc -- crosvm's `android_codec` crate (lib + the codec_probe binary) built and unit-tested on
+# the dev box. The NDK is dlopen'd, so nothing Android-specific is needed at compile time; the
+# probe binary runs here only far enough to say "could not load libmediandk.so". The crosvm
+# workspace itself does not build under cargo on this box (logs/vpu_wp/M2.md §5.3), so without
+# this nothing on this host ever compiles or tests the crate (logs/vpu_wp/M6-probe.md §6).
+# deploy/vpu/harness.sh runs it as `cargo test -p android_codec`.
+#
+# `@W@` is rewritten to the meta repo root by deploy/vpu/harness.sh; do not hardcode a checkout.
+[package]
+name = "acc"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+android_codec = { path = "@W@/crosvm/android_codec" }
+base = { path = "@W@/crosvm/base" }
+libc = "0.2"
+
+[patch.crates-io]
+audio_streams = { path = "@W@/crosvm/common/audio_streams" }
+cros_async = { path = "@W@/crosvm/cros_async" }
+data_model = { path = "@W@/crosvm/common/data_model" }
+sync = { path = "@W@/crosvm/common/sync" }
+minijail = { path = "@W@/crosvm/third_party/minijail/rust/minijail" }
+zerocopy = { path = "@W@/crosvm_build/external/rust/android-crates-io/extra_versions/crates/zerocopy" }
+zerocopy-derive = { path = "@W@/crosvm_build/external/rust/android-crates-io/extra_versions/crates/zerocopy-derive" }

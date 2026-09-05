@@ -1,7 +1,7 @@
 #!/bin/bash
 # VPU dev rig: run one of the scratch cargo harnesses, or all of them.
 #
-#   harness.sh <gbt|kvt|kst|mpt|vmt|all>
+#   harness.sh <gbt|kvt|kst|mpt|vmt|acb|acc|acd|all>
 #
 # Why these exist. Three crates that hold VPU code cannot be tested with cargo on the dev box:
 # crosvm's `devices` (a pre-existing `rand` version mismatch, logs/vpu_wp/M2.md 5.3), crosvm's
@@ -18,6 +18,8 @@
 #   mpt  devices/src/virtio/media/pool.rs        (needs vmt for the allocator trait)
 #   vmt  the fork's device/ crate                (over a v4l2r built from the vendored sources)
 #   acb  the Android camera backend + probe      (a type-check: it runs no tests, it compiles)
+#   acc  android_codec (lib + codec_probe)        (the crate's unit tests)
+#   acd  the MediaCodec decoder backend          (a type-check, like acb)
 #
 # Each is staged into $TMPDIR/droidvm-harness/<name> and built there, so the repo stays clean and
 # `target/` survives between runs. All of them are staged whichever one you ask for, because
@@ -28,7 +30,7 @@ SP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 W="$(cd "$SP/../.." && pwd)"
 SRC="$SP/harness"
 ROOT="${TMPDIR:-/tmp}/droidvm-harness"
-NAMES="gbt kvt kst mpt vmt acb"
+NAMES="gbt kvt kst mpt vmt acb acc acd"
 JOBS="${JOBS:-32}"
 TOOLCHAIN="${TOOLCHAIN:-1.88.0}"
 
@@ -38,10 +40,11 @@ usage() {
 }
 
 # vmt is a workspace of two packages and only the fork's crate has tests worth running; v4l2r is
-# there to compile against.
+# there to compile against. acc's tests are android_codec's own, not the wrapper package's.
 cargo_args() {
     case "$1" in
         vmt) echo "-p virtio-media" ;;
+        acc) echo "-p android_codec" ;;
         *) echo "" ;;
     esac
 }
