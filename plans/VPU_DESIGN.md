@@ -433,8 +433,27 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
   `onAsyncOutputAvailable` → 取下一個排隊的 CAPTURE buffer 重排拷貝 → `releaseOutputBuffer(render=false)` → `FrameCompleted{bytes_used, timestamp, is_last: EOS flag}`；
   `onAsyncFormatChanged` → `StreamFormatChanged`（coded size、`min_output_buffers` = 4 + 保守值）；`onAsyncError` → `AMEDIACODEC_ERROR_RECLAIMED` 等 → error event、session dead。
   `drain()` = `queueInputBuffer(EOS)`；seek = `AMediaCodec_flush()` **然後 `start()`**（async 規則）；`AMediaCodec_stop` 阻塞，只在 Worker 上呼叫。
-* **驗收**：舊 plan B1（`codec_probe decode` 出正確 YUV、列出 Store 清單）、B2（guest `ffmpeg -c:v h264_v4l2m2m` 解成 rawvideo 對軟解做 md5/SSIM；DRC 片；中途 seek）、
+* **驗收**：舊 plan B1（`codec_probe decode` 出正確 YUV、列出 Store 清單）、B2（guest 解成 rawvideo 對軟解做 md5/SSIM；DRC 片；中途 seek）、
   B3（VP9、HEVC；AV1 待 guest 的 gst 1.28.1+ `v4l2av1dec`，5566 的 gst 是 1.28.2 → 可試）。全部在 helper（app uid）內跑；codec 不需要 FGS。
+  **驗收的客戶端是 GStreamer，不是 ffmpeg**（2026-09-06 依 `logs/vpu_wp/B9-acceptance.md` 修訂）：B9 §2 用
+  `v4l2h264dec` / `v4l2h265dec` / `v4l2vp9dec` 各自解到 EOS，輸出與軟解**逐位元相同**（h264 300 張、h265 300 張、vp9 60 張），
+  DRC 片 **120/120、兩段都出**（§2.3）。ffmpeg 的結果要照下面第一點讀。
+  * **D27（DRC 停在 60/120）與 D27b（drain 之後不續播；`-stream_loop 2` 只出 300/900）改記為 ffmpeg 客戶端的限制，不是裝置缺陷。**
+    同一個檔、同一個裝置，gst 走完 120/120（B9 §2.3），ffmpeg 五跑五次都停在 60（B9 §3.1）；而 ffmpeg 的 `v4l2m2m` 解碼器
+    **沒有 `.flush` callback**（`v4l2_m2m_dec.c` 的 `M2MDEC` 巨集，F11-decoder §(3) 讀過原始碼），所以第一次 EOF 之後
+    `s->draining` 一直為真、後續封包永遠不會入列。裝置這一側是合規的（crate 在 `DEC_CMD_START` 或 `STREAMOFF/STREAMON`
+    之後續播，fork 有單元測試釘住）。誠實的說法是「動態解析度切換可用；ffmpeg 的 `v4l2m2m` 客戶端不會重啟 CAPTURE」，
+    文件不再寫「裝置停在 60」。
+  * **D28 與 D48 是同一個缺陷**（B9 §3.3、§4.1）：codec 還無法從收到的位元流宣告格式時，第一個 OUTPUT buffer 被無限期扣住，
+    於是（a）`v4l2-compliance -d /dev/video1 -s` 卡在**第一個** streaming 子測試、（b）`ffmpeg -c:v h264_v4l2m2m` 解自家相機
+    錄出來的 mp4 一張都出不來（D44：ffmpeg 的 muxer 把 SPS/PPS 寫成 31 bytes 的獨立 sample，正好是那個「宣告不出來」的輸入）。
+    **這是唯一擋出貨的一條**，驗收門檻三條都要過：`pollrace.py /dev/video1 /tmp/small.h264` 要回得到 POLLOUT、
+    `ffmpeg -c:v h264_v4l2m2m -i cam.mp4` 要跑完、`v4l2-compliance -d /dev/video1 -s` 要過得了第一個 streaming 子測試。
+  * **`v4l2-compliance` 的預期值**（B9 §4 實測，三個節點）：解碼器不帶 `-s` 是 **48 / 46 / 2**，兩條失敗是
+    **D30**（`VIDIOC_G/S_PARM`，接受）與 **D50**（有了控制項表之後拒絕 `V4L2_EVENT_CTRL` 訂閱）；**D50 修好之後應回到 48 / 47 / 1**。
+    帶 `-s` 今天會掛（就是 D48），D48 修好之後才有數字，也才談得上驗收。編碼器 **48 / 48 / 0**（不帶 `-s`）與
+    **55 / 50 / 5**（帶 `-s`：一個根因 `v4l2-test-buffers.cpp(398): !g_bytesused(p)` 加四條連鎖 = **D43**，接受）；
+    相機 **59 / 56 / 3**（§7.1 那三條）。
 
 ### 7.3 編碼器（WP-M7 = 舊 plan C1–C3）
 
@@ -452,6 +471,15 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 * 兩個 codec 裝置都跑在 M3 helper；`--virtio-media kind=decoder[,allow_sw=true]` / `kind=encoder[,...]`，`uid=` 必填（一致的行程模型；codec 本身不需 FGS）。
 * driver 端的 G/S_PARM 衝突（D6.4）：decoder 裝置對 v4l2-compliance 要 ENOTTY、encoder 要有；解法是 fork 擴充 config 區塊（40 bytes 之後加一個「host 實作的 ioctl 位圖」），
   driver 據此 `v4l2_disable_ioctl`；舊 host（沒有欄位，讀到 0）視為全支援。在 M6 與 M7 之間做。
+* **ffmpeg 客戶端的已知限制（寫給使用者，四條都不是裝置缺陷；2026-09-06 依 B9-acceptance 補）**：
+  (1) **drain 的尾巴會少幾張**（D41）——`v4l2_context.c` 在 draining 期間只要 CAPTURE 佇列空了就設 `ctx->done = 1`，
+  不管裝置手上還握著幾張已解碼的畫格（F11-decoder §(5)），300 張進去約 288–291 張出來；裝置本身不掉張（C harness 300/300），
+  緩解方式是 `-num_capture_buffers <大一點>` 或改走 GStreamer。
+  (2) **動態解析度切換只出前半段**（D27）——ffmpeg 不重啟 CAPTURE；同一個檔 gst 是 120/120。
+  (3) **`-stream_loop` 不會續播**（D27b）——`v4l2m2m` 沒有 `.flush`，EOF 之後不再入列，900 張只出 300 張；
+  另外 `-stream_loop` 對 raw elementary stream 本來就沒有作用，要餵 mp4。
+  (4) **自家錄的 mp4 目前解不回來**（D44 + D48）——ffmpeg 的 muxer 把 SPS/PPS 寫成獨立的 31-byte sample，正好踩中 D48；
+  D48 修好之前請改用 GStreamer，或以 raw Annex-B 餵進去。
 * `ResourceManagerService` 搶回：helper 是 app uid 的子行程、AM 看得到 app 但看不到 helper → 按舊 plan §2.2 估價不到、不易被選為受害者；被搶回時 `AMEDIACODEC_ERROR_RECLAIMED` → session dead。
 
 ## 8. app / daemon（WP-A1）
