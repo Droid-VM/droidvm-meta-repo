@@ -211,6 +211,41 @@ print(sys.argv[2] if v is None else (v if isinstance(v, str) else json.dumps(v))
 # (StatusHandler.java:36-37). Normalise, so callers only ever compare against lowercase.
 vm_state() { vm_field "$1" state STOPPED | tr '[:upper:]' '[:lower:]'; }
 
+# --- editing a stored config --------------------------------------------------------------------
+# vm_config_edit <name-or-id> <python program> [argv...]
+#
+# Read the VM's stored config, pipe it through the program and vm_modify the result. The program
+# gets the config OBJECT (not the response envelope) as JSON on stdin and writes the new one to
+# stdout; `python3 -c CODE a b` puts the extra arguments in sys.argv[1:].
+#
+# Two things it refuses to paper over. `vm_modify` only accepts a STOPPED VM
+# (VMInstanceStore.java:105-108), so this says which VM is running rather than letting the call
+# fail inside the daemon; and it writes the daemon's IN-MEMORY store only -- files/vms.json is the
+# app editor's alone (app-daemon.md 5.4) -- so a change made here lasts until the next daemon
+# restart, and a daemon restart stops every VM (Daemon.cleanup). Re-apply after one.
+#
+# vm_extra.sh keeps its own copy of this shape because its `takeover --show` has to run the
+# program and send nothing. Nothing else needs that, so nothing else carries it.
+vm_config_edit() {
+    local name=$1 prog=$2; shift 2
+    local info id state tmp rc
+    info=$(vm_info "$name") || return 1
+    id=$(vm_field "$info" id)
+    state=$(vm_state "$info")
+    [ "$state" = stopped ] || die "$name is $state; vm_modify only accepts a STOPPED VM (VMInstanceStore.java:105-108)"
+    tmp=$(mktemp -t vm_config_edit.XXXXXX.json) || die "mktemp failed"
+    dvm get "$id" | python3 -c '
+import json,sys
+cfg = json.load(sys.stdin).get("data")
+if not cfg:
+    sys.exit("vm_get returned no config")
+json.dump(cfg, sys.stdout)' | python3 -c "$prog" "$@" > "$tmp"
+    rc=$?
+    [ "$rc" = 0 ] && { dvm modify "$tmp" >/dev/null; rc=$?; }
+    rm -f "$tmp"
+    return "$rc"
+}
+
 vm_running() {  # names of every VM the daemon currently has running, one per line
     dvm list | python3 -c '
 import json,sys
