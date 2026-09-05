@@ -379,25 +379,32 @@ capture-result callbacks（`ACameraCaptureSession_captureCallbacks`，8 欄位�
 gst `v4l2src ! fakesink` 跑通；另跑 `driver_owned_queues=all`（幀寫進 `media_guest`）與 pseudo-unprotected 各一輪。
 前置 smoke：先用既有 `camera_probe capture --uid <app uid>` 在 5566 上確認 app 前景 + FGS 下相機開得了（舊 plan §0 的量測從未在 5566 做過）。
 
-**已接受的 `v4l2-compliance` 失敗（D22 / D34，2026-09-05 定案，M5b 更新）**：M5 的控制項落地**之前**，
+**已接受的 `v4l2-compliance` 失敗（D22，2026-09-05 定案，B8 量測更新）**：M5 的控制項落地**之前**，
 `v4l2-compliance -d /dev/video0 -s` 在 5566 上跑完是 59 / 56 / 3（`logs/vpu_wp/B5-acceptance.md` §4.6）；
-控制項落地**之後**，同一支測試同一台機器是 **59 / 54 / 5**（`B7-ship.md` §5.3、`B7-controls.md` §15，兩次獨立跑出同一個數字），
-多出來的兩條都是控制項的：**D33**（`VIDIOC_QUERY_EXT_CTRL/QUERYMENU`）與 **D34**（`VIDIOC_G/S/TRY_EXT_CTRLS`）。
-**D33 已在 WP-M5b 修掉**（fork：`V4L2_CID_PRIVATE_BASE + n` 的 alias 在 `QUERYCTRL` / `QUERY_EXT_CTRL` / `QUERYMENU` /
-`G_CTRL` / `S_CTRL` 五個 ioctl 一致解析，跟 kernel 的 `find_private_ref` 一樣），所以**下一次 build 之後的驗收基準是
-59 / 55 / 4**；在那之前 B8 以 5 為準並逐條比對名字。
+控制項落地**之後**一度是 **59 / 54 / 5**（`B7-ship.md` §5.3、`B7-controls.md` §15），多出來的兩條都是控制項的：
+**D33**（`VIDIOC_QUERY_EXT_CTRL/QUERYMENU`，M5b 修掉：`V4L2_CID_PRIVATE_BASE + n` 的 alias 在五個 ioctl 一致解析）
+與 **D34**（`VIDIOC_G/S/TRY_EXT_CTRLS`，F10 修掉：compound payload 走 pool 內的 bounce buffer，即本節下面所說的設計選項 (a)）。
+**兩條都已經修好**，所以現在的基準回到落地前的數字：**59 / 56 / 3**（B8 §4 實測，`B8-acceptance.md` §4 逐條列名，
+且 `VIDIOC_G/S/TRY_EXT_CTRLS` 與 `VIDIOC_QUERY_EXT_CTRL/QUERYMENU` 兩項都讀 `OK`）。
 
-**四條不修、驗收以此為準**：
+**三條不修、驗收以此為準**：
 (1) `VIDIOC_S_FMT` 的 `testGlobalFormat`（`v4l2-test-formats.cpp:1161` `Global format mismatch`）——virtio-media 的格式
 屬於每個 `open(2)` 的 session 而不是裝置，這正是「每個 format 測試都能是一次獨立的 `v4l2-ctl` 呼叫」成立的原因；
 把 session 狀態上移到裝置等於重做整個 fork 的 session/stream 生命週期，不划算；
 (2)(3) `USERPTR (no poll)` 與 `USERPTR (select)`——compliance 送的是它自己 malloc 的指標，protected VM 下 host 不能碰
-（§2.3 / §2.4），B4 的 loopback 也是同樣這兩條，是**要求的行為**不是缺陷；
-(4) **D34**（`v4l2-test-controls.cpp:926` `g_ext_ctrls returned an error (14)`）——compound control 的 payload 是
-**應用自己那一頁**，而 camera 是 `HelperOnly`、helper 只能碰 pool（§6.2），所以 `VCAM_CID_AE_REGIONS` /
-`AF_REGIONS` 的 `G`、`S`、`TRY_EXT_CTRLS` 三個方向一律 `EFAULT`（B7-controls §9 三個方向都量過），
-tap-to-focus / tap-to-meter 在出貨組態上不可用。這條的處置是**設計題**（payload 經 pool 中轉，或收回這兩個 regions 控制項
-並停止宣告 tap-to-focus），不是 patch；在使用者裁決之前列為已接受的失敗，而**其餘 19 個控制項不受影響**。
+（§2.3 / §2.4），B4 的 loopback 也是同樣這兩條，是**要求的行為**不是缺陷。
+
+**D34 的收尾（原本列為第四條，已不再是）**：compound control 的 payload 是**應用自己那一頁**，而 camera 是
+`HelperOnly`、helper 只能碰 pool（§6.2），所以 `VCAM_CID_AE_REGIONS` / `AF_REGIONS` 的 `G`、`S`、`TRY_EXT_CTRLS`
+三個方向一度一律 `EFAULT`（B7-controls §9）。當時列出的兩個處置裡，**F10 走了 (a)：payload 經 pool 中轉**
+（driver r19 的 bounce buffer），六個方向都精確 round-trip、越界回 `ERANGE`、AF 真的會對焦（B8 §5），
+compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組態上**可用**，21 個控制項全數不受影響。
+
+**三個「有回音但不改變畫面」的模式（D36，advisory）**：`AUTO_N_PRESET_WHITE_BALANCE`、`COLORFX`、`SCENE_MODE`
+在 5566 上會被 HAL 接受並在 capture result 裡原值回報（ECHOED），但 YUV_420_888 的 reader session 拿到的畫素完全不變
+（B8 §6：`Negative` 的 luma/U/V 與 `None` 相同）。**保留這三個控制項並記為 advisory**：值收得下、讀得回、不保證有畫面效果；
+`V4L2_CTRL_FLAG_INACTIVE` 會是謊話，而 V4L2 沒有「best effort」旗標。判斷「HAL 丟掉」與「還沒輪到」要看
+**result 自己那一份 request**（`ACaptureRequest_getConstEntry`），不能數 result 的張數——後者就是 D47（F11-misc 修掉）。
 
 ### 7.2 解碼器（WP-M6 = 舊 plan B1–B3，2026-09-04 定案）
 
