@@ -1,0 +1,22 @@
+# The vendored v4l2r, over `external/rust/crates/v4l2r/lib/src`. Its own build.rs runs bindgen
+# 0.69, which is not in the cache; ours copies the bindings soong already generated (build.rs).
+[package]
+name = "v4l2r"
+version = "0.0.5"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+path = "@W@/crosvm_build/external/rust/crates/v4l2r/lib/src/lib.rs"
+
+[features]
+arch64 = []
+arch32 = []
+
+[dependencies]
+nix = { version = "0.29", features = ["ioctl", "mman", "poll", "fs", "event"] }
+bitflags = "2.4"
+thiserror = "1.0"
+anyhow = "1.0"
+log = "0.4.14"
+enumn = "0.1.6"

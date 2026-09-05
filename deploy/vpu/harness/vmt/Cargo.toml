@@ -1,0 +1,17 @@
+# vmt -- the virtio-media fork's `device/` crate, tested on the dev box.
+#
+# `cargo test` in the fork itself does not work: it wants nix 0.28, zerocopy 0.7 and v4l2r 0.0.5
+# (which builds bindgen 0.69), none of which is in this box's offline cargo cache. So this
+# workspace holds two packages whose `[lib] path` is the real source, with the versions the box
+# does have -- nix 0.29 (the same API subset soong links against), zerocopy 0.7.35 out of
+# android-crates-io, and a v4l2r whose build.rs reuses soong's generated bindings instead of
+# running bindgen (logs/vpu_wp/M2.md §5.2).
+#
+# `@W@` is rewritten to the meta repo root by deploy/vpu/harness.sh; do not hardcode a checkout.
+[workspace]
+members = ["virtio-media", "v4l2r"]
+resolver = "2"
+
+[patch.crates-io]
+zerocopy = { path = "@W@/crosvm_build/external/rust/android-crates-io/extra_versions/crates/zerocopy" }
+zerocopy-derive = { path = "@W@/crosvm_build/external/rust/android-crates-io/extra_versions/crates/zerocopy-derive" }

@@ -1,0 +1,21 @@
+# kvt -- the `--virtio-media` command-line surface: `MediaDeviceKind` (and its support table) out
+# of devices/src/virtio/media.rs, `MediaDeviceConfig` out of src/crosvm/config.rs, and the tests
+# that live beside each of them. Neither crate builds under cargo on the dev box, so build.rs
+# lifts the items out of the real files by name (never a copy kept here) and this package
+# compiles them against the real serde_keyvalue.
+#
+# `@W@` is rewritten to the meta repo root by deploy/vpu/harness.sh; do not hardcode a checkout.
+[package]
+name = "media_config_test"
+version = "0.0.1"
+edition = "2021"
+build = "build.rs"
+
+[features]
+# `#[cfg(feature = "media")]` comes along with the extracted items; crosvm builds them with it on.
+default = ["media"]
+media = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_keyvalue = { path = "@W@/crosvm/serde_keyvalue", features = ["argh_derive"] }

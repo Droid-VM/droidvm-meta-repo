@@ -1,0 +1,20 @@
+# kst -- crosvm's devices/src/virtio/media/kill.rs on its own. The `devices` crate does not build
+# under cargo on the dev box and soong runs no rust_test for aarch64 (logs/vpu_wp/F3-host.md
+# §3.3), so this is the only place kill.rs is executed. It depends on `base` and `anyhow` alone.
+#
+# `@W@` is rewritten to the meta repo root by deploy/vpu/harness.sh; do not hardcode a checkout.
+[package]
+name = "media_kill_test"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+base = { path = "@W@/crosvm/base" }
+
+[patch.crates-io]
+audio_streams = { path = "@W@/crosvm/common/audio_streams" }
+cros_async = { path = "@W@/crosvm/cros_async" }
+data_model = { path = "@W@/crosvm/common/data_model" }
+sync = { path = "@W@/crosvm/common/sync" }
+minijail = { path = "@W@/crosvm/third_party/minijail/rust/minijail" }

@@ -1,0 +1,23 @@
+# gbt -- crosvm's devices/src/virtio/media/guest_buf.rs, compiled and tested on its own because
+# the `devices` crate does not build under cargo on the dev box (logs/vpu_wp/M2.md §5.3).
+# guest_buf.rs depends only on `base`, `resources` and `vm_memory`, so it stands alone.
+#
+# `@W@` is rewritten to the meta repo root by deploy/vpu/harness.sh; do not hardcode a checkout.
+[package]
+name = "guest_buf_test"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+base = { path = "@W@/crosvm/base" }
+resources = { path = "@W@/crosvm/resources" }
+vm_memory = { path = "@W@/crosvm/vm_memory" }
+thiserror = "1"
+libc = "0.2"
+
+[patch.crates-io]
+audio_streams = { path = "@W@/crosvm/common/audio_streams" }
+cros_async = { path = "@W@/crosvm/cros_async" }
+data_model = { path = "@W@/crosvm/common/data_model" }
+sync = { path = "@W@/crosvm/common/sync" }
+minijail = { path = "@W@/crosvm/third_party/minijail/rust/minijail" }

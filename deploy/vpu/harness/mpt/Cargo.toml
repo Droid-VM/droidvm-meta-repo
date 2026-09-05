@@ -1,0 +1,32 @@
+# mpt -- crosvm's devices/src/virtio/media/pool.rs on its own. It depends on `base`, `resources`,
+# `sync`, `vm_memory` and the virtio-media crate's allocator trait; the `devices` crate that holds
+# it does not build under cargo on the dev box (logs/vpu_wp/P1-host.md §6).
+#
+# The `virtio-media` and `v4l2r` paths point at the `vmt` harness beside this one, so `vmt` has to
+# be staged first -- deploy/vpu/harness.sh stages all five whichever one you ask for.
+#
+# `@W@` is rewritten to the meta repo root by deploy/vpu/harness.sh; do not hardcode a checkout.
+[package]
+name = "media_pool_test"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+base = { path = "@W@/crosvm/base" }
+resources = { path = "@W@/crosvm/resources" }
+vm_memory = { path = "@W@/crosvm/vm_memory" }
+virtio-media = { path = "../vmt/virtio-media" }
+sync = { path = "@W@/crosvm/common/sync" }
+anyhow = "1"
+libc = "0.2"
+thiserror = "1"
+
+[patch.crates-io]
+audio_streams = { path = "@W@/crosvm/common/audio_streams" }
+cros_async = { path = "@W@/crosvm/cros_async" }
+data_model = { path = "@W@/crosvm/common/data_model" }
+sync = { path = "@W@/crosvm/common/sync" }
+minijail = { path = "@W@/crosvm/third_party/minijail/rust/minijail" }
+v4l2r = { path = "../vmt/v4l2r" }
+zerocopy = { path = "@W@/crosvm_build/external/rust/android-crates-io/extra_versions/crates/zerocopy" }
+zerocopy-derive = { path = "@W@/crosvm_build/external/rust/android-crates-io/extra_versions/crates/zerocopy-derive" }

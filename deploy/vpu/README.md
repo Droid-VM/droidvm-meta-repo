@@ -55,6 +55,7 @@ restart stops every VM (`Daemon.cleanup`).
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
 | `vm_extra.sh` | `show\|set\|takeover\|restore\|clear <name>` — the VM's `extra_options` array |
+| `harness.sh` | `<gbt\|kvt\|kst\|mpt\|vmt\|acb\|all>` — the host-side cargo harnesses; no phone, no network |
 | `tests/pick_device.sh` | not a test: the guest-side snippet the three below prepend to their remote script to pick `/dev/videoN` **by capability** |
 | `tests/smoke_media.sh` | `[--mode output\|none\|all] <name>` — is there a working virtio-media device in the guest? |
 | `tests/compliance.sh` | `<name> [/dev/videoN]` — `v4l2-compliance -s` in the guest; the test for **D6** |
@@ -296,6 +297,57 @@ you to have zeroed the daemon's keys first.
 `vm_modify` refuses a VM that is not `STOPPED`, so every writing verb of `vm_extra.sh` refuses
 first, before it reads or sends anything.
 
+### `harness.sh`
+
+```sh
+deploy/vpu/harness.sh vmt     # one harness
+deploy/vpu/harness.sh all     # all six, well under a minute from cold
+```
+
+The only part of this rig that never touches the phone. Three crates that hold VPU code cannot
+be tested with cargo on the dev box — crosvm's `devices` and `src/crosvm` (a pre-existing `rand`
+version mismatch, `logs/vpu_wp/M2.md` §5.3) and the virtio-media fork's `device/` (it wants nix
+0.28, zerocopy 0.7 and a v4l2r that builds bindgen 0.69, none of which is in this box's offline
+cargo cache) — and soong builds all three for aarch64 but runs no `rust_test`. So the unit tests
+in those files run **here or nowhere**, and until now the little packages that run them were
+retyped by hand each work package (`M3.md` §9 item 5).
+
+`harness/<name>/` holds each one. Nothing in there is a copy of code under test: every harness
+names the real file, by `#[path]` include (`gbt`, `mpt`, `kst`, `acb`), by `[lib] path` (`vmt`), or by
+lifting the item out by name in a `build.rs` (`kvt`) — so a rename is a build failure, never a
+stale copy quietly passing.
+
+| harness | what it runs | tests |
+|---|---|---|
+| `gbt` | `devices/src/virtio/media/guest_buf.rs` — the guest scatter-gather arena and the window policy | 8 |
+| `kvt` | `MediaDeviceKind` (+ its support table) and `MediaDeviceConfig`: the `--virtio-media` command-line surface | 3 |
+| `kst` | `devices/src/virtio/media/kill.rs` — the worker's kill signal | 5 |
+| `mpt` | `devices/src/virtio/media/pool.rs` — the `media_host` pool allocator and its leases | 4 |
+| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (includes the camera device) | 37 |
+| `acb` | `android_camera` (lib + `probe.rs`) and both halves of `media/android_camera_backend/` | 0 — a type-check; a failure here is a compile error |
+
+Each is staged into `${TMPDIR:-/tmp}/droidvm-harness/<name>` and built there, so the repo stays
+clean and `target/` survives between runs; the full log of each run is `<that dir>/<name>.log`.
+All of them are staged whichever one you ask for, because `mpt`'s and `acb`'s manifests point at
+`vmt`'s packages next door. `@W@` in a manifest is rewritten to this checkout's root as it is
+staged — do not hardcode a path in one.
+
+Two things the harnesses depend on, and what to do when they break:
+
+* **the offline cargo cache** (`~/.cargo/registry`). Every run is `--offline` and must stay that
+  way; the checked-in `Cargo.lock` of each harness is what pins it there. If cargo asks to
+  download something, the lock and the cache have diverged — say so rather than dropping
+  `--offline`.
+* **soong's generated v4l2r bindings**, which `vmt/v4l2r/build.rs` copies into `OUT_DIR` instead
+  of running bindgen (`crosvm_build/out/soong/.intermediates/.../libv4l2r_bindgen/…/bindings.rs`).
+  A crosvm soong build produces them; `V4L2R_BINDINGS_RS=<path>` overrides the search.
+
+Two kinds of noise are expected and are not findings. `mpt` prints three `dead_code` warnings
+against `pool.rs` (`next_owner`, `inner`, `lease`) — the cost of compiling one file of a crate on
+its own — and several harnesses open with `Patch ... was not used in the crate graph`, because
+the `[patch.crates-io]` block each one carries is crosvm's, wider than the few crates it pulls
+in. What matters is the last line, and `harness.sh`'s own `N passed, M failed` summary.
+
 ### `tests/smoke_media.sh`
 
 ```sh
@@ -421,3 +473,41 @@ restricted-dma-pool. All the media devices of one VM share the one `media_host` 
 
 If `start` comes back "went back to stopped", `vm.sh log` has the reason: crosvm rejects an
 unknown flag before the guest ever runs, and that lands in the `stdio` history.
+
+### A device helper is called `exe`, so find it by cmdline
+
+`--virtio-media kind=...,uid=N` and `--virtio-snd ...,uid=N` run the device's backend in a child
+process. The child execs `/proc/self/exe`, so its `comm` — the only thing toybox `ps` prints in
+`NAME` — is **`exe`**, and `ps -A | grep "crosvm device media"` finds nothing. That is not a
+missing helper; it is the process name. Two ways to see one:
+
+**In the log, at launch.** `vm.sh log <name>` now has one line per helper, written by the VMM
+just after the fork (defect D14, closed):
+
+```
+INFO  crosvm::crosvm::sys::linux::device_helpers] launched media helper: pid 766, uid 10367,
+      gid 10367, kind loopback, card lb0, pool_gpa 0x1b0000000, 5 access window(s)
+INFO  crosvm::crosvm::sys::linux::device_helpers] launched snd helper: pid 13279, uid 10367,
+      gid 10367, backend aaudio, card_index 0
+```
+
+**On the phone, by cmdline.** `/proc/<pid>/cmdline` is NUL-separated, so `device media` is only
+there once the NULs are spaces:
+
+```sh
+adb -s "$PHONE" shell su -c \
+  'for p in /proc/[0-9]*; do c=$(tr "\0" " " < $p/cmdline 2>/dev/null);
+   case "$c" in *"device media"*|*"device snd"*) echo "$p: $c";; esac; done'
+```
+
+which prints what `logs/vpu_wp/B4-acceptance.md` §5.1 quotes — the argv including the whole
+`--config-json`, so the kind, the `pool_gpa` and every access window are visible:
+
+```
+/proc/766: /proc/self/exe device media --fd 36 --config-json {"kind":"loopback",...}
+```
+
+`grep Uid: /proc/<pid>/status` then shows the uid it dropped to, and `Groups:` must be empty for
+a media helper (`logs/vpu_wp/M3.md` §2.1). A helper's pid is also labelled in the VMM, so if one
+dies the log says `child media helper (pid N) exited: ...` or `child snd helper (pid N) ...`
+rather than reporting an anonymous child.
