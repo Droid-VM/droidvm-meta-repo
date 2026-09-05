@@ -50,7 +50,7 @@ restart stops every VM (`Daemon.cleanup`).
 |---|---|
 | `lib.sh` | sourced by the rest: `PHONE`, root-shell helpers, daemon start/port/token, `adb forward`, VM lookup, EUI-64 guest address |
 | `dvmipc.py` | the JSON IPC client: `list`, `status`, `start`, `stop`, `stop-all`, `modify`, `get`, `console-history` |
-| `vm.sh` | `start\|stop\|status\|argv\|log\|wait-ssh <name>`, plus `stop-all\|daemon-check\|daemon-restart` |
+| `vm.sh` | `start\|stop\|status\|argv\|log\|log-level\|wait-ssh <name>`, plus `stop-all\|daemon-check\|daemon-restart` |
 | `hp.sh` | `status\|expect on\|expect off\|reclaim` — the hugepage watchdog: assert the VM state instead of sleeping |
 | `install_apk.sh` | `<apk>` → stop every VM, install, unpack the payload, restart the daemon, verify all of it |
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
@@ -83,7 +83,36 @@ deploy/vpu/vm.sh log      Ubuntu-resolute   # daemon's "Executing:" line + the V
 deploy/vpu/vm.sh start    Ubuntu-resolute
 deploy/vpu/vm.sh stop     Ubuntu-resolute
 deploy/vpu/vm.sh wait-ssh Ubuntu-resolute   # BUDGET=240 by default
+deploy/vpu/vm.sh log-level Ubuntu-resolute debug   # how loud the VMM is (defect D60)
+deploy/vpu/vm.sh log-level Ubuntu-resolute -       # back to crosvm's own info
 ```
+
+`log-level` is the one knob that makes a `debug!` readable on a phone at all, and it is worth
+knowing exactly what it does. It stores the app's per-VM `log_level` key, which
+`CrosvmBackendInstance` emits as a **top-level** `--log-level <filter>` — between the crosvm
+binary and `run`. That position is the whole point: `--log-level` is a `CrosvmCmdlineArgs`
+option, so after `run` argh fails the entire parse (`arg parsing failed: Unrecognized argument:
+--log-level`) and the VM goes straight back to stopped — which is exactly what happens if you try
+to smuggle it through `vm_extra.sh set`, and why that seam could not stand in for this
+(**D60**, `logs/vpu_wp/B11-acceptance.md` §8). Every media helper crosvm launches is exec'd with
+the VMM's own level (`/proc/self/exe --log-level <filter> device media …`, **D57**), so one verb
+moves the VMM and all three helpers together.
+
+The value is an `env_logger` filter: a level name — `off error warn info debug trace` — or a
+compound such as `info,devices::virtio::media=debug` or `debug,disk=off`. `-` (or `info`) deletes
+the key, which is crosvm's own default and emits no flag. The VM must be **stopped**
+(`vm_modify` accepts no other state), and the change lives in the daemon's memory only, so a
+daemon restart — an `install_apk.sh`, for one — drops it. Confirm it landed on the next start:
+
+```sh
+deploy/vpu/vm.sh log-level Ubuntu-resolute debug && deploy/vpu/vm.sh start Ubuntu-resolute
+deploy/vpu/vm.sh argv Ubuntu-resolute | grep -A1 -- --log-level    # before `run`, or it did not
+deploy/vpu/vm.sh log  Ubuntu-resolute | grep 'log level'           # each helper's launch line
+```
+
+The rig does not check the filter; `VmmLogLevel.java` is the one parser, and a value it refuses
+is dropped with a warning in `daemon.log` — the VM starts, at `info`, with no `--log-level` in
+its argv. So the `argv` line above is the check, not the absence of an error from this verb.
 
 `argv` is the ground truth for what the daemon actually emitted; `log` is the same argv as the
 daemon logged it (`CrosvmBackendInstance.java:183`) plus the boot output, which is where a
@@ -375,10 +404,10 @@ stale copy quietly passing.
 | harness | what it runs | tests |
 |---|---|---|
 | `gbt` | `devices/src/virtio/media/guest_buf.rs` — the guest scatter-gather arena and the window policy | 8 |
-| `kvt` | `MediaDeviceKind` (+ its support table) and `MediaDeviceConfig`: the `--virtio-media` command-line surface | 3 |
+| `kvt` | `MediaDeviceKind` (+ its support table) and `MediaDeviceConfig`: the `--virtio-media` command-line surface | 4 |
 | `kst` | `devices/src/virtio/media/kill.rs` — the worker's kill signal | 5 |
-| `mpt` | `devices/src/virtio/media/pool.rs` — the `media_host` pool allocator, its leases and the per-helper slice carve (D49) | 6 |
-| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (the camera and the two video codec devices included) | 124 |
+| `mpt` | `devices/src/virtio/media/pool.rs` — the `media_host` pool allocator, its leases, and the VMM-side tube that answers every helper's `Reserve`/`Release` (D49, M8) | 11 |
+| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (the camera and the two video codec devices included) | 127 |
 | `acb` | `android_camera` (lib + `probe.rs`) and both halves of `media/android_camera_backend/` | 0 — a type-check; a failure here is a compile error |
 | `acc` | `android_codec` (lib + `codec_probe`), `-p android_codec`: the MediaImage2 / Annex-B / IVF / synth unit tests | 31 |
 | `acd` | both halves of `media/android_codec_backend/` -- the MediaCodec decoder and encoder backends -- against the fork's `video_decoder` and `video_encoder` devices | 0 — a type-check, like `acb` |
@@ -399,11 +428,13 @@ Two things the harnesses depend on, and what to do when they break:
   of running bindgen (`crosvm_build/out/soong/.intermediates/.../libv4l2r_bindgen/…/bindings.rs`).
   A crosvm soong build produces them; `V4L2R_BINDINGS_RS=<path>` overrides the search.
 
-Two kinds of noise are expected and are not findings. `mpt` prints three `dead_code` warnings
-against `pool.rs` (`next_owner`, `inner`, `lease`) — the cost of compiling one file of a crate on
-its own — and several harnesses open with `Patch ... was not used in the crate graph`, because
-the `[patch.crates-io]` block each one carries is crosvm's, wider than the few crates it pulls
-in. What matters is the last line, and `harness.sh`'s own `N passed, M failed` summary.
+Two kinds of noise are expected and are not findings. Several harnesses open with `Patch ... was
+not used in the crate graph`, because the `[patch.crates-io]` block each one carries is crosvm's,
+wider than the few crates it pulls in; and a few print `dead_code` and `deprecated` warnings from
+`zerocopy` and `base`, which are the cost of compiling one file of a crate on its own. (`mpt`
+used to add three of its own against `pool.rs` — `next_owner`, `inner`, `lease`. M8 gave all
+three a caller, and they are gone.) What matters is the last line, and `harness.sh`'s own
+`N passed, M failed` summary.
 
 ### `tests/smoke_media.sh`
 
@@ -537,6 +568,50 @@ is a different half of the same contract, and a later one assumes the earlier on
 reaches into the VM's GPU pool sizes to buy one command-line slot, and nothing outside this rig
 knows it did.
 
+### The `accepted-*` tags: getting back to a build that was accepted
+
+Nothing here is pushed. Seven repositories carry the VPU work — the meta checkout, `crosvm`,
+the `virtio-media` fork, `DroidVM` (the app), `droidvm-guest-additions`, `v4l2r` and
+`crosvm-minimal-manifest` — and a build is the seven of them *together*, which is exactly what a
+branch name does not record: `wip/vpu` moves, and an acceptance report's "crosvm `114de78`" stops
+being findable the moment a later work package rebases nothing and simply commits.
+
+So each accepted build gets one **local, unpushed** tag of the same name on all seven repos:
+
+```
+accepted-b11-2026-09-06   crosvm 114de78 · fork b19f620 · v4l2r 7eb3afa · guest-additions 2c7f6ef
+                          app b13bb2e · manifest 8143624 · meta 30ef120
+```
+
+Those are the heads WP **B11-acceptance** ran on, and the ones every number in that report
+belongs to. The convention is `accepted-<wp>-<date>`, one tag per repo, all seven or none —
+a partial set is worse than no set, because it reads as if the missing repos did not move.
+
+To put the whole build back in front of you, in a scratch worktree that touches nothing:
+
+```sh
+W=/root/gitrs/DroidVM/DroidVM_wip_vpu
+T=accepted-b11-2026-09-06
+for r in . crosvm crosvm_build/external/virtio-media DroidVM droidvm-guest-additions \
+         crosvm-minimal-manifest crosvm_build/external/rust/crates/v4l2r; do
+    git -C "$W/$r" rev-parse --short "$T"                 # is the tag there at all?
+    git -C "$W/$r" worktree add "/tmp/accepted/$r" "$T"   # a detached checkout, repo untouched
+done
+```
+
+then build from `/tmp/accepted` the ordinary way (`1_build_crosvm_prepare.sh` and friends), and
+`git worktree remove` each one afterwards. Two things this does **not** give you:
+
+* **the binary itself.** The accepted crosvm of B11 — md5 `a289e03fe6e16c6f7a1d8825cc99989a`,
+  14 271 944 bytes — exists **only on the phone**; `crosvm_out/` on this box has been overwritten
+  since. The tags are the recipe, not the loaf. Take an md5 of `/system/bin/crosvm` on the phone
+  before and after anything that could replace it, and compare it against the acceptance report.
+* **a guest.** The DKMS deb the guest is running (r21 at B11) is built from the tagged
+  guest-additions tree, but the guest itself is state on the phone.
+
+`git tag -l 'accepted-*'` in any of the seven lists what exists. Tags are cheap and local; make
+one at the end of an acceptance that passed, and never move one that exists.
+
 ### `media-host-mb` is not optional on Gunyah
 
 On a Gunyah host, crosvm refuses to start a VM that has a `--virtio-media` device and no
@@ -658,14 +733,16 @@ helper itself just above it.
 
 ## Measurement traps
 
-Six ways a run has silently lied to a work package. Each one cost a session; none of them
+Seven ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
 > stream; ffmpeg needs `-fps_mode passthrough` on **both** sides before comparing hw/sw decode
 > md5s of a VFR camera capture; `v4l2-ctl --wait-for-event=ctrl=` wants the control **NAME**;
 > `vm.sh log` is a 1 MiB ring — snapshot it between steps; `install_apk.sh`'s daemon restart
-> resets the VM config (re-apply, and diff against a known-good dump).
+> resets the VM config (re-apply, and diff against a known-good dump); and **never measure this
+> decoder with a raw elementary stream through ffmpeg at all** — default vsync writes 3 frames
+> of 300 while the device decodes all 300.
 
 And at length:
 
@@ -713,7 +790,37 @@ to re-apply, `cfg.sh show` to read the keys back, against `scratch-A5/04_cfg_vpu
 reference for a VPU-on VM. A silent config reset reads exactly like a regression in whatever you
 changed, which is what makes it expensive.
 
+**7. ffmpeg's default vsync writes 3 frames of 300 from a raw Annex-B stream** (**D32**). A raw
+elementary `.h264` carries no container timestamps, so every frame ffmpeg decodes arrives with
+the same one, and its default CFR output keeps the first and drops the rest:
+
+```
+ffmpeg -c:v h264_v4l2m2m -i 720p.h264 -f rawvideo -pix_fmt nv12 out.raw
+frame=    3 fps=0.0 ... dup=0 drop=298
+```
+
+Three frames of 300, and **the software decoder writes 300**, so the two do not even have the
+same length to compare. The device is innocent and says so in the VM log —
+`300 bitstream buffers in, 300 frames out, 1 format change(s)`, five sessions in a row — and this
+predates every 2026-09 decoder fix: B9's own artefact `ff_hw.raw` is 4 147 200 bytes, which is
+those same 3 frames (`logs/vpu_wp/B11-acceptance.md` §4.3).
+
+`-fps_mode passthrough` (`-vsync 0` on older ffmpeg) fixes the dropping — and then you meet the
+*second* half of the trap: on the same file it writes **159** frames, because ffmpeg's
+`v4l2m2m` decoder has no `.flush` callback and stops feeding after its first EOF
+(`178 bitstream buffers in, 167 frames out`; **D27**/**D41**, `logs/vpu_wp/F11-decoder.md`). So
+passthrough makes the number honest without making it 300.
+
+The rule is therefore not a flag but a choice of client: **measure this decoder with GStreamer**
+(`v4l2h264dec` on the same file decodes 300/300, bit-exact against software), or with ffmpeg on a
+**container**. Reach for a raw elementary stream only when the raw stream is the subject — a
+short truncated one for `pollrace.py`, say — and never for a frame count.
+
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
-launch line above (**D57**). `crosvm --log-level debug run ...` is what forwards it; before that
-fix, no helper `debug!` ever reached a phone log at all.
+launch line above (**D57**). `crosvm --log-level debug run ...` is what forwards it to every
+helper; before that fix no helper `debug!` ever reached a phone log at all, and for two rounds
+after it nothing on the phone could set the level either (**D60**). Both ends exist now:
+`deploy/vpu/vm.sh log-level <name> debug`, then start the VM. If a `debug!` you are sure about
+still does not appear, check `vm.sh argv` for a `--log-level` **before** `run` — that, and not
+the backend, is where this usually goes wrong.
