@@ -1,0 +1,33 @@
+# acd -- a type-check, not a test run: BOTH halves of devices/src/virtio/media/android_codec_backend/
+# (android.rs, which is normally cfg'd to Android but uses nothing Android-specific at compile
+# time -- the NDK is dlopen'd -- and stub.rs), against the real `android_codec` crate and the
+# fork's `video_decoder` device. The `devices` crate does not build under cargo on the dev box,
+# so without this nothing on this host ever compiles those two files (the `acb` harness does the
+# same for the camera backend). `cargo test` here runs zero tests; a failure is a compile error,
+# which is the whole point.
+#
+# The `virtio-media` path is the vmt harness's package next door, so vmt has to be staged first --
+# deploy/vpu/harness.sh stages all of them whichever one you ask for.
+#
+# `@W@` is rewritten to the meta repo root by deploy/vpu/harness.sh; do not hardcode a checkout.
+[package]
+name = "acd"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+android_codec = { path = "@W@/crosvm/android_codec" }
+base = { path = "@W@/crosvm/base" }
+virtio-media = { path = "../vmt/virtio-media" }
+anyhow = "1"
+libc = "0.2"
+
+[patch.crates-io]
+audio_streams = { path = "@W@/crosvm/common/audio_streams" }
+cros_async = { path = "@W@/crosvm/cros_async" }
+data_model = { path = "@W@/crosvm/common/data_model" }
+sync = { path = "@W@/crosvm/common/sync" }
+minijail = { path = "@W@/crosvm/third_party/minijail/rust/minijail" }
+v4l2r = { path = "../vmt/v4l2r" }
+zerocopy = { path = "@W@/crosvm_build/external/rust/android-crates-io/extra_versions/crates/zerocopy" }
+zerocopy-derive = { path = "@W@/crosvm_build/external/rust/android-crates-io/extra_versions/crates/zerocopy-derive" }

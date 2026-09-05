@@ -1,6 +1,6 @@
 # The fork's device crate. Dependencies are `device/Cargo.toml`'s, with nix relaxed to the 0.29
 # in the box's cache and v4l2r taken from the sibling package; `[features]` mirrors the fork's,
-# camera-device included (added by M4).
+# camera-device (M4) and video-decoder-device (M6-crate) included.
 [package]
 name = "virtio-media"
 version = "0.0.6"
@@ -21,7 +21,8 @@ v4l2r = { path = "../v4l2r", features = ["arch64"] }
 zerocopy = { version = "0.7.31", features = ["derive"] }
 
 [features]
-default = ["simple-device", "loopback-device", "camera-device"]
+default = ["simple-device", "loopback-device", "camera-device", "video-decoder-device"]
 simple-device = []
 loopback-device = []
 camera-device = []
+video-decoder-device = []
