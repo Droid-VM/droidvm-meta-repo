@@ -566,38 +566,42 @@ just after the fork (defect D14, closed):
 
 ```
 INFO  crosvm::crosvm::sys::linux::device_helpers] launched media helper: pid 766, uid 10367,
-      gid 10367, kind loopback, card lb0, pool_gpa 0x1b0000000, pool slice 0x0+0x4000000,
-      5 access window(s), log level info
+      gid 10367, kind loopback, card lb0, pool_gpa 0x1b0000000, pool served by the VMM over
+      fd 37, 5 access window(s), log level info
 INFO  crosvm::crosvm::sys::linux::device_helpers] launched snd helper: pid 13279, uid 10367,
       gid 10367, backend aaudio, card_index 0, log level info
 ```
 
 Two fields on that line are worth knowing by name:
 
-* **`pool slice <start>+<len>`** — which part of the `media_host` pool this helper may allocate
-  from. Every helper of one VM maps the same pool, and until D49 each built a private allocator
-  over the whole window, so two helpers handed out the same offsets and the encoder's coded
-  frames landed inside the camera's raw buffers. The VMM now carves the window once, in
-  configuration order, and this is the answer for this helper. On the shipped
-  camera + decoder + encoder VM over a 256 MiB pool that is `0x0+0x4000000` (64 MiB, camera),
-  `0x4000000+0x8000000` (128 MiB, decoder), `0xc000000+0x4000000` (64 MiB, encoder) —
-  `grep 'pool slice'` the log to see all three at once. `whole pool` instead of a range means
-  this VM has one allocating media device and the carve was not needed. The other half of the
-  pair is written by the helper itself, once, as it comes up — the same slice seen from inside:
+* **`pool served by the VMM over fd <N>`** — this helper does not allocate from the
+  `media_host` pool at all: since **M8** the VMM holds the VM's one allocator, and the helper
+  reserves and releases every buffer offset over the `--pool-fd <N>` tube on that line (the fd
+  number is the launch line's identifier for the connection). Every helper still maps the whole
+  pool; what D49's aliasing and F12's static slices used to police is now structural — one
+  allocator, so two helpers can never be handed the same offset, and the space one device frees
+  is space any other can have (a 4K decode can take ~190 MiB while the camera idles, which no
+  128 MiB slice allowed). The helper's own half of the pair, once, as it comes up:
 
   ```
-  INFO  ... virtio-media: serving MMAP buffers from the media_host pool slice 0x4000000+0x8000000
-        (gpa 0x1b0000000, 128 of 256 MiB)
+  INFO  ... virtio-media: serving MMAP buffers from the media_host pool (gpa 0x1b0000000,
+        256 MiB), allocated by the VMM
   ```
 
-  So `grep -E 'pool slice|pool exhausted' <log>` is the whole story: three launch lines, three
-  serving lines, and nothing else. **`media_host pool exhausted for "<card>": N bytes requested
-  with M of P in use`** is now a loud, attributable `ERROR` (the client gets `ENOMEM` from
-  `REQBUFS`/`CREATE_BUFS`) inside one slice, where the aliased whole pool used to corrupt
-  neighbours silently. If a client legitimately needs more — ffmpeg's v4l2m2m asks ~20 CAPTURE
-  buffers, ~190 MiB at 4K, against the decoder's 128 MiB — raise `media-host-mb` (the app's
-  `VpuConfig`, default 256) rather than reading it as a bug. The weights are policy, not a
-  measurement: `VPU_DESIGN.md` §6.2 says where they come from.
+  So `grep -E 'pool served by the VMM|allocated by the VMM|pool exhausted|pool connection' <log>`
+  is the whole story: three launch lines, three serving lines, any exhaustion, and every
+  connection teardown. **`media_host pool exhausted for "<card>": N bytes requested with M of P
+  in use`** is still the loud, attributable `ERROR` (the client gets `ENOMEM` from
+  `REQBUFS`/`CREATE_BUFS`), now only when the whole VM's pool is genuinely full — raise
+  `media-host-mb` (the app's `VpuConfig`, default 256) only if the devices' *combined* working
+  set really outgrows it. The `<card>` in the pool lines is the string the guest's
+  `v4l2-ctl --info` shows (`droidvm decoder`, `camera 0`, ...): the helper introduces itself on
+  the tube and the VMM adopts its card for the pool log lines and the `media pool <card>`
+  server thread (`ps -T`; comm clips at 15 bytes). Two more lines worth greping: every release
+  is followed by `pool: "<card>" holds N bytes, pool used M of S` — the accounting, live — and
+  a helper that goes away leaves `the pool connection for "<card>" is closed` plus
+  `reclaiming N media_host buffers from a device that went away` as the VMM sweeps its lease
+  back into the pool.
 * **`log level <filter>`** — the filter the child was exec'd with, which is now the VMM's own
   (`crosvm --log-level debug run ...` → `log level debug`). Before **D57** the helper was exec'd
   with no `--log-level` at all and crosvm's syslog reads no environment variable, so every helper
@@ -618,7 +622,7 @@ which prints what `logs/vpu_wp/B4-acceptance.md` §5.1 quotes — the argv inclu
 `--config-json`, so the kind, the `pool_gpa` and every access window are visible:
 
 ```
-/proc/766: /proc/self/exe device media --fd 36 --config-json {"kind":"loopback",...}
+/proc/766: /proc/self/exe device media --fd 36 --config-json {"kind":"loopback",...} --pool-fd 37
 ```
 
 `grep Uid: /proc/<pid>/status` then shows the uid it dropped to, and `Groups:` must be empty for

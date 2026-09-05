@@ -18,6 +18,14 @@ const ITEMS: &[(&str, &str)] = &[
     ("devices/src/virtio/media.rs", "pub enum MediaDeviceSupport {"),
     ("devices/src/virtio/media.rs", "impl MediaDeviceKind {"),
     ("devices/src/virtio/media.rs", "mod media_device_kind_tests {"),
+    (
+        "devices/src/virtio/vhost/user/device/media.rs",
+        "pub struct MediaBackendParams {",
+    ),
+    (
+        "devices/src/virtio/vhost/user/device/media.rs",
+        "mod media_backend_params_tests {",
+    ),
     ("src/crosvm/config.rs", "pub struct MediaDeviceConfig {"),
     (
         "src/crosvm/config.rs",

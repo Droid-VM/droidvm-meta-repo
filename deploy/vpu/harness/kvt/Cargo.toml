@@ -19,3 +19,6 @@ media = []
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_keyvalue = { path = "@W@/crosvm/serde_keyvalue", features = ["argh_derive"] }
+
+[dev-dependencies]
+serde_json = "1"

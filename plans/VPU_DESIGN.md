@@ -299,7 +299,7 @@ struct vmedia_dbuf {                 /* 每個 driver-owned plane 一個 */
 
 | 題目 | 決定 |
 |---|---|
-| 池的交接 | `--pool-gpa <gpa>` 一個數字 + `--pool-slice (offset, len)`（`MediaBackendParams.pool_slice`，`serde(default)`）；backend 在第一次 `start_queue`（mem table 已到）時從 region 表重建 `MediaPoolHandle`，allocator 懶初始化，**但只在自己那一片切片內配置**。切片的規則見下方「池切片交接」——原本這一格只寫「allocator 懶初始化」，那就是 D49 的洞 |
+| 池的交接 | `--pool-gpa <gpa>` 一個數字 + `--pool-fd <fd>` 一條 `base::Tube`（`SOCK_SEQPACKET` socketpair，CLOEXEC 與 `--fd` 同法清掉、必填參數——舊 VMM 配新 helper 在 argv 解析就大聲失敗）；backend 在第一次 `start_queue`（mem table 已到）時從 region 表重建 `MediaPoolHandle`、自己 mmap 整個池（`MappedPool`），**但完全不配置**：每個 offset 都經 tube 向 VMM 要（M8 取代 F12 的切片；規則見下方「池由 VMM 統一配置」） |
 | Bar 模式 out-of-process | **不支援**。`uid=` 且無 `media_host` 池 → 裝置建立時拒絕（訊息說明）。Gunyah 與有池的 KVM 都走池模式 |
 | host 存取的重新閘門 | VMM 從自己的 `GuestMemory`（有 purpose、有 protected）算出「host 可碰的 GPA 視窗」清單（所有池、`StaticSwiotlbRegion`、`SharedGuestRam`、`ShimHandoff`、`SharedFramebuffer`；非保護 VM 則整段 RAM），放進 JSON config；backend 的 `GuestMemoryMapper` 以 `HostAccessPolicy::Windows` 對每條 SG entry range-check，越界回 `EFAULT`。in-VMM 用 `HostAccessPolicy::GuestMemory`（今天的 `check_host_access`）。同一個 trait，兩個實作 |
 | 兩條 queue | stash-and-start：兩條都 `start_queue` 後才起 `Worker` 執行緒（與 in-VMM 同一個 `Worker`，抽成共用） |
@@ -308,32 +308,42 @@ struct vmedia_dbuf {                 /* 每個 driver-owned plane 一個 */
 | udmabuf | helper 內 `/dev/udmabuf` 開不了（0600 root）→ `dmabuf()` 回 Err；v1 無消費者，維持 |
 | 啟動 | `snd_helper.rs` 泛化為 `device_helper::launch(subcommand, params_json, uid, gid, supp_gids)`；exec 不 fork；`PR_SET_PDEATHSIG`；pid 進 `worker_process_pids` 與 `pid_debug_label_map`（crash log 才有名字） |
 
-**池切片交接（2026-09-06 依 `logs/vpu_wp/F12-encoder.md` 補；缺陷 D49）。**
-`pool.rs` 自己寫著這個不變式：池「必須是整個 VM 共用的 —— 兩個各自持有私有 allocator 的裝置在同一個視窗上都會發出
-offset 0、0x1000、…，guest 就把同一段實體記憶體映射成兩個互不相干的 buffer」。共用的 `MediaPool` 對 **VMM 內**的裝置
-確實保證了這件事；但相機、解碼器、編碼器三個都是 `HelperOnly`，各自是一個 `crosvm device media` 行程，
-`vhost/user/device/media.rs::start()` 各自 `pool_handle_at(&mem, pool_gpa)` → `MediaPool::new(handle)`，
-於是三個行程在**同一個 256 MiB 視窗**上各建一個從 0 開始的 allocator ——
-正是本節上一版寫的「allocator 懶初始化」。實測後果：相機 → `v4l2h264enc` 3840x1644 時，編碼器的 CAPTURE（位元流）
-buffer 落在相機 raw buffer 內部，每寫一張編碼幀就塗掉一塊，139 張裡 9 張出現一條「把位元流當成像素讀」的雜訊帶，
-起點正好對齊 page、長度正好是一張編碼幀（B9 §4、F12-encoder §1.2–1.3）。單一 helper 的每一個對照組都是乾淨的，
-因為那時只有一個 allocator。
+**池由 VMM 統一配置（2026-09-06 M8 取代 F12 的靜態切片；缺陷 D49、F12 追蹤項 1、review-m8）。**
+`pool.rs` 的不變式沒變：池「必須是整個 VM 共用的——兩個各自持有私有 allocator 的裝置在同一個視窗上都會發出
+offset 0、0x1000、…，guest 就把同一段實體記憶體映射成兩個互不相干的 buffer」。D49 的洞是三個 `HelperOnly`
+行程各自在同一個 256 MiB 視窗上重建 allocator；F12 用靜態切片（權重 64/128/64）堵住了 aliasing，但切片是牆：
+ffmpeg 的 4K 解碼要 ~20 個 CAPTURE buffer（~190 MiB），無論相機和編碼器多閒也塞不進解碼器的 128 MiB 切片
+（F12-encoder §4.1、B10 §4.1 觀察項）。M8 拆牆的方式是拆掉 helper 的 allocator 本身。
 
-**規則**：VMM 在建立裝置前，依設定順序對整個池的 offset 空間切一次（`pool.rs::carve_slices(size, weights)`，
-page 對齊、完全覆蓋、餘數給最後一個會配置的切片），把 `(offset, len)` 隨 params 交給每個 helper；
-helper 以 `MediaPool::with_slice` 只在切片內配置，越界就是 `ENOMEM`，不會是鄰居的位元組。
-guest 可見的契約不變（offset 仍在 `[0, pool.size)`，guest 仍映射 `media_host base + offset`）。
-只有一個會配置的媒體裝置時不切，行為與今天相同（`pool_slice` 是 `Option`，舊 VMM 的 JSON 也照舊）。
-VMM 內若同時存在 pool 使用者，它們合佔一片，否則未來的 in-VMM 裝置又會和 helper 互疊。
+**規則**：整個 VM 只有一個 allocator——VMM 內的 `MediaPoolAllocator`。in-VMM 裝置照舊直接持 lease；
+helper 完全不配置：經 `--pool-fd` 向 VMM 要每一個 offset，自己只保留整池的 mmap（`MappedPool`）
+在拿到的 offset 上建 `HostBuffer`。VMM 為每個 helper 起一條 `media pool <card>` 執行緒，持有該 helper 的
+lease、逐一回答（pool 鎖只在 reserve/unreserve 內、不跨 tube 操作；client 的 send/recv 與 server 的 send
+都以 `POOL_RPC_TIMEOUT`（5 s）為界）。guest 可見的契約不變（offset 仍在 `[0, pool.size)`，guest 仍映射
+`media_host base + offset`）；`MediaBackendParams` 不再有 `pool_slice`（`deny_unknown_fields` 讓混版 JSON
+大聲失敗），權重、`carve_slices`、`with_slice` 全數移除。
 
-**權重是政策，不是量測**：目前解碼器 2、相機 1、編碼器 1（解碼器的 CAPTURE 側要壓著一整排已解碼的幀），
-256 MiB 池上就是相機 `0x0+0x4000000`(64 MiB)、解碼器 `0x4000000+0x8000000`(128 MiB)、編碼器 `0xc000000+0x4000000`(64 MiB)。
-這組數字涵蓋 B9/B10 量到的一切，但**一個切片有可能比從前「看起來能用」的整池小**：ffmpeg 的 v4l2m2m 解碼會要約 20 個
-CAPTURE buffer，4K 下約 190 MiB > 解碼器的 128 MiB。真的撞到時是一行 `media_host pool exhausted for "<card>"`
-的 `ERROR` 加客戶端的 `ENOMEM`——吵、可歸因，而不是從前那種安靜的踩踏；處置是調權重或把 `media-host-mb`（app `VpuConfig`，預設 256）加大。
-4K 這條至今未量（B10 全程 0 次 exhausted），列為觀察項。切片在 log 裡兩行可見：VMM 的
-`launched media helper: ... pool slice 0x4000000+0x8000000` 與 helper 自己的
-`serving MMAP buffers from the media_host pool slice ...`（`deploy/vpu/README.md`）。
+**協定**（`pool.rs`，serde-JSON over `SOCK_SEQPACKET`，不傳 fd）：`Hello{card}` 是新 tube 上的第一則、
+唯一不回答的訊息——helper 報上自己真正的 card 字串（`droidvm decoder`、`camera <id>`…），server 執行緒此後的
+log 行與執行緒名都採用它（VMM 的 launch 行保留 kind + card 供對照）。其餘都帶 `id`（client 的計數器）：
+`Reserve{id,len}` → `Reserved{id,offset}` / `Errno{id,errno}`（`ENOMEM`＝池滿、`EINVAL`＝零或荒謬長度）；
+`Release{id,offset}` → `Released{id}`（非本人的 offset 由 VMM 記 error 並拒絕、仍回 ack）；
+`ReleaseAll{id}` → `Released{id}`（＝`release_owner` 但 lease 不掉）。逾時只毀那一次請求（`EIO`），
+下一趟把遲到的舊 id 答案排掉（bounded drain）重新同步；只有 `Disconnected` 才把連線標死。
+tube 與計數器在同一個 Mutex 後面、橫跨 send+recv 持鎖——「同時最多一個未答請求」由型別保證。
+
+**回收**：sweep（lease 掉落 → `reclaiming N media_host buffers …`）只在 **EOF** 上發生——EOF 是唯一證明
+helper 行程已死、不可能再寫它手上 buffer 的事件；其他任何 tube 錯誤都保住 lease（log 一次、繼續服務；
+連線真的不能用就 park 在 blocking recv 上等 EOF）。virtio reset（裝置在 helper 內被拆、行程活著）由兩層歸還：
+`RemotePoolAllocator::Drop` 逐一 `Release` 它記得的未還 offset，`MediaBackend::stop` 再補一發 `ReleaseAll`。
+helper 死亡本身照 §6.1：非乾淨退出仍是 `ExitState::Crash`、VM 結束（M3 §5.1，v1 接受）；sweep 讓這條路
+與清乾淨退出的池帳目一樣乾淨，將來若把 helper 死改成可存活，池這邊不必再動。
+
+log 可見（`deploy/vpu/README.md`）：VMM 的 `launched media helper: … pool served by the VMM over fd N …`、
+helper 的 `serving MMAP buffers from the media_host pool (gpa …, 256 MiB), allocated by the VMM`、
+每次 Release/ReleaseAll 後的 `pool: "<card>" holds N bytes, pool used M of S`、滿了的
+`media_host pool exhausted for "<card>": …`（處置：真的整池都不夠才把 `media-host-mb`（app `VpuConfig`，
+預設 256）加大）、EOF 的 `the pool connection for "<card>" is closed` ＋ reclaim 行。
 
 ### 6.3 WP M3 清單
 
