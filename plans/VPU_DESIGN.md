@@ -379,6 +379,14 @@ capture-result callbacks（`ACameraCaptureSession_captureCallbacks`，8 欄位�
 gst `v4l2src ! fakesink` 跑通；另跑 `driver_owned_queues=all`（幀寫進 `media_guest`）與 pseudo-unprotected 各一輪。
 前置 smoke：先用既有 `camera_probe capture --uid <app uid>` 在 5566 上確認 app 前景 + FGS 下相機開得了（舊 plan §0 的量測從未在 5566 做過）。
 
+**已接受的 `v4l2-compliance` 失敗（D22，2026-09-05 定案）**：`v4l2-compliance -d /dev/video0 -s` 在 5566 上跑完是
+59 / 56 / 3（`logs/vpu_wp/B5-acceptance.md` §4.6），三個失敗**都不修**，驗收以此為準：
+(1) `VIDIOC_S_FMT` 的 `testGlobalFormat`（`v4l2-test-formats.cpp:1161` `Global format mismatch`）——virtio-media 的格式
+屬於每個 `open(2)` 的 session 而不是裝置，這正是「每個 format 測試都能是一次獨立的 `v4l2-ctl` 呼叫」成立的原因；
+把 session 狀態上移到裝置等於重做整個 fork 的 session/stream 生命週期，不划算；
+(2)(3) `USERPTR (no poll)` 與 `USERPTR (select)`——compliance 送的是它自己 malloc 的指標，protected VM 下 host 不能碰
+（§2.3 / §2.4），B4 的 loopback 也是同樣這兩條，是**要求的行為**不是缺陷。
+
 ### 7.2 解碼器（WP-M6 = 舊 plan B1–B3，2026-09-04 定案）
 
 事實來源：`logs/vpu_survey/mediacodec-ndk.md` §1–§5、`device-5566-host.md` §3–§4。
