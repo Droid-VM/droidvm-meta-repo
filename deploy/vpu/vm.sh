@@ -8,6 +8,11 @@
 #   vm.sh log      <name|id>   the daemon's "Executing:" line + the VM's stdio history
 #   vm.sh wait-ssh <name|id>   block until the guest answers ssh (default 240s)
 #
+# start, stop and stop-all end by asking hp.sh whether the hugepage module agrees: the memory a
+# VM holds is the first thing to move and the last thing to come back, so it says "it is really
+# up" / "it is really gone" long before ssh or vm_list do. The verdict is printed and never
+# fatal; HP_CHECK=0 skips it. wait-ssh does treat one verdict as fatal -- see below.
+#
 # Three verbs take no VM name and act on the daemon as a whole:
 #
 #   vm.sh stop-all             vm_stop_all -- stop every running VM cleanly, and wait
@@ -27,6 +32,25 @@ usage() {  # print the file's own header comment, up to the first line of code
     exit "$USAGE_RC"
 }
 
+# The hugepage watchdog. It reports, it does not decide: every caller here ignores the exit code
+# except wait-ssh, which fails fast on "not started" (4) rather than burning its whole budget on
+# ssh retries against a VM that is not there. HP_CHECK=0 turns the checks off for a phone that
+# has no gh_hugepage_reserve.
+hp() {  # hp <hp.sh args...>
+    [ "${HP_CHECK:-1}" = 0 ] && return 0
+    "$SP/hp.sh" "$@"
+}
+
+# `expect on` wants a floor, and the VM's configured memory is one the rig knows: the module
+# serves at least that much (the guest pools take more on top -- W/debugloop.md). 1 page = 2 MiB;
+# 0 pages means the weaker "served > 0".
+hp_expect_on() {  # hp_expect_on <seconds> -- uses $INFO
+    local mem
+    mem=$(vm_field "$INFO" memory_mb 0)
+    case "$mem" in ''|*[!0-9]*) mem=0 ;; esac
+    hp expect on --wait "$1" --min-pages "$(( mem / 2 ))"
+}
+
 VERB=${1:-}; NAME=${2:-}
 [ -n "$VERB" ] || usage
 adb_wait
@@ -34,7 +58,7 @@ adb_wait
 # The daemon-wide verbs resolve no VM, so they run before the vm_list lookup below -- which
 # matters for daemon-check in particular: it must stay usable when the daemon is not running.
 case "$VERB" in
-stop-all)       vm_stop_all;   exit ;;
+stop-all)       vm_stop_all; rc=$?; hp expect off --wait 30 || true; exit "$rc" ;;
 daemon-check)   daemon_check;  exit ;;
 daemon-restart) daemon_restart && daemon_check; exit ;;
 esac
@@ -63,7 +87,7 @@ start)
     for _ in $(seq 1 30); do
         sleep 2
         s=$(vm_state "$(vm_info "$ID")")
-        [ "$s" = running ] && { echo "running"; exit 0; }
+        [ "$s" = running ] && { echo "running"; hp_expect_on 20 || true; exit 0; }
         [ "$s" = stopped ] && { echo "went back to stopped -- see: $0 log $NAME"; exit 1; }
     done
     echo "still $s after 60s"; exit 1
@@ -72,13 +96,15 @@ stop)
     # vm_stop is the daemon's own orderly path (StopHandler -> CrosvmBackendInstance). Never
     # kill -9 a crosvm: a killed one leaks RM memparcels until the phone is rebooted
     # (deploy/SETUP.md).
-    [ "$STATE" = stopped ] && { echo "already stopped"; exit 0; }
+    [ "$STATE" = stopped ] && { echo "already stopped"; hp expect off --wait 30 || true; exit 0; }
     dvm stop "$ID" || exit 1
     for _ in $(seq 1 30); do
         sleep 2
-        [ "$(vm_state "$(vm_info "$ID")")" = stopped ] && { echo stopped; exit 0; }
+        # The daemon calls it stopped as soon as the process is reaped; the pages come back a
+        # moment later, and "not reclaimed" here is what makes the NEXT start fail with ENOMEM.
+        [ "$(vm_state "$(vm_info "$ID")")" = stopped ] && { echo stopped; hp expect off --wait 30 || true; exit 0; }
     done
-    echo "still not stopped after 60s"; exit 1
+    echo "still not stopped after 60s"; hp expect off --wait 0 || true; exit 1
     ;;
 argv)
     [ "$STATE" = running ] || die "$NAME is $STATE, no crosvm to inspect"
@@ -97,6 +123,10 @@ log)
 wait-ssh)
     ADDR=$(guest_addr "$NAME")
     BUDGET=${BUDGET:-240}
+    # A VM that never got off the ground answers ssh exactly never, so ask the hugepage module
+    # first: 20s to see the pages move beats 240s of ssh retries and a log read afterwards.
+    hp expect on --wait 20; hprc=$?
+    [ "$hprc" = 4 ] && die "wait-ssh: no VM is holding hugepages -- it did not start; see: $0 log $NAME"
     echo "waiting for ssh on $ADDR (up to ${BUDGET}s)" >&2
     end=$(( $(date +%s) + BUDGET ))
     while [ "$(date +%s)" -lt "$end" ]; do
