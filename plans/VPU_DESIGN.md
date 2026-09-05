@@ -474,7 +474,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 * **ffmpeg 客戶端的已知限制（寫給使用者，四條都不是裝置缺陷；2026-09-06 依 B9-acceptance 補）**：
   (1) **drain 的尾巴會少幾張**（D41）——`v4l2_context.c` 在 draining 期間只要 CAPTURE 佇列空了就設 `ctx->done = 1`，
   不管裝置手上還握著幾張已解碼的畫格（F11-decoder §(5)），300 張進去約 288–291 張出來；裝置本身不掉張（C harness 300/300），
-  緩解方式是 `-num_capture_buffers <大一點>` 或改走 GStreamer。
+  緩解方式是 `-num_capture_buffers <大一點>`（**尚未實測**）或改走 GStreamer。
   (2) **動態解析度切換只出前半段**（D27）——ffmpeg 不重啟 CAPTURE；同一個檔 gst 是 120/120。
   (3) **`-stream_loop` 不會續播**（D27b）——`v4l2m2m` 沒有 `.flush`，EOF 之後不再入列，900 張只出 300 張；
   另外 `-stream_loop` 對 raw elementary stream 本來就沒有作用，要餵 mp4。
