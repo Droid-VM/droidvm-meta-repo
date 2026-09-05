@@ -61,6 +61,7 @@ restart stops every VM (`Daemon.cleanup`).
 | `tests/smoke_media.sh` | `[--mode output\|none\|all] <name>` — is there a working virtio-media device in the guest? |
 | `tests/compliance.sh` | `<name> [/dev/videoN]` — `v4l2-compliance -s` in the guest; the test for **D6** |
 | `tests/drain.sh` | `<name> [/dev/videoN]` — one frame in, `--stream-count=10`: the **D5** reproduction |
+| `tests/ext_ctrls_error_idx.c` | not a script: the C client that closed **D37** — copy it into the guest, `cc` it, and read `error_idx` off a refused `EXT_CTRLS` where Python cannot |
 
 A VM is named by either its `name` or its `id`; both go through one `vm_list` lookup — in the
 shell scripts via `lib.sh`'s `vm_info`, and in `dvmipc.py get|modify` via `Daemon.resolve`, since
@@ -376,10 +377,10 @@ stale copy quietly passing.
 | `gbt` | `devices/src/virtio/media/guest_buf.rs` — the guest scatter-gather arena and the window policy | 8 |
 | `kvt` | `MediaDeviceKind` (+ its support table) and `MediaDeviceConfig`: the `--virtio-media` command-line surface | 3 |
 | `kst` | `devices/src/virtio/media/kill.rs` — the worker's kill signal | 5 |
-| `mpt` | `devices/src/virtio/media/pool.rs` — the `media_host` pool allocator and its leases | 4 |
-| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (the camera and the two video codec devices included) | 83 |
+| `mpt` | `devices/src/virtio/media/pool.rs` — the `media_host` pool allocator, its leases and the per-helper slice carve (D49) | 6 |
+| `vmt` | the fork's whole `device/` crate, `-p virtio-media` (the camera and the two video codec devices included) | 124 |
 | `acb` | `android_camera` (lib + `probe.rs`) and both halves of `media/android_camera_backend/` | 0 — a type-check; a failure here is a compile error |
-| `acc` | `android_codec` (lib + `codec_probe`), `-p android_codec`: the MediaImage2 / Annex-B / IVF / synth unit tests | 29 |
+| `acc` | `android_codec` (lib + `codec_probe`), `-p android_codec`: the MediaImage2 / Annex-B / IVF / synth unit tests | 31 |
 | `acd` | both halves of `media/android_codec_backend/` -- the MediaCodec decoder and encoder backends -- against the fork's `video_decoder` and `video_encoder` devices | 0 — a type-check, like `acb` |
 
 Each is staged into `${TMPDIR:-/tmp}/droidvm-harness/<name>` and built there, so the repo stays
@@ -468,6 +469,29 @@ issues `V4L2_DEC_CMD_STOP` and waits for a buffer flagged `V4L2_BUF_FLAG_LAST` t
 is fixed. Either way the script then runs `v4l2-ctl --info` — the hang must not leave the device
 wedged, and a change that does is worse than D5.
 
+### `tests/ext_ctrls_error_idx.c`
+
+Not a script and not run from here: a C client to copy into the guest and compile there.
+
+```sh
+deploy/vpu/guest.sh scp Ubuntu-resolute deploy/vpu/tests/ext_ctrls_error_idx.c :/root/
+deploy/vpu/guest.sh ssh Ubuntu-resolute \
+  'cc -O1 -o /root/eei /root/ext_ctrls_error_idx.c && /root/eei /dev/video0'
+```
+
+It issues the seven refused `VIDIOC_G/S/TRY_EXT_CTRLS` of `logs/vpu_wp/B10-acceptance.md` §7 and
+prints the `error_idx` each one wrote back. It exists because **`error_idx` cannot be read from
+Python at all**: CPython's `fcntl.ioctl` copies its mutable argument back only when the ioctl
+returns `>= 0`, so on the failure path — the only path V4L2 ever sets `error_idx` on — a Python
+client reads back the value it sent. That, and nothing device-side, was **defect D37**: this
+client reads the device's value on **7 of 7** refusals, including the `TRY_EXT_CTRLS` the camera
+fails at index 1, where `ctl.py` reads `0` on all seven. `ctl.py` now prints a warning saying so.
+Expect `error_idx` = `count` on cases 1, 2, 4, 8, `0` on case 3, `count` on the successful case 6,
+and **`1` on case 7**; a `0` from *this* client is a real defect.
+
+The device also logs the size and `error_idx` of every ext-controls error reply — but at
+`debug!`, so only if the helper was started at that level: see the trap below.
+
 ---
 
 ## A typical loop
@@ -542,10 +566,44 @@ just after the fork (defect D14, closed):
 
 ```
 INFO  crosvm::crosvm::sys::linux::device_helpers] launched media helper: pid 766, uid 10367,
-      gid 10367, kind loopback, card lb0, pool_gpa 0x1b0000000, 5 access window(s)
+      gid 10367, kind loopback, card lb0, pool_gpa 0x1b0000000, pool slice 0x0+0x4000000,
+      5 access window(s), log level info
 INFO  crosvm::crosvm::sys::linux::device_helpers] launched snd helper: pid 13279, uid 10367,
-      gid 10367, backend aaudio, card_index 0
+      gid 10367, backend aaudio, card_index 0, log level info
 ```
+
+Two fields on that line are worth knowing by name:
+
+* **`pool slice <start>+<len>`** — which part of the `media_host` pool this helper may allocate
+  from. Every helper of one VM maps the same pool, and until D49 each built a private allocator
+  over the whole window, so two helpers handed out the same offsets and the encoder's coded
+  frames landed inside the camera's raw buffers. The VMM now carves the window once, in
+  configuration order, and this is the answer for this helper. On the shipped
+  camera + decoder + encoder VM over a 256 MiB pool that is `0x0+0x4000000` (64 MiB, camera),
+  `0x4000000+0x8000000` (128 MiB, decoder), `0xc000000+0x4000000` (64 MiB, encoder) —
+  `grep 'pool slice'` the log to see all three at once. `whole pool` instead of a range means
+  this VM has one allocating media device and the carve was not needed. The other half of the
+  pair is written by the helper itself, once, as it comes up — the same slice seen from inside:
+
+  ```
+  INFO  ... virtio-media: serving MMAP buffers from the media_host pool slice 0x4000000+0x8000000
+        (gpa 0x1b0000000, 128 of 256 MiB)
+  ```
+
+  So `grep -E 'pool slice|pool exhausted' <log>` is the whole story: three launch lines, three
+  serving lines, and nothing else. **`media_host pool exhausted for "<card>": N bytes requested
+  with M of P in use`** is now a loud, attributable `ERROR` (the client gets `ENOMEM` from
+  `REQBUFS`/`CREATE_BUFS`) inside one slice, where the aliased whole pool used to corrupt
+  neighbours silently. If a client legitimately needs more — ffmpeg's v4l2m2m asks ~20 CAPTURE
+  buffers, ~190 MiB at 4K, against the decoder's 128 MiB — raise `media-host-mb` (the app's
+  `VpuConfig`, default 256) rather than reading it as a bug. The weights are policy, not a
+  measurement: `VPU_DESIGN.md` §6.2 says where they come from.
+* **`log level <filter>`** — the filter the child was exec'd with, which is now the VMM's own
+  (`crosvm --log-level debug run ...` → `log level debug`). Before **D57** the helper was exec'd
+  with no `--log-level` at all and crosvm's syslog reads no environment variable, so every helper
+  ran pinned at `info` and every `debug!` in a device backend was dead weight — which is exactly
+  how the D37 investigation lost its device-side instrument. `log level info (default)` on this
+  line means nothing forwarded a filter and the old behaviour applies.
 
 **On the phone, by cmdline.** `/proc/<pid>/cmdline` is NUL-separated, so `device media` is only
 there once the NULs are spaces:
@@ -591,3 +649,67 @@ the media helper (pid 766) did not answer the vhost-user handshake within 30 s
 The second one is a helper that is alive but has not spoken for 30 s — a wedged `cameraserver`
 is the case it was written for; look for `camera enumeration did not answer within 15 s` from the
 helper itself just above it.
+
+---
+
+## Measurement traps
+
+Six ways a run has silently lied to a work package. Each one cost a session; none of them
+announces itself. In short, as a checklist:
+
+> `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
+> stream; ffmpeg needs `-fps_mode passthrough` on **both** sides before comparing hw/sw decode
+> md5s of a VFR camera capture; `v4l2-ctl --wait-for-event=ctrl=` wants the control **NAME**;
+> `vm.sh log` is a 1 MiB ring — snapshot it between steps; `install_apk.sh`'s daemon restart
+> resets the VM config (re-apply, and diff against a known-good dump).
+
+And at length:
+
+**1. `timeout` needs `-k`.** A stalled `ffmpeg` does not die of the `SIGTERM` `timeout` sends —
+its threads are already deadlocked in `futex_do_wait` — and the harness waits behind it for ever,
+so the budget you set is not the budget you get. Always `timeout -k 10 <budget> ffmpeg ...`: `-k`
+promotes it to `SIGKILL` ten seconds later, and `rc=124` then means what you meant by it.
+
+**2. `-stream_loop` does nothing on a raw elementary stream.** It seeks the input, and a raw
+`.h264`/`.h265`/`.ivf` gives it nothing to seek by; you get one pass — `-stream_loop 2` on a
+300-frame raw file returns 300, not 900 — **and the software decoder returns the same 300**, so a
+hardware-vs-software comparison looks clean while measuring nothing. F10 §4's D27b recipe was
+written this way and measured nothing as written; B8 §3.2 caught it. Loop an `.mp4` (or
+concatenate the file first) when the point is to run the codec N times.
+
+**3. `-fps_mode passthrough` on both sides, before you compare md5s.** A camera capture is VFR.
+Without it ffmpeg pads the output up to CFR, **and the two decoders duplicate different frames**,
+so a hardware and a software decode of the same file come out the same length with different
+md5s — which reads exactly like a decoder bug and is not one. B10 lost a first comparison to
+this: 9 "differing" frames that were duplication, and 0 once both sides passed through
+(`logs/vpu_wp/B10-acceptance.md` §1.2).
+
+**4. `v4l2-ctl --wait-for-event=ctrl=` wants the control NAME, not its id.** `ctrl=0x009a091e`
+answers `unknown control` from `v4l2-ctl` itself, before any ioctl reaches the device;
+`ctrl=auto_focus_status` — or `ctrl=min_number_of_capture_buffers` on the decoder — is the same
+subscription and works. Take the name from `--list-ctrls` on the node. A refusal from the tool is
+not a refusal from the device: check which before filing one as a defect (B8 §1's note; F10 §2's
+recipe quotes both the wrong form and the wrong CID).
+
+**5. `vm.sh log` is a 1 MiB ring.** A long acceptance session wraps it, and the evidence for step
+3 is gone by the time step 9 finishes. Snapshot between steps and keep the pieces:
+
+```sh
+deploy/vpu/vm.sh log Ubuntu-resolute > scratch-<wp>/NN_vmlog_<step>.txt
+wc -c scratch-<wp>/NN_vmlog_<step>.txt     # near 1 MiB means it already wrapped
+```
+
+B10 kept seven snapshots for one session; that is the right order of magnitude.
+
+**6. `install_apk.sh` restarts the daemon, and the restart resets the VM's config.** Anything a
+`vm_extra.sh takeover` or a VPU-switch edit put there is gone afterwards, so re-apply **after**
+the install, never before — and diff the result against a known-good dump before trusting the run
+that follows. The A5 helper is the one to reuse: `VM=<name> logs/vpu_wp/scratch-A5/cfg.sh set ...`
+to re-apply, `cfg.sh show` to read the keys back, against `scratch-A5/04_cfg_vpuon.txt` as the
+reference for a VPU-on VM. A silent config reset reads exactly like a regression in whatever you
+changed, which is what makes it expensive.
+
+**And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
+will not appear in the log unless the helper was started at that level — see `log level` on the
+launch line above (**D57**). `crosvm --log-level debug run ...` is what forwards it; before that
+fix, no helper `debug!` ever reached a phone log at all.

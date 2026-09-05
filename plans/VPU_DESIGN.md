@@ -299,7 +299,7 @@ struct vmedia_dbuf {                 /* 每個 driver-owned plane 一個 */
 
 | 題目 | 決定 |
 |---|---|
-| 池的交接 | `--pool-gpa <gpa>` 一個數字；backend 在第一次 `start_queue`（mem table 已到）時從 region 表重建 `MediaPoolHandle`，allocator 懶初始化 |
+| 池的交接 | `--pool-gpa <gpa>` 一個數字 + `--pool-slice (offset, len)`（`MediaBackendParams.pool_slice`，`serde(default)`）；backend 在第一次 `start_queue`（mem table 已到）時從 region 表重建 `MediaPoolHandle`，allocator 懶初始化，**但只在自己那一片切片內配置**。切片的規則見下方「池切片交接」——原本這一格只寫「allocator 懶初始化」，那就是 D49 的洞 |
 | Bar 模式 out-of-process | **不支援**。`uid=` 且無 `media_host` 池 → 裝置建立時拒絕（訊息說明）。Gunyah 與有池的 KVM 都走池模式 |
 | host 存取的重新閘門 | VMM 從自己的 `GuestMemory`（有 purpose、有 protected）算出「host 可碰的 GPA 視窗」清單（所有池、`StaticSwiotlbRegion`、`SharedGuestRam`、`ShimHandoff`、`SharedFramebuffer`；非保護 VM 則整段 RAM），放進 JSON config；backend 的 `GuestMemoryMapper` 以 `HostAccessPolicy::Windows` 對每條 SG entry range-check，越界回 `EFAULT`。in-VMM 用 `HostAccessPolicy::GuestMemory`（今天的 `check_host_access`）。同一個 trait，兩個實作 |
 | 兩條 queue | stash-and-start：兩條都 `start_queue` 後才起 `Worker` 執行緒（與 in-VMM 同一個 `Worker`，抽成共用） |
@@ -307,6 +307,33 @@ struct vmedia_dbuf {                 /* 每個 driver-owned plane 一個 */
 | `access_platform` | VMM 依 `ProtectionType` 蓋進 params，backend 據此加 `VIRTIO_F_ACCESS_PLATFORM`（不重蹈 virtio-snd lent-memory 事故） |
 | udmabuf | helper 內 `/dev/udmabuf` 開不了（0600 root）→ `dmabuf()` 回 Err；v1 無消費者，維持 |
 | 啟動 | `snd_helper.rs` 泛化為 `device_helper::launch(subcommand, params_json, uid, gid, supp_gids)`；exec 不 fork；`PR_SET_PDEATHSIG`；pid 進 `worker_process_pids` 與 `pid_debug_label_map`（crash log 才有名字） |
+
+**池切片交接（2026-09-06 依 `logs/vpu_wp/F12-encoder.md` 補；缺陷 D49）。**
+`pool.rs` 自己寫著這個不變式：池「必須是整個 VM 共用的 —— 兩個各自持有私有 allocator 的裝置在同一個視窗上都會發出
+offset 0、0x1000、…，guest 就把同一段實體記憶體映射成兩個互不相干的 buffer」。共用的 `MediaPool` 對 **VMM 內**的裝置
+確實保證了這件事；但相機、解碼器、編碼器三個都是 `HelperOnly`，各自是一個 `crosvm device media` 行程，
+`vhost/user/device/media.rs::start()` 各自 `pool_handle_at(&mem, pool_gpa)` → `MediaPool::new(handle)`，
+於是三個行程在**同一個 256 MiB 視窗**上各建一個從 0 開始的 allocator ——
+正是本節上一版寫的「allocator 懶初始化」。實測後果：相機 → `v4l2h264enc` 3840x1644 時，編碼器的 CAPTURE（位元流）
+buffer 落在相機 raw buffer 內部，每寫一張編碼幀就塗掉一塊，139 張裡 9 張出現一條「把位元流當成像素讀」的雜訊帶，
+起點正好對齊 page、長度正好是一張編碼幀（B9 §4、F12-encoder §1.2–1.3）。單一 helper 的每一個對照組都是乾淨的，
+因為那時只有一個 allocator。
+
+**規則**：VMM 在建立裝置前，依設定順序對整個池的 offset 空間切一次（`pool.rs::carve_slices(size, weights)`，
+page 對齊、完全覆蓋、餘數給最後一個會配置的切片），把 `(offset, len)` 隨 params 交給每個 helper；
+helper 以 `MediaPool::with_slice` 只在切片內配置，越界就是 `ENOMEM`，不會是鄰居的位元組。
+guest 可見的契約不變（offset 仍在 `[0, pool.size)`，guest 仍映射 `media_host base + offset`）。
+只有一個會配置的媒體裝置時不切，行為與今天相同（`pool_slice` 是 `Option`，舊 VMM 的 JSON 也照舊）。
+VMM 內若同時存在 pool 使用者，它們合佔一片，否則未來的 in-VMM 裝置又會和 helper 互疊。
+
+**權重是政策，不是量測**：目前解碼器 2、相機 1、編碼器 1（解碼器的 CAPTURE 側要壓著一整排已解碼的幀），
+256 MiB 池上就是相機 `0x0+0x4000000`(64 MiB)、解碼器 `0x4000000+0x8000000`(128 MiB)、編碼器 `0xc000000+0x4000000`(64 MiB)。
+這組數字涵蓋 B9/B10 量到的一切，但**一個切片有可能比從前「看起來能用」的整池小**：ffmpeg 的 v4l2m2m 解碼會要約 20 個
+CAPTURE buffer，4K 下約 190 MiB > 解碼器的 128 MiB。真的撞到時是一行 `media_host pool exhausted for "<card>"`
+的 `ERROR` 加客戶端的 `ENOMEM`——吵、可歸因，而不是從前那種安靜的踩踏；處置是調權重或把 `media-host-mb`（app `VpuConfig`，預設 256）加大。
+4K 這條至今未量（B10 全程 0 次 exhausted），列為觀察項。切片在 log 裡兩行可見：VMM 的
+`launched media helper: ... pool slice 0x4000000+0x8000000` 與 helper 自己的
+`serving MMAP buffers from the media_host pool slice ...`（`deploy/vpu/README.md`）。
 
 ### 6.3 WP M3 清單
 
@@ -449,11 +476,43 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
     錄出來的 mp4 一張都出不來（D44：ffmpeg 的 muxer 把 SPS/PPS 寫成 31 bytes 的獨立 sample，正好是那個「宣告不出來」的輸入）。
     **這是唯一擋出貨的一條**，驗收門檻三條都要過：`pollrace.py /dev/video1 /tmp/small.h264` 要回得到 POLLOUT、
     `ffmpeg -c:v h264_v4l2m2m -i cam.mp4` 要跑完、`v4l2-compliance -d /dev/video1 -s` 要過得了第一個 streaming 子測試。
-  * **`v4l2-compliance` 的預期值**（B9 §4 實測，三個節點）：解碼器不帶 `-s` 是 **48 / 46 / 2**，兩條失敗是
-    **D30**（`VIDIOC_G/S_PARM`，接受）與 **D50**（有了控制項表之後拒絕 `V4L2_EVENT_CTRL` 訂閱）；**D50 修好之後應回到 48 / 47 / 1**。
-    帶 `-s` 今天會掛（就是 D48），D48 修好之後才有數字，也才談得上驗收。編碼器 **48 / 48 / 0**（不帶 `-s`）與
-    **55 / 50 / 5**（帶 `-s`：一個根因 `v4l2-test-buffers.cpp(398): !g_bytesused(p)` 加四條連鎖 = **D43**，接受）；
-    相機 **59 / 56 / 3**（§7.1 那三條）。
+  * **`v4l2-compliance` 的預期值**（2026-09-06 依 `logs/vpu_wp/B10-acceptance.md` §2 改寫成 B10 在修好 D48/D50 的
+    版本上實測到的數字；先前這裡寫的是 B9 的量測加一個「D50 修好之後應回到 48 / 47 / 1」的預測，**那個預測被 B10 證偽**）：
+
+    | 節點 | 呼叫 | Total / Succeeded / Failed | 失敗的來由 |
+    |---|---|---|---|
+    | 解碼器 `/dev/video1` | 不帶 `-s` | **48 / 46 / 2** | **D30**（`VIDIOC_G/S_PARM`，接受）與 **D54**（見下）|
+    | 解碼器 `/dev/video1` | 帶 `-s` | **跑不完**：1500 s `rc=124`，停在 `Frame #002` | **D56** |
+    | 編碼器 `/dev/video2` | 不帶 `-s` | **48 / 48 / 0** | — |
+    | 編碼器 `/dev/video2` | 帶 `-s` | **55 / 50 / 5** | 一個根因 `v4l2-test-buffers.cpp(398): !g_bytesused(p)` 加四條連鎖 = **D43**，接受 |
+    | 相機 `/dev/video0` | 帶 `-s` | **59 / 56 / 3** | §7.1 那三條，接受 |
+
+    解碼器不帶 `-s` 的分數沒動，但**失敗的那一條換了人**：D50 修好以後訂閱迴圈確實過了
+    （`v4l2-test-controls.cpp(1128)` 那行不見了），測試往下走到同一個子測試的 `(1180)` —— `testEvents` 的分類斷言。
+    它會炸是因為節點**沒有被認成 stateful decoder**卻帶著 D29 給的 `V4L2_CID_MIN_BUFFERS_FOR_CAPTURE`：
+    `determine_codec_mask()` 走 `ENUM_FMT`，碰到第一個它不認得的壓縮格式就 `return`，於是 `codec_mask = 0`。
+    那個格式是 AV1：本節上面的對照表把 `video/av01` 對到 **`AV10`**，而 `videodev2.h` 的
+    `V4L2_PIX_FMT_AV1` 是 **`AV01`**。這是 **D54**，一個寫錯的線上常數（四個站點：`android.rs:173`、
+    `android_encoder.rs:189`、fork 的 `fourcc_description` 兩處），順帶讓任何以 fourcc 比對的客戶端看不到 AV1。
+    修好它以後這一格應該是 **48 / 47 / 1**（只剩 D30）——**這句是預測，不是量測**。
+  * **D48 修好了，但同一個提前釋放開了兩個新洞；D55 + D56 是 WP-F13 的題目，要當成一件事修**
+    （2026-09-06 依 B10-acceptance §1.4、§2.2、§13 補）：
+    * **D55**：SOURCE_CHANGE 之前的提前釋放會把「正在等第一個 SOURCE_CHANGE、因此停止餵資料」的客戶端的 OUTPUT queue
+      清空。mainline 的 `v4l2_m2m_poll_for_data` 在 CAPTURE 未 streaming 且 OUTPUT 空時回 `POLLPRI|POLLERR`，
+      而 GStreamer 的 `gst_v4l2_object_poll` 把 `POLLERR` 當致命——**這正是 D45 原本的機制**。
+      DRC 片在 gst 下 **20 跑 4 敗**（0 張），純串流不受影響（codec 從第一個 buffer 就宣告得出格式，釋放根本不會觸發）。
+      F12-decoder 當時的安全論證是「會回應 POLLOUT 去餵下一個 buffer 的客戶端，OUTPUT queue 不會空」——
+      gst 的 `wait_for_src_ch` 刻意不餵，這個案例在出貨前就是紙上可查的。
+    * **D56**：500 ms 的 `DEFERRED_INPUT_DONE_DEADLINE` 只在 backend 被喚醒（codec callback）時評估，不是計時器。
+      餵了消化不了的位元流之後就沉默的 codec，會讓客戶端**永遠**停在那裡：解碼器的 `-s` 實測
+      `3 bitstream buffers in, 0 frames out`、24.6 分鐘 0 個 callback、1500 s `rc=124`。這是 guest 今天就碰得到的無限期停擺。
+    * **兩者是同一個設計題**：這個扣住必須 (i) 在 SOURCE_CHANGE 之前結束時**不把客戶端的 OUTPUT queue 清空**
+      （例如最多釋放 N-1 個，或在 SOURCE_CHANGE 未決期間壓住 POLLERR 條件），且 (ii) 依**真時鐘**結束
+      （helper poll loop 裡的 timerfd；fork 的 `poll.rs` 今天只 poll session eventfd）。
+      只修其中一個會重新打開 D48（沒有上界）或 D45/D55（順序錯、queue 空）。
+    * F13 的驗收門檻（全部是已有的量測設施）：gst DRC **20/20**、20 KB `pollrace.py` 仍拿得到 POLLOUT、
+      200 KB 仍是 POLLPRI 先到、解碼器 `-s` **會結束**（分數不拘，這個節點從來沒有過一個分數）、
+      不帶 `-s` 回到 48 / 47 / 1、故事的 decode-back 仍與軟解逐位元相同。
 
 ### 7.3 編碼器（WP-M7 = 舊 plan C1–C3）
 
@@ -533,3 +592,17 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 4. **數值 ABI**：曝光單位 100 µs 表達不了 5566 的 85 µs 下限；建議改 10 µs（`EXPOSURE_ABSOLUTE` 標準單位是 100 µs，改單位是私有約定，要寫進文件）。ISO 選單上限取 characteristics 的實際範圍。
 5. **軟體 codec** 是否列入 ENUM_FMT（VP8 / AV1 編碼只有軟體）：預設不列。
 6. **CAPTURE 也由 guest 擁有（`driver_owned_queues=all`）** 是否作為 pVM 預設：可省掉 `media_host`，但相機幀寫入 guest 池的路徑要先量（cacheable 映射下 CPU-CPU 同調沒問題，量的是 host 寫入 pool memfd 的速度）。本設計預設 `output`。
+7. **推送，以及 manifest 的 `revision=` 要不要跟著動**（2026-09-06 記錄，這裡只是**紀錄現況**，沒有動任何檔案；每個 session 都被規則禁止 push，只有你能做）。
+   現況：`crosvm-minimal.xml` 把 `external/crosvm` 與 `external/virtio-media` 都釘在 **`revision="droidvm"`**，只有
+   `external/rust/crates/v4l2r` 釘 `wip/vpu`（那個 fork 上還沒有 `droidvm` 分支）。手機上跑的這份建置——crosvm、
+   fork 的 device/ 與 guest driver、v4l2r、guest-additions、app、meta——完全落在七個**尚未推送**的 `wip/vpu` head 上。
+   要讓別台機器重現它，需要兩件事，順序不能反：
+   * **先推**七個 repo 的 `wip/vpu`。這是必要條件：`1_build_crosvm_prepare.sh` 在 `repo sync` 之後會用
+     `lib_branch.sh::checkout_soong` 把每個 fork 沿「本 meta repo 的分支 → `droidvm` → manifest 的 revision」
+     這條鏈走一次，所以**只要遠端有 `wip/vpu`，同名分支就會被選上，manifest 的 `revision=` 不必動**——
+     critic3 §4 說「即使推了也要改 manifest 才 sync 得到」對 `repo sync` 本身成立，對這條建置路徑則過嚴。
+     反過來說，在推之前這條路是走不通也不會安靜走錯的：`checkout_soong` 對「本地 `wip/vpu` 有遠端沒有的 commit」
+     會直接報錯結束（`checkout -B would discard them`），而不是默默把本地工作丟掉。
+   * **只有**當這批工作要成為預設（合併進各 fork 的 `droidvm`，或希望一個沒有 `wip/vpu` 的 meta 分支也能建出它）時，
+     才需要動 manifest 的 `revision=`。那是一個獨立的決定，不是推送的前置。
+   在你決定以前，這份建置（含 DKMS r21 的 deb）只存在於這台機器和那支手機上。
