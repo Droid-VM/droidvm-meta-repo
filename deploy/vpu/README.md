@@ -564,3 +564,27 @@ which prints what `logs/vpu_wp/B4-acceptance.md` §5.1 quotes — the argv inclu
 a media helper (`logs/vpu_wp/M3.md` §2.1). A helper's pid is also labelled in the VMM, so if one
 dies the log says `child media helper (pid N) exited: ...` or `child snd helper (pid N) ...`
 rather than reporting an anonymous child.
+
+### `Connection reset by peer` from the media frontend means: read the helper's stderr
+
+A VM that fails to start with
+
+```
+failed to set up the vhost-user frontend for media: ... Connection reset by peer
+```
+
+is a media helper that refused its own parameters and exited before it answered the vhost-user
+handshake — `kind=camera` with a `camera_id=` the app's uid cannot see, a uid that can see no
+camera at all, or a phone with no camera NDK. **The reason is on the helper's stderr, which is
+the VM log** (`vm.sh log <name>`): the helper inherits the VMM's, so its own message — e.g.
+`camera "1" is not one this uid can see (it lists [0])` — is a few lines above the frontend's.
+The VMM now appends what it can to its own error, from `waitpid` at that moment:
+
+```
+the media helper (pid 766) exited with status 1 before the handshake -- read its stderr (the VM log)
+the media helper (pid 766) did not answer the vhost-user handshake within 30 s
+```
+
+The second one is a helper that is alive but has not spoken for 30 s — a wedged `cameraserver`
+is the case it was written for; look for `camera enumeration did not answer within 15 s` from the
+helper itself just above it.
