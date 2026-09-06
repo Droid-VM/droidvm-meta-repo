@@ -554,9 +554,20 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
       機制是 ffmpeg 在 reinit 時對 OUTPUT 下 `STREAMOFF`，`flush()` 依約丟掉 staged 的位元流。
       F13 §4 的規格論證（`STREAMOFF(OUTPUT)` 是 seek，`dev-decoder.rst` 說客戶端不該在第一個
       `SOURCE_CHANGE` 停 OUTPUT queue，所以裝置丟得對）**仍然成立**；被證偽的是它的經驗前提
-      ——「只在冷 codec 上出現，因為冷 codec 宣告得慢」。**修法歸 WP F15-decoder**：那條
-      reinit 規則要怎麼把「還沒出過一張 CAPTURE 的 reinit」與真正的 seek 分開，由該 WP 定案並寫回這裡。
-      在那之前它是一次性的、重試就好的 1-in-10。
+      ——「只在冷 codec 上出現，因為冷 codec 宣告得慢」。**F15-decoder 已定案並落地，規則寫回這裡**
+      （fork `029d85c` + crosvm `a6b1d8d`，2026-09-06；`logs/vpu_wp/F15-decoder.md` §1.1）：
+      **在「格式變更未決」的窗內收到的 `STREAMOFF(OUTPUT)` 是 reinit，不是 seek**——`SOURCE_CHANGE` 已送出、
+      CAPTURE 還沒為它（重新）`STREAMON` 的那段期間，裝置保住 staged 的位元流與 codec 手上的畫格與格式
+      （session 旗標 `format_change_pending`，在 `FormatChanged` 設、在 `streamon(CAPTURE)` 與
+      `V4L2_DEC_CMD_START` 清；backend 走新的 `reinit()` 而不是 `flush_and_restart`，印
+      `decoder session N: reinit: keeping M staged input(s) across STREAMOFF(OUTPUT)`），CAPTURE 重開後照餵照送。
+      窗外的 `STREAMOFF(OUTPUT)`（穩態、或還沒宣告過）**仍然是 seek**，照約定丟 staging——F13 §4 的規格論證沒有被推翻，
+      只是被縮到它成立的範圍。**這條還沒在手機上量過**：B12 驗收的二進位（`ae3f7dd6…`）比這兩個 commit 早，
+      所以 D53 要由 B13 用同一支檔連解十次（今天是 1-in-10）才算關。
+
+  * **B12 在這個節點上新加的兩條——D64（與編碼 session 同時起就安靜掉張）與 D69（CAPTURE buffer 給太少安靜截斷，
+    而裝置宣告的 `min 4` 與控制項回的 `1` 都遠低於 codec 真正的 `num-output-slots` 21）——連同 D62–D68
+    記在 §7.4 末的缺陷帳裡，這裡不再各記一份。**
 
 ### 7.3 編碼器（WP-M7 = 舊 plan C1–C3）
 
@@ -585,6 +596,22 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
   D48 修好之前請改用 GStreamer，或以 raw Annex-B 餵進去。
 * `ResourceManagerService` 搶回：helper 是 app uid 的子行程、AM 看得到 app 但看不到 helper → 按舊 plan §2.2 估價不到、不易被選為受害者；被搶回時 `AMEDIACODEC_ERROR_RECLAIMED` → session dead。
 
+**B12 驗收帶回來的缺陷帳（D62–D69，2026-09-06 依 `logs/vpu_wp/B12-acceptance.md` §15 與 `critic5.md` §2 記）。**
+這一格是這八條的唯一總表——解碼器的（D64、D69）、編碼器的（D64 的反向、D67）、池與 log 的（D65）、
+建置的（D62）、guest driver 的（D66）與容量的（D67、D68）都在這裡，§7.2 不再各記一份。
+「M8 的池本身零缺陷」是這次驗收最該記住的一句：十六個量測窗全部以 `pool used 0` 收尾，六條新缺陷沒有一條在池的程式碼裡。
+
+| 缺陷 | 是什麼 | 狀態 | 歸屬 | 修它的 WP |
+|---|---|---|---|---|
+| **D62** | `wip/vpu` 編不過：R8-11 把 `MappedPool::new` 搬進 `MediaBackend::start` 卻沒補 `use`（`media.rs:216`，`error[E0433]`） | **關**（曾是 blocker） | M8 / 建置 | crosvm **`6aac45b`**（一行 import）。教訓（`critic5.md` §2.1）：`deploy/vpu/harness.sh` 編不了 VMM 那個 crate，所以動到它又沒有 soong build 的 WP 就是在出沒編過的碼——F14 §7 item 3 自己白紙黑字預言了這一條，還是踩了 |
+| **D63** | `harness.sh all` 不再確定性：fork 的 `a_refused_drain_leaves_no_drain_pending` 在有負載時 4 跑 2 敗（安靜時 12 跑 0 敗）；`collect_capture(…, 1)` 取第一個 CAPTURE dequeue 就斷言 `LAST`，grace 執行緒搶得贏它 | 開，minor | fork 測試 | **F16-codec**（順手修，否則每個未來的 gate 都是 flaky） |
+| **D64** | 解碼 session 與編碼 session **幾乎同時建立**時，解碼輸出**安靜地少張**：1080p+1080p 掉 30/300（同一個錯 md5 `34c34d371c…` 6 跑 6 中）、1080p+720p 掉 5、4K+1080p 掉 1；反向也一樣（編碼 300 進 274 出）。`ffmpeg` 回 0、stderr 全空 | 開，**high**——最像使用者會遇到的損害（轉檔就是 decode+encode 同時開） | codec 層的 session 建立，**不是池**（每一跑的池帳目都完美） | **F16-codec**。門檻已由 B12 §12.3 寫死：1080p decode+encode 要 6 跑 6 中 `bf32f00e…`，編碼要 300 進 300 出，`g_j5.sh`/`g_j6.sh` 兩張矩陣要乾淨。**證據說有兩個機制**：30 張那個案例被 30 條 `format change #1` 之前的 grace 釋放完全解釋，1 張與 5 張那兩個案例**一條 grace 也沒有** |
+| **D65** | R8-3 的 `pool: "<card>" holds N bytes, pool used M of S` 是**每次 `Release` 一條 `INFO`**（`pool.rs:645`）；~9 400 releases/s 之下 1 MiB 的 `vm.sh log` ring **不到一秒**就被自己蓋掉 | 開，**high**——operability：它會毀掉每一次驗收要用的證據，B12 為它放棄了兩個量測 | M8 / R8-3 | **F16-codec**：降成 `debug!`（`pool.rs:642` 那句「per REQBUFS/close, not per frame」正是被推翻的前提），或照 D51 的 ratelimit，或一次 REQBUFS 只印一條。降級之後怎麼讀，見 `deploy/vpu/README.md` |
+| **D66** | `echo <dev> > /sys/bus/virtio/drivers/virtio_media/unbind`（session 還開著）**oops guest**：`vmedia_dbuf_buffer_from_host+0x70`，level-3 translation fault，留下 `modprobe -r` 清不掉的 `Zl [ffmpeg] <defunct>`；`modprobe -r` 這條路是**安全拒絕**的（B2 finding 2），sysfs 這條繞過了 refcount | 開，**high**（在 guest 內；VMM 這一側完全正確：`returns 20 outstanding pool reservations`、`pool used 0`、helper 活著、沒有 sweep） | guest driver r21（fork `driver/`） | **F16-driver**，交付新的 DKMS（**r22**）deb |
+| **D67** | **4K 硬體編碼不可能**：編碼器的 OUTPUT queue 是 driver-owned，`virtio-media: driver-owned buffer allocation of 12441600 bytes (buffer 10 plane 0) failed: -12`——11 × 12 441 600 > 134 217 728，撞的是 **128 MiB 的 `media_guest`**，不是 VMM 的池（連 encoder session 都沒建起來） | 開，**high**——整個能力停在 2560×1440 | **容量**，不是程式：app 的 `vpu_guest_pool_mb`（`VpuConfig.java:41`，預設 128） | 沒有 WP：**§8 的「容量」段落**寫了兩個選項與代價，等使用者決定 |
+| **D68** | `ffmpeg -f v4l2 -video_size 3840x2160 -i /dev/video0` 開不起來：它要 22 × 12 441 600 = 273 715 200 B，池是 268 435 456 B。VMM 正確地拒絕第 22 個並指名 `"Back camera (0)"`，沒有任何東西死掉；`v4l2-ctl` 的三 buffer 4K 擷取好好的 | 開，medium——誠實的容量上限碰上一個沒有 buffer 數選項的客戶端（`libavdevice` 的 v4l2 indev 沒有這個選項） | **容量**：`vpu_host_pool_mb`（預設 256）／客戶端 | 同上，**§8 的「容量」段落** |
+| **D69** | CAPTURE buffer 給太少會**安靜截斷**：8 個 → 300 張只出 73、16 個 → 119，兩者都 `rc=0` 且 stderr **0 bytes**；而客戶端能問到的每一個數字都是錯的——裝置宣告 `min 4 CAPTURE buffers`（`MIN_CAPTURE_BUFFERS` 常數，M6-backend 開放項 4）、`min_number_of_capture_buffers` 在閒置節點讀回 **1**、compliance 根本沒把節點分類（D59），而 codec 自己的 `num-output-slots` 是 **21** | 開，medium | 解碼器裝置／backend | **F16-codec**：把 codec 真正的 `num-output-slots` 當成 CAPTURE 的最小值宣告出去（那個數字就印在錯的那個數字旁邊），並讓給不夠變成大聲的失敗而不是安靜的短檔 |
+
 ## 8. app / daemon（WP-A1）
 
 * `CrosvmBackendInstance.buildCommand` `:322-402`：三條 GPU 路線各自組 `--pre-alloc` 改成整台 VM 一個 `StringBuilder`；`appendMediaPoolOptions(sb, item, pvm)`：`vpu_enabled` 才加，`media-host-mb=<vpu_host_pool_mb>`，`media-guest-mb=<VpuConfig.guestPoolMbFor(..)>`（>0 才加）；**VPU-only VM（無 GPU）也要出**。`protected_vm` 讀取要提前到 `:346` 之前。
@@ -606,6 +633,46 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
   這條與 **D57**（VMM 把自己的 level 轉給每個 helper：`/proc/self/exe --log-level <filter> device media …`）
   合起來才是完整的一條鏈：在 F15 之前 D57 是對的但無從啟動，媒體堆疊裡每一個 `debug!` 在手機上都是死重。
   rig 的動詞是 `deploy/vpu/vm.sh log-level <name> <value>`（§9）。
+
+* **容量：兩個池的大小是 4K 撞到的天花板。這一段是給使用者決定的，不是已決事項**
+  （2026-09-06 依 `logs/vpu_wp/B12-acceptance.md` §8/§15 與 `critic5.md` §5 記）。 M8 之後 `media_host` 不再有切片，一個 4K 解碼可以吃掉整池；
+  於是擋住 4K 的不再是分配器，而是這兩個 store key 的預設值本身——它們是 `VpuConfig` 的
+  `vpu_host_pool_mb`（預設 **256**）與 `vpu_guest_pool_mb`（預設 **128**，`VpuConfig.java:40-41`），改一個數字就能試，不必動任何程式。
+
+  算術（4K NV12 一張 = 3840 × 2160 × 1.5 = **12 441 600 B**；VMM 的池以 4 KiB 對齊記帳，所以每張佔 **12 443 648 B**）：
+
+  | 撞到的東西 | 池 | 算術 | 結論 |
+  |---|---|---|---|
+  | **4K 硬體編碼**（D67） | `media_guest` 128 MiB = 134 217 728 B | guest driver 在 **buffer 10** 上 `failed: -12`，即第 11 張：11 × 12 441 600 = **136 857 600 > 134 217 728** | 128 MiB 只裝得下 **10** 張，編碼器的 driver-owned OUTPUT queue 至少要 11 張 → 4K 編碼開不起來（2560×1440 與 1080p 都好好的） |
+  | **`ffmpeg -f v4l2` 的 4K 相機擷取**（D68） | `media_host` 256 MiB = 268 435 456 B | ffmpeg 的 v4l2 indev 要 **22** 張：22 × 12 443 648 = **273 760 256 > 268 435 456**；VMM 給到第 21 張（261 316 608 B，97.3 %）就拒絕 | 一個沒有 buffer 數選項的客戶端（`libavdevice` 真的沒有）碰到誠實的容量上限。`v4l2-ctl` 的 3 張 4K 擷取（37 330 944 B）好好的 |
+  | 對照：**4K 硬體解碼** | `media_host` 256 MiB | 19 × 12 443 648 = **236 429 312 B（225.5 MiB）**，三個裝置同時的峰值 256 536 576（95.6 %） | 256 MiB **夠**——這正是 M8 買到的東西 |
+
+  兩個選項，代價都算給你（6 GB `pool_want` 的手機：`hp.sh` 的 `pool_avail` 是 **3072 個 2 MiB 大頁 = 6144 MiB**；
+  B12 那台 VM 起來以後是 `served=2624 pages (5248 MiB), pool_avail=448/3072`，也就是**還剩 448 頁 = 896 MiB**）。
+  兩個池的代價**不是同一種**：`media_host` 在 crosvm 那側掛 `consume_system_mem`，所以它已經在 `--mem` 裡面
+  （`PoolPreflight.neededPages` 不另外加它）——多給它一 MiB，就是 guest 少一 MiB 可用的 RAM；`media_guest` 是
+  RAM **旁邊**的記憶體，`PoolPreflight` 逐 MiB 加進大頁需求（`bootMediaGuestMb`，2 MiB 一頁）。
+
+  * **選項 A：把 app 的預設調大，一次調到「4K 都會過」為止。** 例如 **host 320 MiB / guest 192 MiB**（都對齊 2 MiB）。
+    guest 192 MiB = 201 326 592 B 裝得下 **16** 張 4K（199 065 600 B），量到的需求是「≥ 11」，所以有餘裕——
+    但**沒有量過 ffmpeg 到底要幾張**（只知道它在第 11 張上死掉），若它其實要 > 16 張，192 MiB 一樣不夠，這要 B13 量。
+    host 320 MiB = 335 544 320 B 裝得下 **26** 張 4K：D68 的 22 張擷取過得去，剩下的 61 784 064 B 還放得下一整組
+    19 張的 1080p 解碼（59 146 240 B，B12 §12.2 量到的數字），但**放不下**同時再來一個 19 張的 4K 解碼。
+    代價：guest 128 → 192 是 **+64 MiB = +32 頁**（3072 頁裡的 1 %，B12 那個 boot 剩的 448 頁裡的 7 %）；
+    host 256 → 320 是 **+64 MiB 從 guest 的 `--mem` 裡扣**，大頁需求不變——除非同時把 `memory_mb` 也加 64 MiB 補回去，
+    那才又是 **+32 頁**。最壞情況（兩邊都補）**+64 頁 = +128 MiB**，剩的 448 頁還撐得住。
+  * **選項 B：開機時從 codec 清單推出來，不要寫死。** 裝置建立時本來就會暖機列舉一次 Store（§7.2），
+    所以「最大 coded size × codec 自己的輸出 slot 數」是拿得到的：5566 上那個數字是
+    **`num-output-slots: int32(21)`**（D69 那條 log 行裡就有），最大 coded size 是 3840×2160。
+    於是 `media_host` = 21 × 12 443 648 = **261 316 608 B（249.2 MiB）**，加上相機的工作組（3 張 4K = 37 330 944 B）
+    與編碼器的 CAPTURE（B12 量到 ~4 MiB）≈ **302 841 856 B（288.8 MiB）→ 對齊後 290 MiB**，和選項 A 的 320 MiB 是同一個量級——
+    差別是它會隨手機走，而不是替 5566 猜一個數字。`media_guest` 用同一個 21 去算會是 **249.2 MiB**（比 192 大得多，
+    因為編碼器的輸入 slot 數我們沒有量過，只能保守借用 21）；那要 **+122 MiB = +61 頁**。
+    代價是複雜度與失敗模式：清單讀不到（無硬體 codec、Store 列舉失敗）時要有一個 fallback 常數，
+    而且池大小會變成「開機當下的清單」的函式——同一台 VM 兩次開機拿到不同的池大小，debug 起來比一個常數難。
+
+  **建議**：先用選項 A 的兩個數字**量一次**（改 store key、不動程式，B13 就能做），把「4K 編碼要幾張」量出來，
+  再決定要不要做選項 B。在使用者決定以前，預設維持 256 / 128，而 D67／D68 是**已知的容量上限，不是缺陷**。
 
 ---
 
@@ -663,18 +730,43 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
      才需要動 manifest 的 `revision=`。那是一個獨立的決定，不是推送的前置。
    在你決定以前，這份建置（含 DKMS r21 的 deb）只存在於這台機器和那支手機上。
 
-   **七個 repo 上都有一個本地（未推送）的 tag `accepted-b11-2026-09-06`**（2026-09-06 WP F15 記錄）。
-   那是 **B11 驗收實際跑過的七個 head**，也是 `logs/vpu_wp/B11-acceptance.md` 裡每一個數字所屬的建置：
+   **要推的東西有多少（2026-09-06 WP F16-docs 當場量：`git log <remote>/wip/vpu..HEAD --oneline | wc -l` 與反向）：
+   七個 repo 合計 160 個 commit，七個都是純 fast-forward（`behind` 全部是 0），所以不會有衝突，也不必開新分支。**
 
-   | repo | commit |
-   |---|---|
-   | `crosvm` | `114de78` |
-   | `crosvm_build/external/virtio-media`（fork） | `b19f620` |
-   | `crosvm_build/external/rust/crates/v4l2r` | `7eb3afa` |
-   | `droidvm-guest-additions` | `2c7f6ef` |
-   | `DroidVM`（app） | `b13bb2e` |
-   | `crosvm-minimal-manifest` | `8143624` |
-   | meta（本 repo） | `30ef120` |
+   | repo | remote | HEAD | 未推 | 落後 |
+   |---|---|---|---|---|
+   | meta（本 repo） | `origin` | `faf01ac` | **28** | 0 |
+   | `crosvm` | `droidvm` | `6aac45b` | **54** | 0 |
+   | fork `virtio-media` | `droidvm` | `029d85c` | **47** | 0 |
+   | `v4l2r` | `droidvm` | `7eb3afa` | **1** | 0 |
+   | `droidvm-guest-additions` | `origin` | `2c7f6ef` | **8** | 0 |
+   | `DroidVM`（app） | `origin` | `e5721ec` | **21** | 0 |
+   | `crosvm-minimal-manifest` | `origin` | `8143624` | **1** | 0 |
+   | **合計** | | | **160** | |
+
+   這個數字每一輪 critique 都在長（140 → 143 → 153 → **160**）。順序：**`v4l2r` 先推**（manifest 已經把它釘在
+   `wip/vpu`，遠端沒有這個分支的期間 manifest 指著一個不存在的名字），**meta 最後推**。
+   遠端現在長什麼樣沒有查（這台機器上的 session 一律不連網、也不准 push），所以 `behind = 0` 是**對本機記錄的 remote ref 而言**。
+
+   **七個 repo 上各有兩個本地（未推送）的 tag：`accepted-b11-2026-09-06` 與 `accepted-b12-2026-09-06`**
+   （前者 2026-09-06 WP F15 記錄，後者同日補上；`git tag -l 'accepted-*'` 在七個 repo 裡都看得到）。
+   一個 tag 名 = 一次驗收實際跑過的七個 head，也就是那份報告裡每一個數字所屬的建置：
+
+   | repo | `accepted-b11-2026-09-06` | `accepted-b12-2026-09-06` |
+   |---|---|---|
+   | `crosvm` | `114de78` | **`6aac45b`** |
+   | `crosvm_build/external/virtio-media`（fork） | `b19f620` | `b19f620` |
+   | `crosvm_build/external/rust/crates/v4l2r` | `7eb3afa` | `7eb3afa` |
+   | `droidvm-guest-additions` | `2c7f6ef` | `2c7f6ef` |
+   | `DroidVM`（app） | `b13bb2e` | `b13bb2e` |
+   | `crosvm-minimal-manifest` | `8143624` | `8143624` |
+   | meta（本 repo） | `30ef120` | **`5d2c96e`** |
+
+   B12 那一欄只有兩個 repo 動：crosvm 走到 M8 + F14 + D62 的那一行 import（`6aac45b`），meta 走到 F14 的文件
+   （`5d2c96e`）。**要小心讀的是 crosvm 這格**：B12 驗收量的那顆二進位（md5 `ae3f7dd6aba933af71733c7007dcdc73`）
+   是 `e294860` 加上 D62 那一行——`6aac45b` 正是把那一行變成 commit 的東西，所以它是**能重建那顆二進位的最早 head**，
+   而不是「之後又動過的版本」。它也**早於** `a6b1d8d`（D53）與 fork 的 `029d85c`（D53/D58）：
+   `logs/vpu_wp/B12-acceptance.md` 裡沒有一個數字說得上那兩個 commit 的話。
 
    分支名記不住一個建置——`wip/vpu` 會動，報告裡的「crosvm `114de78`」在下一個 WP commit 之後就找不回來了；
    七個 tag 一起下才記得住。約定是 `accepted-<wp>-<date>`，七個全下或一個都不下
@@ -682,3 +774,15 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
    `deploy/vpu/README.md` 的「The `accepted-*` tags」。
    **但 tag 只是配方，不是成品**：B11 驗收過的那顆二進位（md5 `a289e03fe6e16c6f7a1d8825cc99989a`、
    14 271 944 bytes）現在**只存在於手機上**，這台機器的 `crosvm_out/` 早已被後續建置覆蓋。
+   **B12 那顆（`ae3f7dd6…`）也一樣，而且更糟**：這台機器的 `crosvm_out/` 在 B13 建置時就被蓋掉了，
+   它現在只在手機上（`critic5.md` §3b）。連續兩輪如此——tag 記得住配方，記不住成品。
+
+8. **helper 死亡的處置（2026-09-06 決定，這一條記在這裡是為了關掉它，不是為了問你）。**
+   一個帶標籤的 media helper 非乾淨退出，VMM 仍然以 `ExitState::Crash` 結束整台 VM（§6.1、M3 §5.1）。
+   **維持現狀**：F14 §6 item (f) 明白地接受了它，B12 驗收 §7 也實測過——`kill -TERM` 掉解碼器 helper 之後，
+   log 依序出現 `the pool connection for "droidvm decoder" is closed`、
+   `reclaiming 20 media_host buffers from a device that went away`、`exiting with crash`，
+   下一次開機的第一筆記帳是 `holds == pool used`，大頁全數歸還（`served=0, pool_avail=3072/3072`），沒有漏掉的 memparcel。
+   關鍵是 **M8 讓這個決定不再是池的問題**：sweep 只在 EOF 上跑、而且跑的是 VMM 自己手上的帳，
+   所以「helper 死掉」這條路和乾淨退出一樣把池收乾淨——將來若有人要把 helper 死亡改成可存活的
+   （M8-impl §8 item 1，仍然開著、仍然沒人決定），池這一側不必再動一行。
