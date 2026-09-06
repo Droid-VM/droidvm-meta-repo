@@ -672,9 +672,11 @@ Two fields on that line are worth knowing by name:
   set really outgrows it. The `<card>` in the pool lines is the string the guest's
   `v4l2-ctl --info` shows (`droidvm decoder`, `camera 0`, ...): the helper introduces itself on
   the tube and the VMM adopts its card for the pool log lines and the `media pool <card>`
-  server thread (`ps -T`; comm clips at 15 bytes). Two more lines worth greping: every release
-  is followed by `pool: "<card>" holds N bytes, pool used M of S` — the accounting, live — and
-  a helper that goes away leaves `the pool connection for "<card>" is closed` plus
+  server thread (`ps -T`, or bare `ps -AT` on the phone — never `ps -AT -o comm`, trap 7; comm
+  clips at 15 bytes). Two more lines worth greping: every release is followed by
+  `pool: "<card>" holds N bytes, pool used M of S` — the accounting, one line **per released
+  buffer**, at `debug` since F16 (**D65**; how to switch it on and how to read a run of them is
+  "Reading the pool's accounting lines after F16" below) — and a helper that goes away leaves `the pool connection for "<card>" is closed` plus
   `reclaiming N media_host buffers from a device that went away` as the VMM sweeps its lease
   back into the pool.
 * **`log level <filter>`** — the filter the child was exec'd with, which is now the VMM's own
@@ -733,18 +735,84 @@ helper itself just above it.
 
 ---
 
+## Per-ship checklist: the three things every acceptance drops
+
+Not traps — coverage. Each of these was in an earlier acceptance suite, each was dropped from a
+later one **without a note**, and `logs/vpu_wp/critic5.md` §2.1/§3b caught all three after the
+fact. They are cheap; what makes them expensive is finding out two rounds later that nobody ran
+them. Run them, or say in the report which one you skipped and why.
+
+1. **GStreamer, on whatever the current build is.** B12 accepted M8 — the change that moved every
+   `media_host` buffer's allocation into the VMM — with **zero** gst runs; every gst number in the
+   project (DRC 20/20, three bit-exact decoders, the encode) is pre-M8 evidence from B11. ffmpeg is
+   not a substitute: it and gst ask for buffers in different shapes, and gst is the client the
+   design names as the decoder's acceptance client (design §7.2).
+
+   ```sh
+   # in the guest, per B9 §2 / B11 §5.1
+   gst-launch-1.0 filesrc location=1080p.mp4 ! qtdemux ! h264parse ! v4l2h264dec \
+     ! videoconvert ! video/x-raw,format=NV12 ! filesink location=gst.raw
+   md5sum gst.raw            # against the software decode of the same file
+   ```
+
+2. **The 3840x1644 band detector, on the current allocator.** This is the instrument that found
+   **D49** (cross-helper pool aliasing) — the exact bug M8 is the structural fix for — and it has
+   never been run against M8. A structural fix with no run of the detector that found the bug is a
+   claim, not a measurement. The recipe and the flagging script are in
+   `logs/vpu_wp/B10-acceptance.md` §4 / `F12-encoder.md` §4: camera at **3840x1644** into
+   `v4l2h264enc`, then flag frames whose row-mean profile carries the band (B10: 0 of 141 after the
+   slice carve; the number to reproduce on M8 is the same 0).
+
+3. **A soak.** Nothing in this project has ever run longer than **60 s** (B12's two REQBUFS storms);
+   the longest *session* is an hour of many short runs. D46's UAF, D51's rate limiter, D65's log
+   ring, a slow pool leak and every thermal effect are things only a soak finds. The cheapest useful
+   one is an hour: a decode loop plus a camera capture loop in the guest, with the VM log snapshotted
+   every ten minutes and `pool used` read at the end (it must be **0**), plus `hp.sh expect on` and a
+   guest `dmesg` splat count before and after.
+
+Two more that are carried in every critique and are a phone-owner decision rather than a script:
+a **second camera row** (never configured, never booted) and a **cross-package camera contender**
+(the consent screen blocks the OEM app; same-uid contention is what B-final §6 measured).
+
+### Reading the pool's accounting lines after F16
+
+`pool: "<card>" holds N bytes, pool used M of S` is emitted **once per `Release`**, so a REQBUFS
+that frees 21 buffers writes 21 lines and a client that cycles REQBUFS writes thousands
+(measured: ~9 400 releases/s, which overwrites the 1 MiB `vm.sh log` ring in under a second —
+**D65**, and it cost B12 two measurements). Since **F16** that line is `debug!`, not `info!`, which
+changes how you read it:
+
+* by default it is **not in the log at all**. To get it back: `deploy/vpu/vm.sh log-level <name> debug`,
+  then start the VM (**D60**; and check `vm.sh argv` shows `--log-level` *before* `run`).
+* the lines are **steps, not a state**. Reading one tells you nothing; read the **last** one in a
+  window for "where the pool ended up" (it must be `pool used 0 of S` once every stream is closed),
+  and the **maximum** across the window for "how much this workload actually needed". The 20-line
+  walk from `holds 236429312` down to `holds 0` is one device closing one 4K decode, not 20 events.
+* what stays at `info!` and is what you normally grep is the rest of the set: the launch line's
+  `pool served by the VMM over fd N`, the helper's `allocated by the VMM`,
+  `media_host pool exhausted for "<card>": …` (the loud, attributed refusal), and the pair
+  `the pool connection for "<card>" is closed` + `reclaiming N media_host buffers from a device
+  that went away`.
+
+`logs/vpu_wp/scratch-B12acc/poolacct.py` is the parser that turns a window into per-card maxima and
+a final value; `newlines.py` beside it cuts the window out of a `vm.sh log` dump and says on stderr
+when the ring wrapped under it.
+
+---
+
 ## Measurement traps
 
 Seven ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
-> stream; ffmpeg needs `-fps_mode passthrough` on **both** sides before comparing hw/sw decode
-> md5s of a VFR camera capture; `v4l2-ctl --wait-for-event=ctrl=` wants the control **NAME**;
-> `vm.sh log` is a 1 MiB ring — snapshot it between steps; `install_apk.sh`'s daemon restart
-> resets the VM config (re-apply, and diff against a known-good dump); and **never measure this
-> decoder with a raw elementary stream through ffmpeg at all** — default vsync writes 3 frames
-> of 300 while the device decodes all 300.
+> stream; ffmpeg's frame count lies both ways — `-fps_mode passthrough` on **both** sides of every
+> md5 comparison, and **never measure this decoder with a raw elementary stream through ffmpeg at
+> all** (default vsync writes 3 frames of 300 while the device decodes all 300);
+> `v4l2-ctl --wait-for-event=ctrl=` wants the control **NAME**; `vm.sh log` is a 1 MiB ring —
+> snapshot it between steps; `install_apk.sh`'s daemon restart resets the VM config (re-apply, and
+> diff against a known-good dump); and toybox `ps -AT -o ...` drops the thread `comm`, so a
+> `media pool` thread counter reads 0 on a VM that has three.
 
 And at length:
 
@@ -760,12 +828,40 @@ hardware-vs-software comparison looks clean while measuring nothing. F10 §4's D
 written this way and measured nothing as written; B8 §3.2 caught it. Loop an `.mp4` (or
 concatenate the file first) when the point is to run the codec N times.
 
-**3. `-fps_mode passthrough` on both sides, before you compare md5s.** A camera capture is VFR.
-Without it ffmpeg pads the output up to CFR, **and the two decoders duplicate different frames**,
-so a hardware and a software decode of the same file come out the same length with different
-md5s — which reads exactly like a decoder bug and is not one. B10 lost a first comparison to
-this: 9 "differing" frames that were duplication, and 0 once both sides passed through
-(`logs/vpu_wp/B10-acceptance.md` §1.2).
+**3. ffmpeg's frame count lies in two directions, and `-fps_mode` only fixes one of them**
+(**D32**, **D27**/**D41**). Two traps that used to be listed apart; they are the same measurement
+going wrong from both ends, and the rule at the bottom is one rule.
+
+*Too few frames.* A raw elementary `.h264` carries no container timestamps, so every frame ffmpeg
+decodes arrives with the same one, and its default CFR output keeps the first and drops the rest:
+
+```
+ffmpeg -c:v h264_v4l2m2m -i 720p.h264 -f rawvideo -pix_fmt nv12 out.raw
+frame=    3 fps=0.0 ... dup=0 drop=298
+```
+
+Three frames of 300, and **the software decoder writes 300**, so the two do not even have the same
+length to compare. The device is innocent and says so in the VM log —
+`300 bitstream buffers in, 300 frames out, 1 format change(s)`, five sessions in a row — and this
+predates every 2026-09 decoder fix: B9's own artefact `ff_hw.raw` is 4 147 200 bytes, which is
+those same 3 frames (`logs/vpu_wp/B11-acceptance.md` §4.3).
+
+*Different frames.* A camera capture is VFR. Without `-fps_mode passthrough` ffmpeg pads the output
+up to CFR, **and the two decoders duplicate different frames**, so a hardware and a software decode
+of the same file come out the same length with different md5s — which reads exactly like a decoder
+bug and is not one. B10 lost a first comparison to this: 9 "differing" frames that were duplication,
+and 0 once **both** sides passed through (`logs/vpu_wp/B10-acceptance.md` §1.2).
+
+So: `-fps_mode passthrough` (`-vsync 0` on older ffmpeg) **on both sides of any md5 comparison**,
+always. And then meet the half it does not fix: on that same raw file passthrough writes **159**
+frames, because ffmpeg's `v4l2m2m` decoder has no `.flush` callback and stops feeding after its
+first EOF (`178 bitstream buffers in, 167 frames out`; **D27**/**D41**,
+`logs/vpu_wp/F11-decoder.md`) — honest, but still not 300.
+
+The rule is therefore not a flag but a choice of client: **measure this decoder with GStreamer**
+(`v4l2h264dec` on the same file decodes 300/300, bit-exact against software), or with ffmpeg on a
+**container**. Reach for a raw elementary stream only when the raw stream is the subject — a short
+truncated one for `pollrace.py`, say — and never for a frame count.
 
 **4. `v4l2-ctl --wait-for-event=ctrl=` wants the control NAME, not its id.** `ctrl=0x009a091e`
 answers `unknown control` from `v4l2-ctl` itself, before any ioctl reaches the device;
@@ -792,31 +888,21 @@ to re-apply, `cfg.sh show` to read the keys back, against `scratch-A5/04_cfg_vpu
 reference for a VPU-on VM. A silent config reset reads exactly like a regression in whatever you
 changed, which is what makes it expensive.
 
-**7. ffmpeg's default vsync writes 3 frames of 300 from a raw Annex-B stream** (**D32**). A raw
-elementary `.h264` carries no container timestamps, so every frame ffmpeg decodes arrives with
-the same one, and its default CFR output keeps the first and drops the rest:
+**7. `ps -AT -o ...` on the phone silently drops the thread name.** toybox's `ps` answers
+`-AT` with `-o pid,tid,comm` **without** the thread `comm` — no error, no warning, just a column
+that is the process name (or empty) — so a counter like
+`ps -AT -o comm | grep -c 'media pool'` reads **0** on a VM that has three `media pool <card>`
+threads running. B12 discarded two whole 20-cycle runs to this before noticing (its
+`83a_l_cycles_aborted.txt` keeps them). Use bare `ps -AT` and match on the line:
 
+```sh
+adb -s "$PHONE" shell su -c 'ps -AT' | grep -c 'media pool'
 ```
-ffmpeg -c:v h264_v4l2m2m -i 720p.h264 -f rawvideo -pix_fmt nv12 out.raw
-frame=    3 fps=0.0 ... dup=0 drop=298
-```
 
-Three frames of 300, and **the software decoder writes 300**, so the two do not even have the
-same length to compare. The device is innocent and says so in the VM log —
-`300 bitstream buffers in, 300 frames out, 1 format change(s)`, five sessions in a row — and this
-predates every 2026-09 decoder fix: B9's own artefact `ff_hw.raw` is 4 147 200 bytes, which is
-those same 3 frames (`logs/vpu_wp/B11-acceptance.md` §4.3).
-
-`-fps_mode passthrough` (`-vsync 0` on older ffmpeg) fixes the dropping — and then you meet the
-*second* half of the trap: on the same file it writes **159** frames, because ffmpeg's
-`v4l2m2m` decoder has no `.flush` callback and stops feeding after its first EOF
-(`178 bitstream buffers in, 167 frames out`; **D27**/**D41**, `logs/vpu_wp/F11-decoder.md`). So
-passthrough makes the number honest without making it 300.
-
-The rule is therefore not a flag but a choice of client: **measure this decoder with GStreamer**
-(`v4l2h264dec` on the same file decodes 300/300, bit-exact against software), or with ffmpeg on a
-**container**. Reach for a raw elementary stream only when the raw stream is the subject — a
-short truncated one for `pollrace.py`, say — and never for a frame count.
+and **validate the counter before you trust a zero**: run it once against a VM that is up (expect
+3, one per media helper) and once against a stopped VM (expect 0). A counter that cannot tell
+those two apart is measuring nothing, and "no stray threads after the stop" is exactly the kind of
+claim it would answer wrongly in the direction you were hoping for.
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
