@@ -802,7 +802,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Seven ways a run has silently lied to a work package. Each one cost a session; none of them
+Nine ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -811,8 +811,10 @@ announces itself. In short, as a checklist:
 > all** (default vsync writes 3 frames of 300 while the device decodes all 300);
 > `v4l2-ctl --wait-for-event=ctrl=` wants the control **NAME**; `vm.sh log` is a 1 MiB ring —
 > snapshot it between steps; `install_apk.sh`'s daemon restart resets the VM config (re-apply, and
-> diff against a known-good dump); and toybox `ps -AT -o ...` drops the thread `comm`, so a
-> `media pool` thread counter reads 0 on a VM that has three.
+> diff against a known-good dump); toybox `ps -AT -o ...` drops the thread `comm`, so a
+> `media pool` thread counter reads 0 on a VM that has three; **`--log-level debug` slows the VMM
+> enough to change a frame count — measure frame-exactness at the default level**; and **the `seek`
+> the device logs at ffmpeg's EOF is ffmpeg's own close path, not a driver mistranslation**.
 
 And at length:
 
@@ -908,6 +910,24 @@ and **validate the counter before you trust a zero**: run it once against a VM t
 3, one per media helper) and once against a stopped VM (expect 0). A counter that cannot tell
 those two apart is measuring nothing, and "no stray threads after the stop" is exactly the kind of
 claim it would answer wrongly in the direction you were hoping for.
+
+**8. `--log-level debug` changes codec results — measure frame-exactness at the default level.**
+The `debug!` traffic the VMM emits at `debug` is not free: B14 saw the same ten warm decodes come
+out **7/10** bit-exact at `debug` and **30/30** at `info`, with the same binary, file and client
+(`logs/vpu_wp/B14-accept-A.md` §1). The extra log path slows the VMM enough to shift ffmpeg's drain
+timing, and a few sessions tear down early (no `drain: EOS queued` line). So raise the level only
+when you need a `debug!` line (trap-9 note below), and **run every frame-exactness bar at the
+default level** — `vm.sh log-level <name> -` and restart before the run, or the number you measure
+is the log path's, not the codec's.
+
+**9. The `seek` the device logs at ffmpeg's EOF is ffmpeg's own close path, not a driver bug.**
+When ffmpeg finishes it calls `ff_v4l2_m2m_codec_end`, which issues one `STREAMOFF(OUTPUT)` after
+EOS (B14 strace, §2): the device logs a `seek` (or, before D71's fix, a `reinit`) for it, and the
+driver's `virtio_media_streamoff` forwards the client's `enum v4l2_buf_type` verbatim — there is no
+mistranslation and no mid-stream `STREAMOFF(OUTPUT)`. Reading that end-of-stream `seek`/`reinit`
+line as a driver or device fault sent an earlier dig down a blind alley; it is the expected shape of
+ffmpeg closing the queue. (With F17's D71 fix that line reads `seek`, not `reinit`, because the
+initial announce no longer leaves `format_change_pending` set for the life of the session.)
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
