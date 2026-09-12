@@ -10,7 +10,7 @@
 #   vm_extra.sh clear    <name|id>
 #
 # Example:
-#   vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb=128 -- \
+#   vm_extra.sh takeover Ubuntu-resolute media-host-mb=320,media-guest-mb=192 -- \
 #     --virtio-media kind=loopback,card=lb0
 #
 # WHY THERE IS A `takeover` AND NOT A `merge` (defect D2, logs/vpu_wp/B1-acceptance.md §8).
@@ -324,7 +324,7 @@ takeover() {  # takeover [--show] [--base <string>] <k=v[,k=v...]>... [-- <extra
             *)  keys="${keys:+$keys,}$1"; shift ;;
         esac
     done
-    [ -n "$keys" ] || die "takeover: give me the --pre-alloc keys to add, e.g. media-host-mb=256,media-guest-mb=128"
+    [ -n "$keys" ] || die "takeover: give me the --pre-alloc keys to add, e.g. media-host-mb=320,media-guest-mb=192"
     # --show reads and prints only, so it does not care whether the VM is running.
     [ "$SHOW" = 1 ] || require_stopped takeover
     [ ! -f "$STATE_FILE" ] || note "takeover: a takeover is already active on $VMNAME -- re-applying on top of it (the config saved in $STATE_FILE is kept, so one 'restore' still undoes it)"

@@ -287,7 +287,7 @@ pools and the media device get onto the command line until WP A1 lands.
 
 ```sh
 deploy/vpu/vm_extra.sh show     Ubuntu-resolute
-deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb=128 -- --virtio-media kind=loopback,card=lb0
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=320,media-guest-mb=192 -- --virtio-media kind=loopback,card=lb0
 deploy/vpu/vm_extra.sh restore  Ubuntu-resolute
 deploy/vpu/vm_extra.sh set      Ubuntu-resolute --pre-alloc <FULL MERGED STRING> --virtio-media kind=loopback
 deploy/vpu/vm_extra.sh clear    Ubuntu-resolute
@@ -324,7 +324,7 @@ own `--pre-alloc` (off `state/<vm>.json` when a takeover is already active, else
 plus everything after `--` in `extra_options`:
 
 ```sh
-deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb=128 -- \
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=320,media-guest-mb=192 -- \
   --virtio-media kind=loopback,card=lb0
 deploy/vpu/vm_extra.sh restore  Ubuntu-resolute      # keys back, extra_options emptied
 ```
@@ -338,10 +338,10 @@ saying: after a takeover-launched boot the live command line and the last `Execu
 stripped before use, and the script says which it dropped.
 
 ```sh
-deploy/vpu/vm_extra.sh takeover Ubuntu-resolute --show media-host-mb=256,media-guest-mb=128 -- \
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute --show media-host-mb=320,media-guest-mb=192 -- \
   --virtio-media kind=loopback,card=lb0        # print what would be sent; send nothing
 deploy/vpu/vm_extra.sh takeover Ubuntu-resolute --base 'drm-host-mb=64,gpu-guest-mb=1024' \
-  media-host-mb=256                            # skip the search: this string is the daemon's
+  media-host-mb=320                            # skip the search: this string is the daemon's
 ```
 
 `--show` runs every guard and the whole merge and then prints the `extra_options` and the keys it
@@ -532,7 +532,7 @@ cd deploy/vpu && shellcheck -x ./*.sh tests/*.sh && cd -   # before committing a
 JOBS=8 taskset -c 0-7 ./2_build_crosvm.sh          # never unpinned, never more than 8 jobs
 deploy/vpu/vm.sh   stop  Ubuntu-resolute
 deploy/vpu/push_crosvm.sh
-deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=256,media-guest-mb=128 -- \
+deploy/vpu/vm_extra.sh takeover Ubuntu-resolute media-host-mb=320,media-guest-mb=192 -- \
   --virtio-media kind=loopback,card=lb0
 deploy/vpu/vm.sh   start Ubuntu-resolute
 deploy/vpu/vm.sh   argv  Ubuntu-resolute | grep -E 'pre-alloc|media'
@@ -542,7 +542,7 @@ deploy/vpu/tests/smoke_media.sh Ubuntu-resolute
 `takeover` stores exactly what the review's test plan asks for:
 
 ```
---pre-alloc <daemon string>,media-host-mb=256,media-guest-mb=128 --virtio-media kind=loopback,card=lb0
+--pre-alloc <daemon string>,media-host-mb=320,media-guest-mb=192 --virtio-media kind=loopback,card=lb0
 ```
 
 ### Deployment order for a whole batch
@@ -622,7 +622,7 @@ The switch is a guest-side policy the host cannot see or rely on: the device has
 serve a host-owned `MMAP` buffer the moment some program in the guest asks for one, and on Gunyah
 the pool is the only place it can put one (the 64-bit MMIO window has room for one 4 GiB
 shared-memory BAR and the GPU already has it, design §0.2/§3.3). So always pass
-`media-host-mb=256` in, even for an `--mode all` run. `media-guest-mb` is the one that is
+`media-host-mb=320` in, even for an `--mode all` run. `media-guest-mb` is the one that is
 genuinely optional: without it the guest driver falls back to `dma_alloc_pages` behind the
 restricted-dma-pool. All the media devices of one VM share the one `media_host` pool.
 
@@ -668,7 +668,7 @@ Two fields on that line are worth knowing by name:
   connection teardown. **`media_host pool exhausted for "<card>": N bytes requested with M of P
   in use`** is still the loud, attributable `ERROR` (the client gets `ENOMEM` from
   `REQBUFS`/`CREATE_BUFS`), now only when the whole VM's pool is genuinely full — raise
-  `media-host-mb` (the app's `VpuConfig`, default 256) only if the devices' *combined* working
+  `media-host-mb` (the app's `VpuConfig`, default 320 since A6) only if the devices' *combined* working
   set really outgrows it. The `<card>` in the pool lines is the string the guest's
   `v4l2-ctl --info` shows (`droidvm decoder`, `camera 0`, ...): the helper introduces itself on
   the tube and the VMM adopts its card for the pool log lines and the `media pool <card>`
@@ -883,9 +883,14 @@ B10 kept seven snapshots for one session; that is the right order of magnitude.
 **6. `install_apk.sh` restarts the daemon, and the restart resets the VM's config.** Anything a
 `vm_extra.sh takeover` or a VPU-switch edit put there is gone afterwards, so re-apply **after**
 the install, never before — and diff the result against a known-good dump before trusting the run
-that follows. The A5 helper is the one to reuse: `VM=<name> logs/vpu_wp/scratch-A5/cfg.sh set ...`
-to re-apply, `cfg.sh show` to read the keys back, against `scratch-A5/04_cfg_vpuon.txt` as the
-reference for a VPU-on VM. A silent config reset reads exactly like a regression in whatever you
+that follows. The A5 helper is the one to reuse: `VM=<name> logs/vpu_wp/scratch-A5/cfg.sh vpuon`
+to re-apply the acceptance config, `cfg.sh show` to read the keys back, against
+`scratch-A5/04_cfg_vpuon.txt` as the reference for a VPU-on VM — with one correction to that
+dump: **`vpuon` deletes `vpu_host_pool_mb` / `vpu_guest_pool_mb` rather than storing them**, so
+the pools come from the app's defaults (320 MiB host / 192 MiB guest since A6) and a run
+measures what a user's fresh VM gets. The dump's `256` / `128` are the pre-A6 values a stored key
+would pin; `cfg.sh set '{"vpu_host_pool_mb":320,"vpu_guest_pool_mb":192}'` is the one line that
+pins them again if a run needs a size nobody defaults to. A silent config reset reads exactly like a regression in whatever you
 changed, which is what makes it expensive.
 
 **7. `ps -AT -o ...` on the phone silently drops the thread name.** toybox's `ps` answers
