@@ -495,8 +495,8 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 
     | 節點 | 呼叫 | Total / Succeeded / Failed | 失敗的來由 |
     |---|---|---|---|
-    | 解碼器 `/dev/video1` | 不帶 `-s` | **48 / 46 / 2** | **D30**（`VIDIOC_G/S_PARM`，接受）與 **D59**（工具側，見下）|
-    | 解碼器 `/dev/video1` | 帶 `-s` | **跑不完**：`rc=124`（900 s），停在 `Video Output Multiplanar: Frame #002`，卡在 `virtio_media_dqbuf` | **D58**：宣告（`SOURCE_CHANGE`）之後的 `DQBUF(OUTPUT)` 不回來——**F15 / B13 的目標** |
+    | 解碼器 `/dev/video1` | 不帶 `-s` | **48 / 46 / 2** | **D30**（`VIDIOC_G/S_PARM`）與 **D59**（`testEvents` 分類）——根因都是 **D70**（工具側，見下）|
+    | 解碼器 `/dev/video1` | 帶 `-s` | **跑不完**：`rc=124`，停在 `Video Output Multiplanar: Frame #002`，卡在 `virtio_media_dqbuf(CAPTURE)` | **D70**（工具側）：設計如此的死結，**不是裝置缺陷**（見下）——D58 由 B14 定案為 D70 |
     | 編碼器 `/dev/video2` | 不帶 `-s` | **48 / 48 / 0** | — |
     | 編碼器 `/dev/video2` | 帶 `-s` | **55 / 50 / 5** | 一個根因 `v4l2-test-buffers.cpp(398): !g_bytesused(p)` 加四條連鎖 = **D43**，接受 |
     | 相機 `/dev/video0` | 帶 `-s` | **59 / 56 / 3** | §7.1 那三條，接受 |
@@ -515,9 +515,24 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
     AV1_FRAME / FWHT_STATELESS` → `STATELESS_DECODER`。**`V4L2_PIX_FMT_AV1` 在整個函式裡不存在**
     （`grep -n AV1` 只有一筆，line 596，是 stateless 的 `AV1_FRAME`），所以拼對的 `AV01` 和拼錯的 `AV10`
     落在同一個 `default`。這是 **D59**，工具的限制，不是裝置的缺陷。
-    **處置：AV1 繼續廣告**（客戶端看得到才是重點），這一格的預期值就是 **48 / 46 / 2**；
+    **處置：AV1 繼續廣告**（客戶端看得到才是重點，設計 §11.5「不寫死」），這一格的預期值就是 **48 / 46 / 2**；
     要它變成 48 / 47 / 1 只有兩條路，都不划算：等 upstream v4l-utils 加一個 case，或把 AV1 從
     `CODED_FORMATS` 拿掉——後者是為了工具的分數而讓真客戶端看不到一個真格式。
+  * **D58 = D30 = D59 = 同一條工具限制，B14 定案為 D70**（2026-09-13 依 `logs/vpu_wp/B14-accept-A.md` §3 補）。
+    B14 讀了 `v4l2-compliance.cpp:567-601` 的 `determine_codec_mask`：它 switch 每一個壓縮 OUTPUT 格式，
+    結尾是 `default: return;`——一個發生在 `node.codec_mask = mask`（`:607-610`）**之前**的早退。`AV01` 不在任何一個
+    arm（v4l-utils 1.32.0 只認 stateless 的 `'AV1F'`；這台 kernel 的 `videodev2.h` 連 `V4L2_PIX_FMT_AV1` 符號都沒有），
+    所以碰到 OUTPUT 的第四個格式就早退，`codec_mask` 留在 `0`。**節點於是從來沒被認成 stateful decoder**：
+    compliance 對 encoder 印 `Detected Stateful Encoder`，對這個 decoder **一條 `Detected …` 都不印**（B14 §3.3 的鐵證）。
+    連鎖三條：(a) `-s` 的 streaming 測試永遠不下 `V4L2_DEC_CMD_STOP`（`v4l2-test-buffers.cpp:1335` 要
+    `node->codec_mask & STATEFUL_DECODER`），於是 `:1345-1348` 的 blocking `DQBUF(CAPTURE_MPLANE)` 等一個
+    zero-filled 位元流永遠生不出來的畫格——這就是 **D58** 的死結（B14 量到：裝置早已把三個 OUTPUT buffer
+    全數經 grace 交回，之後靜默 279 s）；(b) `testEvents` 的 `MIN_BUFFERS_FOR_CAPTURE` 存在斷言
+    走 else arm = **D59**；(c) `G/S_PARM` 的 `node->is_m2m && !is_stateful_enc` 斷言 = **D30**。三條同一個根因。
+    **上游修法（一段話的草稿）**：在 `determine_codec_mask` 的 stateful switch 裡，於 `default: return;` 之前，
+    為 `V4L2_PIX_FMT_AV1`（`v4l2_fourcc('A','V','0','1')`）加一個 `case … mask = 1 << STATEFUL_DECODER; break;`
+    ——與 `HEVC`/`VP9` 同排；這樣 `codec_mask` 才會被設，`-s` 才會下 `DEC_CMD_STOP` 而不是卡在 `DQBUF(CAPTURE)`。
+    （這是給 v4l-utils 的 patch，不是給 DroidVM 的：裝置這一側完全合規，AV1 是一個真格式。）
   * **D48 修好了，但同一個提前釋放開了兩個新洞；D55 + D56 是 WP-F13 的題目，要當成一件事修**
     （2026-09-06 依 B10-acceptance §1.4、§2.2、§13 補）：
     * **D55**：SOURCE_CHANGE 之前的提前釋放會把「正在等第一個 SOURCE_CHANGE、因此停止餵資料」的客戶端的 OUTPUT queue
@@ -568,6 +583,26 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
   * **B12 在這個節點上新加的兩條——D64（與編碼 session 同時起就安靜掉張）與 D69（CAPTURE buffer 給太少安靜截斷，
     而裝置宣告的 `min 4` 與控制項回的 `1` 都遠低於 codec 真正的 `num-output-slots` 21）——連同 D62–D68
     記在 §7.4 末的缺陷帳裡，這裡不再各記一份。**
+  * **D64 由 B14 重新定案，F16 §4.1「F15 的 reinit 規則關掉它」被推翻，F17 修好**（2026-09-13 依
+    `logs/vpu_wp/B14-accept-A.md` §4 與 `logs/vpu_wp/F17.md` 補）。B14 量到 1080p decode+encode 同開 **0/6** 逐位元、
+    5/6 是 B12 那個錯 md5 `34c34d37…`——**而且 `0 seek(s)`、`reinit: keeping 0`**：損害根本不在 seek/reinit。
+    機制是 **D55/D56 grace 對「只有一個 OUTPUT buffer 在飛」的客戶端形成節流**：contention 下 codec 要 **7.56 s**
+    才宣告，那段窗裡 grace 每 250 ms 才放一個 `InputBufferDone`，ffmpeg（一個 buffer、反覆重排 index 0）於是被限到
+    ~4 packets/s——**30 條 grace 線精準對應 30 張丟失的畫格**（沒有 grace 線的 session 只掉 0–3 張）；per-frame md5 顯示
+    頭尾完好、中段一條 ~60–70 張的帶（丟的畫格加上到下一個 IDR 之前所有引用它的畫格）。gst 排很多 OUTPUT buffer、不受節流，
+    同樣 contention 下 300/300（3 跑 2 中逐位元）。**根因排序**：(a) MediaCodec 在 contention 下丟掉它收到但還沒解的輸入畫格
+    ——這是 codec 層，改不了；(b)(c)(d) 都排除了：staging/feed 路徑沒有丟（`300 bitstream buffers in` 全數餵到）、
+    held output 不丟（F16 已證、270 張都出得來、帶在中段不在宣告前的頭）、reinit 不 flush/restart codec（`reinit()` 只印一行、
+    seek=0）。**觸發器是我們的 grace 節流**，所以修法就是拿掉節流：**grace 一次性**——同一個 pending-format 窗裡 grace 一放行過
+    就不再壓後續的 `InputBufferDone`（gst 的順序保證只需要壓**第一個** buffer，會繼續餵的客戶端是 ffmpeg 形狀、不可被限速）。
+    落地：crosvm backend 的 `grace_expired`（`android.rs` `note_input_done`/`release_deferred_input_done_if_stale`），
+    fork 加測試 `a_never_announcing_codec_feeds_a_one_buffer_client_at_full_rate_after_the_first_grace`，
+    D45 的順序（`source_change_precedes_the_output_buffer_that_produced_it`）與 B9 的 0-stale seek 都留綠。**B15 手機驗收才算關**。
+  * **D70 / D71 / D72，B14 新加、F17 修**（fork + crosvm，2026-09-13；三條都在 §7.4 末的缺陷帳）。
+    D70 見上（工具側，AV1 廣告不變）；D71 是 `format_change_pending` 在「宣告晚於客戶端 `STREAMON(CAPTURE)`」時永遠不清
+    （ffmpeg 早開 CAPTURE），於是之後每個 `STREAMOFF(OUTPUT)`（含 EOF 關閉）都被當成 reinit——F17 在宣告落地時若 CAPTURE
+    已為同一格式 streaming 就不設旗標，真 seek 又是 seek；D72 是 `REQBUFS(CAPTURE, n)` 低於宣告的最小值時照給（只從上界夾），
+    F17 比照 vb2 抬到 `session.min_capture_buffers`（上限 `MAX_BUFFERS`）。
 
 ### 7.3 編碼器（WP-M7 = 舊 plan C1–C3）
 
@@ -605,12 +640,15 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 |---|---|---|---|---|
 | **D62** | `wip/vpu` 編不過：R8-11 把 `MappedPool::new` 搬進 `MediaBackend::start` 卻沒補 `use`（`media.rs:216`，`error[E0433]`） | **關**（曾是 blocker） | M8 / 建置 | crosvm **`6aac45b`**（一行 import）。教訓（`critic5.md` §2.1）：`deploy/vpu/harness.sh` 編不了 VMM 那個 crate，所以動到它又沒有 soong build 的 WP 就是在出沒編過的碼——F14 §7 item 3 自己白紙黑字預言了這一條，還是踩了 |
 | **D63** | `harness.sh all` 不再確定性：fork 的 `a_refused_drain_leaves_no_drain_pending` 在有負載時 4 跑 2 敗（安靜時 12 跑 0 敗）；`collect_capture(…, 1)` 取第一個 CAPTURE dequeue 就斷言 `LAST`，grace 執行緒搶得贏它 | 開，minor | fork 測試 | **F16-codec**（順手修，否則每個未來的 gate 都是 flaky） |
-| **D64** | 解碼 session 與編碼 session **幾乎同時建立**時，解碼輸出**安靜地少張**：1080p+1080p 掉 30/300（同一個錯 md5 `34c34d371c…` 6 跑 6 中）、1080p+720p 掉 5、4K+1080p 掉 1；反向也一樣（編碼 300 進 274 出）。`ffmpeg` 回 0、stderr 全空 | 開，**high**——最像使用者會遇到的損害（轉檔就是 decode+encode 同時開） | codec 層的 session 建立，**不是池**（每一跑的池帳目都完美） | **F16-codec**。門檻已由 B12 §12.3 寫死：1080p decode+encode 要 6 跑 6 中 `bf32f00e…`，編碼要 300 進 300 出，`g_j5.sh`/`g_j6.sh` 兩張矩陣要乾淨。**證據說有兩個機制**：30 張那個案例被 30 條 `format change #1` 之前的 grace 釋放完全解釋，1 張與 5 張那兩個案例**一條 grace 也沒有** |
+| **D64** | 解碼 session 與編碼 session **幾乎同時建立**時，解碼輸出**安靜地少張**：1080p+1080p 掉 30/300（同一個錯 md5 `34c34d371c…`）、1080p+720p 掉 5、4K+1080p 掉 1。`ffmpeg` 回 0、stderr 全空 | **F17 修，待 B15 手機驗收**（HOST 已改，`0 seek(s)`／`reinit: keeping 0`——B14 §4 證偽了 F16「F15 關掉它」的說法） | codec 層 + 我們的 grace 節流，**不是池**、**不是 seek/reinit** | **F17-decoder**：D55/D56 grace 對「一個 buffer 在飛」的 ffmpeg 節流到 4 packets/s（30 grace 線 = 30 丟張），codec 於 contention 下丟輸入畫格。修法＝**grace 一次性**（`grace_expired`）；gst 只需壓第一個 buffer，會續餵的客戶端不可被限速。B15 門檻：1080p decode+encode 6/6 `bf32f00e5c4bca747bf7827ea5797b33`，4K+1080p 與 1080p+720p 各 3/3，每 session ≤ 1 條 grace 線 |
 | **D65** | R8-3 的 `pool: "<card>" holds N bytes, pool used M of S` 是**每次 `Release` 一條 `INFO`**（`pool.rs:645`）；~9 400 releases/s 之下 1 MiB 的 `vm.sh log` ring **不到一秒**就被自己蓋掉 | 開，**high**——operability：它會毀掉每一次驗收要用的證據，B12 為它放棄了兩個量測 | M8 / R8-3 | **F16-codec**：降成 `debug!`（`pool.rs:642` 那句「per REQBUFS/close, not per frame」正是被推翻的前提），或照 D51 的 ratelimit，或一次 REQBUFS 只印一條。降級之後怎麼讀，見 `deploy/vpu/README.md` |
 | **D66** | `echo <dev> > /sys/bus/virtio/drivers/virtio_media/unbind`（session 還開著）**oops guest**：`vmedia_dbuf_buffer_from_host+0x70`，level-3 translation fault，留下 `modprobe -r` 清不掉的 `Zl [ffmpeg] <defunct>`；`modprobe -r` 這條路是**安全拒絕**的（B2 finding 2），sysfs 這條繞過了 refcount | 開，**high**（在 guest 內；VMM 這一側完全正確：`returns 20 outstanding pool reservations`、`pool used 0`、helper 活著、沒有 sweep） | guest driver r21（fork `driver/`） | **F16-driver**，交付新的 DKMS（**r22**）deb |
 | **D67** | **4K 硬體編碼不可能**：編碼器的 OUTPUT queue 是 driver-owned，`virtio-media: driver-owned buffer allocation of 12441600 bytes (buffer 10 plane 0) failed: -12`——11 × 12 441 600 > 134 217 728，撞的是 **128 MiB 的 `media_guest`**，不是 VMM 的池（連 encoder session 都沒建起來） | 開，**high**——整個能力停在 2560×1440 | **容量**，不是程式：app 的 `vpu_guest_pool_mb`（`VpuConfig.java:41`，預設 128） | 沒有 WP：**§8 的「容量」段落**寫了兩個選項與代價，等使用者決定 |
 | **D68** | `ffmpeg -f v4l2 -video_size 3840x2160 -i /dev/video0` 開不起來：它要 22 × 12 441 600 = 273 715 200 B，池是 268 435 456 B。VMM 正確地拒絕第 22 個並指名 `"Back camera (0)"`，沒有任何東西死掉；`v4l2-ctl` 的三 buffer 4K 擷取好好的 | 開，medium——誠實的容量上限碰上一個沒有 buffer 數選項的客戶端（`libavdevice` 的 v4l2 indev 沒有這個選項） | **容量**：`vpu_host_pool_mb`（預設 256）／客戶端 | 同上，**§8 的「容量」段落** |
-| **D69** | CAPTURE buffer 給太少會**安靜截斷**：8 個 → 300 張只出 73、16 個 → 119，兩者都 `rc=0` 且 stderr **0 bytes**；而客戶端能問到的每一個數字都是錯的——裝置宣告 `min 4 CAPTURE buffers`（`MIN_CAPTURE_BUFFERS` 常數，M6-backend 開放項 4）、`min_number_of_capture_buffers` 在閒置節點讀回 **1**、compliance 根本沒把節點分類（D59），而 codec 自己的 `num-output-slots` 是 **21** | 開，medium | 解碼器裝置／backend | **F16-codec**：把 codec 真正的 `num-output-slots` 當成 CAPTURE 的最小值宣告出去（那個數字就印在錯的那個數字旁邊），並讓給不夠變成大聲的失敗而不是安靜的短檔 |
+| **D69** | CAPTURE buffer 給太少會**安靜截斷**：8 個 → 300 張只出 73、16 個 → 119，兩者都 `rc=0` 且 stderr **0 bytes**；而客戶端能問到的每一個數字都是錯的——裝置宣告 `min 4 CAPTURE buffers`（`MIN_CAPTURE_BUFFERS` 常數，M6-backend 開放項 4）、`min_number_of_capture_buffers` 在閒置節點讀回 **1**、compliance 根本沒把節點分類（D59），而 codec 自己的 `num-output-slots` 是 **21** | **關**（損失半）——F16 修、B14 §5 證：8 buffer 現在 300/300 逐位元，gst 讀到 `G_CTRL(MIN_BUFFERS_FOR_CAPTURE)=21` 並排 25 | 解碼器裝置／backend | **F16-codec**：把 codec 真正的 `num-output-slots` 當成 CAPTURE 的最小值宣告出去，並讓給不夠變成大聲的失敗而不是安靜的短檔 |
+| **D70** | 解碼器廣告 `'AV01'`（一個真格式），但 `v4l2-compliance` 1.32.0 的 `determine_codec_mask`（`.cpp:567-601`）沒有 AV1 的 case，碰到它就 `default: return`，`codec_mask` 留 0——**節點從來沒被認成 stateful decoder**。這是 **D58**（`-s` 卡在 `DQBUF(CAPTURE)`，永遠不下 `DEC_CMD_STOP`）、**D30**（`G/S_PARM`）、**D59**（`testEvents`）三條的**唯一**根因 | **關（工具側）**：AV1 繼續廣告，census 就是 48/46/2 且 `-s` 依設計卡住 | v4l-utils（**不是** DroidVM） | **F17-docs**：§7.2 記下這條、census 數字與一段上游 patch 草稿（在 `determine_codec_mask` 為 `V4L2_PIX_FMT_AV1` 加一個 stateful case） |
+| **D71** | `format_change_pending` 在「宣告落地晚於客戶端 `STREAMON(CAPTURE)`」時**永遠不清**（ffmpeg 在 SOURCE_CHANGE 之前就開 CAPTURE）：`DEC_CMD_START` 只在 `drain != None` 時清，初次宣告 `drain` 是 `None`。於是之後每個 `STREAMOFF(OUTPUT)`（含 ffmpeg 的 EOF 關閉）都被誤判成 reinit，靜默解除 B9 的 0-stale-seek 性質 | **F17 修**（fork host 已改＋測試；B15 觀察「EOF 記成 seek 不是 reinit」） | fork `video_decoder.rs` | **F17-decoder**：宣告落地時若 CAPTURE 已為同一格式 streaming 就不設旗標（`STREAMON(CAPTURE)` 已在宣告之後、或宣告到來時 CAPTURE 已 streaming 且格式相符）；真 seek 又是 seek。測兩種順序 |
+| **D72** | `REQBUFS(CAPTURE, n)` 低於宣告的最小值時**照給**（`video_decoder.rs` 只從上界夾到 `MAX_BUFFERS`）：ffmpeg 固定要 20、比宣告的 21 少一個，裝置就給 20 | **F17 修**（fork host 已改＋測試；B15 觀察 `REQBUFS(CAPTURE,20)` 回 21） | fork `video_decoder.rs` | **F17-decoder**：比照 vb2（`vb2_core_reqbufs` 把數量抬到 driver 的最小值），抬到 `session.min_capture_buffers`，上限 `MAX_BUFFERS`（V4L2 允許 `REQBUFS` 回比要求更多）。測 |
 
 ## 8. app / daemon（WP-A1）
 
