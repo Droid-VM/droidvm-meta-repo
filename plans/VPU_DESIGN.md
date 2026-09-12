@@ -634,10 +634,10 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
   合起來才是完整的一條鏈：在 F15 之前 D57 是對的但無從啟動，媒體堆疊裡每一個 `debug!` 在手機上都是死重。
   rig 的動詞是 `deploy/vpu/vm.sh log-level <name> <value>`（§9）。
 
-* **容量：兩個池的大小是 4K 撞到的天花板。這一段是給使用者決定的，不是已決事項**
-  （2026-09-06 依 `logs/vpu_wp/B12-acceptance.md` §8/§15 與 `critic5.md` §5 記）。 M8 之後 `media_host` 不再有切片，一個 4K 解碼可以吃掉整池；
+* **容量：兩個池的大小是 4K 撞到的天花板。使用者已決（2026-09-06）：選項 A。**
+  （依 `logs/vpu_wp/B12-acceptance.md` §8/§15 與 `critic5.md` §5 記；WP A6 實作。）M8 之後 `media_host` 不再有切片，一個 4K 解碼可以吃掉整池；
   於是擋住 4K 的不再是分配器，而是這兩個 store key 的預設值本身——它們是 `VpuConfig` 的
-  `vpu_host_pool_mb`（預設 **256**）與 `vpu_guest_pool_mb`（預設 **128**，`VpuConfig.java:40-41`），改一個數字就能試，不必動任何程式。
+  `vpu_host_pool_mb`（**A6 起預設 320**，原 256）與 `vpu_guest_pool_mb`（**A6 起預設 192**，原 128），改一個數字就能試，不必動任何程式。
 
   算術（4K NV12 一張 = 3840 × 2160 × 1.5 = **12 441 600 B**；VMM 的池以 4 KiB 對齊記帳，所以每張佔 **12 443 648 B**）：
 
@@ -671,8 +671,22 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
     代價是複雜度與失敗模式：清單讀不到（無硬體 codec、Store 列舉失敗）時要有一個 fallback 常數，
     而且池大小會變成「開機當下的清單」的函式——同一台 VM 兩次開機拿到不同的池大小，debug 起來比一個常數難。
 
-  **建議**：先用選項 A 的兩個數字**量一次**（改 store key、不動程式，B13 就能做），把「4K 編碼要幾張」量出來，
-  再決定要不要做選項 B。在使用者決定以前，預設維持 256 / 128，而 D67／D68 是**已知的容量上限，不是缺陷**。
+  **決定（2026-09-06，使用者）：選項 A——host 320 MiB / guest 192 MiB；選項 B（從 codec 清單推導）暫緩。**
+  理由是 D67／D68 是**已知的容量上限，不是缺陷**，而一個能讓 4K 編碼與 ffmpeg 4K 擷取都過去的常數，
+  比一個會隨開機當下的 Store 清單變動的推導值好 debug；選項 B 留著，等「4K 編碼到底要幾張」與
+  「編碼器的輸入 slot 數」量出來（B13／B14）再重開。
+
+  這個決定在 6 GB `pool_want` 的手機上的大頁代價，只有 `media_guest` 那一半要付：
+  guest 128 → 192 MiB 是 **+64 MiB = +32 個 2 MiB 大頁**，`PoolPreflight.neededPages` 會把它加進去，
+  所以 B12 那台 VM 的 `served` 會從 **2624 頁（5248 MiB）變成 2656 頁（5312 MiB）**，
+  `pool_avail` 從 448/3072 變成 **416/3072（832 MiB）**——3072 頁裡的 1 %。
+  host 256 → 320 MiB 是 `consume_system_mem`，從 guest 自己的 `--mem` 裡扣，大頁需求一頁都不變
+  （除非同時把 `memory_mb` 也加 64 MiB 補回去，那才又是 +32 頁）。
+
+  實作落在 `VpuConfig.DEFAULT_HOST_POOL_MB` / `DEFAULT_GUEST_POOL_MB`（兩個都是 2 MiB 的倍數，
+  guest 那個必須是，因為它是逐頁從保留區發出來的），editor 的版面預設與測試跟著改；
+  **這是 default，不是 migration**——已經把這兩個 key 存進 config 的 VM（rig 的 Ubuntu-resolute 就是）
+  仍然用它存的 256／128，要拿到新值得把 key 刪掉（`scratch-A5/cfg.sh vpuon` 就是這麼做的）。
 
 ---
 
