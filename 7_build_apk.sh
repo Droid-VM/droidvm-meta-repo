@@ -7,6 +7,12 @@ set -e
 # here. Callers can still override this explicitly when comparing artifacts.
 export DROIDVM_PREBUILT_COMPRESSION_LEVEL="${DROIDVM_PREBUILT_COMPRESSION_LEVEL:-1}"
 
+# ./build.sh's preflight needs the Android SDK, and it checks for it only AFTER this script has
+# packed the prebuilts -- B16-build lost ~1 minute of packing to a run that then failed on a
+# missing ANDROID_HOME (logs/vpu_wp/B16-build.md, issue 1). Default it to where the SDK lives on
+# the build host; an explicit ANDROID_HOME in the environment still wins.
+export ANDROID_HOME="${ANDROID_HOME:-/root/android-sdk}"
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # The only ABI 6_build_apk_prepare.sh stages an overlay for.
 ABI=arm64-v8a

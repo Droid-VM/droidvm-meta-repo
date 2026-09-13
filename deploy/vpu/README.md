@@ -753,7 +753,7 @@ helper itself just above it.
 
 ---
 
-## Per-ship checklist: the three things every acceptance drops
+## Per-ship checklist: the four things every acceptance drops
 
 Not traps — coverage. Each of these was in an earlier acceptance suite, each was dropped from a
 later one **without a note**, and `logs/vpu_wp/critic5.md` §2.1/§3b caught all three after the
@@ -775,22 +775,72 @@ them. Run them, or say in the report which one you skipped and why.
 
 2. **The 3840x1644 band detector, on the current allocator.** This is the instrument that found
    **D49** (cross-helper pool aliasing) — the exact bug M8 is the structural fix for — and it has
-   never been run against M8. A structural fix with no run of the detector that found the bug is a
+   **still never been run against M8**: B13, B14, B15 and B15-soak all went by without it, so this
+   is now the oldest un-run item on the list. A structural fix with no run of the detector that found the bug is a
    claim, not a measurement. The recipe and the flagging script are in
    `logs/vpu_wp/B10-acceptance.md` §4 / `F12-encoder.md` §4: camera at **3840x1644** into
    `v4l2h264enc`, then flag frames whose row-mean profile carries the band (B10: 0 of 141 after the
    slice carve; the number to reproduce on M8 is the same 0).
 
-3. **A soak.** Nothing in this project has ever run longer than **60 s** (B12's two REQBUFS storms);
-   the longest *session* is an hour of many short runs. D46's UAF, D51's rate limiter, D65's log
+3. **A soak.** **Done once, by B15-soak** (`logs/vpu_wp/B15-soak.md` §1–§2): 120 iterations over
+   60 minutes, 0 failures, VMM RSS +267 kB/min on a 5.2 GB RSS, `pool used` peak identical in all
+   thirteen 5-minute windows, 0 helper exits, plus 30/30 stop/start cycles with `served` back to 0
+   after every stop. That is the shape to repeat, not a box that stays ticked: run it again on any
+   build that changes the pool, a backend or the helper lifecycle. Before that round, nothing in
+   this project had ever run longer than **60 s** (B12's two REQBUFS storms);
+   the longest *session* was an hour of many short runs. D46's UAF, D51's rate limiter, D65's log
    ring, a slow pool leak and every thermal effect are things only a soak finds. The cheapest useful
    one is an hour: a decode loop plus a camera capture loop in the guest, with the VM log snapshotted
    every ten minutes and `pool used` read at the end (it must be **0**), plus `hp.sh expect on` and a
    guest `dmesg` splat count before and after.
 
-Two more that are carried in every critique and are a phone-owner decision rather than a script:
-a **second camera row** (never configured, never booted) and a **cross-package camera contender**
-(the consent screen blocks the OEM app; same-uid contention is what B-final §6 measured).
+4. **The D81 loop: 20 fresh-encode → decode pairs.** B15-soak's decode of a *just-encoded* clip
+   came up short in **14 of 120** iterations with `rc 0` and nothing on the device side (**D81**),
+   while the same saved clip decoded twelve times in a row is exact. It only reproduces when the
+   decode follows a fresh encode on the same helper set, so it is invisible to every bar that
+   decodes a fixture. Twenty pairs, and compare each decode against the clip's own `ffprobe`
+   count — not against a constant:
+
+   ```sh
+   # in the guest, per B15-soak §5.3; 20 pairs
+   for i in $(seq 1 20); do
+     ffmpeg -y -f v4l2 -i /dev/video0 -t 3 -c:v h264_v4l2m2m -b:v 4M clip.mp4 2>/dev/null
+     n_enc=$(ffprobe -v0 -select_streams v -count_frames -show_entries stream=nb_read_frames \
+                     -of csv=p=0 clip.mp4)
+     ffmpeg -y -c:v h264_v4l2m2m -i clip.mp4 -fps_mode passthrough -f rawvideo out.nv12 2>/dev/null
+     n_dec=$(( $(stat -c%s out.nv12) / (1280*720*3/2) ))
+     echo "$i enc=$n_enc dec=$n_dec $([ "$n_enc" = "$n_dec" ] && echo ok || echo SHORT)"
+   done
+   ```
+
+   **20/20 is the bar.** `-num_capture_buffers 24` does not help and is not the fix (0/5 for D64).
+
+Two more that were carried in every critique as a phone-owner decision rather than a script are
+now both **done, by B15-soak §3.1/§3.8**: a **second camera row** (two helpers, two pool threads,
+`/dev/video0` + `/dev/video1`, 41 472 000 B from each, both fields of view looked at, and no extra
+reserve) and a **cross-package camera contender** (there is no consent screen any more — the OEM
+app evicts the VM, the guest gets `ENODEV`, `v4l2-ctl` exits 0 and a capture after the contender
+closes works with no VM restart; `plans/VPU_DESIGN.md` §7.1).
+
+### Next rig WP: three things this round worked around by hand
+
+None of these is implemented — B16's acceptance was running live on the phone while this was
+written, and the scripts it drives are not safe to change mid-run. Each is a workaround that
+worked, written down so the next rig WP can make it a script's job.
+
+1. **The config guard belongs in `vm.sh start`.** `scratch-B15s/cycles.sh` asserts the stored
+   config before every start and re-applies a dump when it has reverted (**D79**, trap 14). It
+   fired 0 times in 30 measured cycles and would have caught the one that cost B15-soak three of
+   them. `vm.sh start` is where it belongs: read the config it is about to start, refuse (or say
+   so loudly) when `vpu_enabled` is false on a VM that had it.
+2. **`wait-ssh` should try the DHCPv4 address.** The EUI-64 address is dead for ~5 minutes after
+   a stop/start (**D80**, trap 15) and `wait-ssh`'s 240 s budget is shorter than that, so it
+   reports a guest that never came up. A third path through `GUEST_SSH_VIA=proxy` on the DHCPv4
+   address answered in 14–22 s in all 30 cycles; failing that, the failure message should at
+   least name DAD as a possibility.
+3. **`7_build_apk.sh` needed `ANDROID_HOME` and said so a minute late.** B16-build lost ~1 minute
+   of prebuilt packing before the preflight failed (`logs/vpu_wp/B16-build.md`, issue 1). The
+   script now exports a default; if the SDK ever lives somewhere else, that line is where to look.
 
 ### Reading the pool's accounting lines after F16
 
@@ -820,7 +870,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Twelve ways a run has silently lied to a work package. Each one cost a session; none of them
+Fifteen ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -837,7 +887,10 @@ announces itself. In short, as a checklist:
 > mid-capture and reads exactly like a device fault; an **overlay-only crosvm change leaves
 > Gradle's `regenPrebuilts` UP-TO-DATE**, so the APK ships the previous payload unless the
 > manifest sha256 is checked; and the probes are **copied, not stripped** — soong already emitted
-> the stripped binary.
+> the stripped binary; a gst PSNR pipeline reads **24 dB of loss that is not there** unless
+> `colorimetry=` is pinned on **both** sides; **assert the VPU config before every start**,
+> because a daemon restart reverts it and `vm.sh start` then prints nothing at all; and after a
+> stop/start the guest's **IPv6 address is dead for ~5 minutes** (DAD), so reach it over DHCPv4.
 
 And at length:
 
@@ -916,7 +969,10 @@ the pools come from the app's defaults (320 MiB host / 192 MiB guest since A6) a
 measures what a user's fresh VM gets. The dump's `256` / `128` are the pre-A6 values a stored key
 would pin; `cfg.sh set '{"vpu_host_pool_mb":320,"vpu_guest_pool_mb":192}'` is the one line that
 pins them again if a run needs a size nobody defaults to. A silent config reset reads exactly like a regression in whatever you
-changed, which is what makes it expensive.
+changed, which is what makes it expensive. And an `install_apk.sh` run is not the only way it
+happens: a daemon restart nobody asked for does exactly the same thing on an idle rig, with no
+error line anywhere — **trap 14**, and assert the config before every start, not just after an
+install.
 
 **7. `ps -AT -o ...` on the phone silently drops the thread name.** toybox's `ps` answers
 `-AT` with `-o pid,tid,comm` **without** the thread `comm` — no error, no warning, just a column
@@ -989,12 +1045,29 @@ mode is the phone owner's decision, not a rig setting.
 
 And the half `wake` cannot fix: the screen sleeps again after `screen_off_timeout` (**300 000 ms**
 on 5566), so a long capture, or a gap between the wake and the run, walks back into it. **That is
-the product-level D76** — a user's camera VM dying because the phone dimmed — and since
-2026-09-13 it is a **known limitation, not a defect anyone is fixing**: the app will not touch the
-appop, the screen has to stay on while a VM uses the camera, and a guest that lost the session has
-to reopen it after the screen wakes (`plans/VPU_DESIGN.md` §7.1 and the D76 row in §7.4). It is
-still a different claim from "the HAL wedged", so a report has to say which. Wake immediately
-before each camera bar and record the timeout in the report:
+the product-level D76** — a user's camera VM dying because the phone dimmed.
+
+**Since WP A7 (app `843d8d9`) D76 is a per-VM switch, `camera_keep_screen_on`, default `true`.**
+While any non-STOPPED VM that really attaches a camera has the switch on, the app holds a
+`SCREEN_DIM_WAKE_LOCK` tagged `droidvm:camera` from `PeripheralForegroundService`, released when
+the last such VM stops. So on a default VM the screen does not dim underneath a capture, and
+**the limitation above applies only when the switch is off** — which is a choice, not a
+regression: it trades "the screen stays lit for hours" for "the screen sleeps and a capture can
+die". Two things the switch does *not* buy:
+
+* **It cannot wake a screen that is already dark.** `ACQUIRE_CAUSES_WAKEUP` needs
+  `android.permission.TURN_SCREEN_ON` (`signature|privileged|appop`), which this app does not
+  have; the platform prints `Not allowing device wake-up for …`, drops the flag, and grants the
+  lock anyway. **`vm.sh wake` therefore stays the precondition** for every camera bar, exactly as
+  below.
+* **It does not touch the appop.** That is still the phone owner's setting.
+
+Check it on the phone with `dumpsys power | grep droidvm:camera`; if the lock is not held while a
+camera VM runs, read the switch (`cfg.sh show`) before blaming the platform
+(`plans/VPU_DESIGN.md` §7.1 and §8, the D76 row in §7.4, and `logs/vpu_wp/A7.md`).
+
+Either way the D76 signature is still a different claim from "the HAL wedged", so a report has to
+say which. Wake immediately before each camera bar and record the timeout in the report:
 
 ```sh
 adb -s "$PHONE" shell settings get system screen_off_timeout    # vm.sh wake prints it too
@@ -1048,6 +1121,77 @@ own. Running `llvm-strip` over them again writes *different* files (313 480 / 42
 — "is the probe on the phone the probe in the report" — stops working (B15-build §3.1). Collect
 with `cp`, then regenerate `md5sums.txt` beside them, and expect the md5s to be **unchanged**
 whenever the probe sources did not move.
+
+**13. A gst PSNR round trip reads ~24 dB of codec loss that does not exist, unless
+`colorimetry=` is pinned on both sides** (**D82**). `videotestsrc` renders its pattern using the
+colorimetry that was **negotiated**, and `v4l2h264enc` negotiates `bt601` where a bare `filesink`
+gets the 720p default `bt709` — so these two pipelines do not draw the same source frames:
+
+```sh
+gst-launch-1.0 videotestsrc num-buffers=N ! video/x-raw,format=NV12,… ! filesink location=src.nv12
+gst-launch-1.0 videotestsrc num-buffers=N ! video/x-raw,format=NV12,… ! v4l2h264enc ! … ! filesink
+```
+
+The colour-bar luma comes out as the BT.601 set (235, 210, 170, 145, 106, 81, 41) in one and the
+BT.709 set (235, 219, 188, 173, 78, 63, 32) in the other. **The tell is that the "loss" is
+constant on every frame**, including on a static pattern (`smpte100`, one distinct frame in 150,
+22.8 dB). Put `colorimetry=` in the caps filter of **every** pipeline in the comparison, or
+generate the source once and feed the same bytes to both: with `colorimetry=bt709` pinned, the
+same round trip measures **35.96 dB** (and 77.58 dB on `pattern=ball`), which clears the 35 dB
+bar (B15-soak §3.7/§5.4). Two smaller facts from the same dig: `v4l2h264enc` **refuses**
+`colorimetry=bt601` caps outright (negotiation fails, rc 1), and
+`ffmpeg -f lavfi -i testsrc2 … -c:v h264_v4l2m2m` needs an explicit `-pix_fmt nv12` or it dies
+with `Could not open encoder before EOF` / `-22` — the device is not involved in either.
+
+**14. Assert the VPU config before EVERY start — a daemon restart reverts it, and `vm.sh start`
+says nothing** (**D79**). This is trap 6's mechanism (`vm_modify` writes the daemon's in-memory
+store; `files/vms.json` is the app editor's) reached **without an APK install**: B15-soak had the
+daemon process replaced mid-session on an idle rig, the new one reloaded `files/vms.json`, and
+the next start produced a VM with `vpu_enabled false`, no camera row, pools back at 256/128 and
+**zero** `media pool` threads. It started perfectly happily — `state: running`, guest ssh in 21 s,
+a full boot to a login prompt — and there is **not one error line** anywhere: not in `daemon.log`,
+not in the VM log, not from `vm.sh start`, not from `hp.sh`. `served` drops 2656 → 2560, which is
+the only number that gives it away. A suite that does not check will measure a VM with no VPU in
+it and call the result a pass, or a regression in whatever it was testing. Dump the config once at
+the start of a run, and assert it before every `vm.sh start`
+(`logs/vpu_wp/scratch-B15s/cycles.sh`, the guard predicate verbatim):
+
+```sh
+cfgok=$(dvm get "$VM" | python3 -c '
+import json,sys
+d=json.load(sys.stdin).get("data") or {}
+cam=[p for p in d.get("peripherals",[]) if p.get("type")=="virtio_camera"]
+print("ok" if (d.get("vpu_enabled") and d.get("vpu_codec_enabled") and len(cam)==1
+      and d.get("vpu_host_pool_mb") is None and d.get("extra_options")==[]) else "REVERTED")')
+[ "$cfgok" = ok ] || dvm modify <your baseline dump>.json
+```
+
+It fired 0 times in B15-soak's 30 measured cycles and would have caught the one that cost that WP
+three of them. Why the daemon went away was **not** established (the rig did not restart it —
+`lib.sh daemon_start` always logs `daemon: starting`, and no such line exists) [unverified].
+
+**15. After a stop/start the guest's IPv6 address is dead for ~5 minutes, so use DHCPv4**
+(**D80**). `vm.sh wait-ssh` polls the EUI-64 address the rig computes from the MAC, and after a
+restart the guest's own DAD finds that address defended and drops it:
+
+```
+enp0s7: Address 2a0e:…:fefd:4d67 with tentative flag is removed,
+        maybe a duplicated address is assigned on another node or link?
+```
+
+(the phone's neighbour table shows the global address `FAILED` on `wlan0` while the guest's
+link-local is `STALE` on `br-wifi`). It comes back on its own about five minutes after boot, which
+is longer than `wait-ssh`'s 240 s default **and** longer than its documented 300 s ceiling — so
+the first two cycles of B15-soak §2 recorded a guest that never came up while its serial console
+was sitting at a login prompt. The guest's DHCPv4 address answers in ~20 s throughout. Reach it
+through the phone (the exact route the soak used in all 30 cycles, 14–22 s every time):
+
+```sh
+GUEST6=192.168.66.132 GUEST_SSH_VIA=proxy deploy/vpu/guest.sh ssh Ubuntu-resolute 'true'
+```
+
+Take the address from the guest's own `ip -4 addr` (or the phone's DHCP lease) once, at the start
+of the run; it survives the restarts. This is the lab network, not the VM.
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
