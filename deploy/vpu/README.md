@@ -85,6 +85,7 @@ deploy/vpu/vm.sh stop     Ubuntu-resolute
 deploy/vpu/vm.sh wait-ssh Ubuntu-resolute   # BUDGET=240 by default
 deploy/vpu/vm.sh log-level Ubuntu-resolute debug   # how loud the VMM is (defect D60)
 deploy/vpu/vm.sh log-level Ubuntu-resolute -       # back to crosvm's own info
+deploy/vpu/vm.sh wake                              # the phone's screen, before any camera bar
 ```
 
 `log-level` is the one knob that makes a `debug!` readable on a phone at all, and it is worth
@@ -121,12 +122,13 @@ the UI does (`DaemonHelper.java:138-151`) with the stdio redirection an `adb she
 
 Budget **90–120 s** from `vm_start` to ssh answering.
 
-Three verbs take no VM name:
+Four verbs take no VM name — three act on the daemon, and `wake` on the phone itself:
 
 ```sh
 deploy/vpu/vm.sh stop-all          # vm_stop_all, then wait until vm_list shows none running
 deploy/vpu/vm.sh daemon-check      # is the running daemon the installed APK's code?  (defect D12)
 deploy/vpu/vm.sh daemon-restart    # stop-all, then start with --force, then daemon-check
+deploy/vpu/vm.sh wake              # KEYCODE_WAKEUP + wm dismiss-keyguard, then print the state
 ```
 
 `daemon-check` prints the CLASSPATH the running daemon was started with next to `pm path
@@ -140,6 +142,22 @@ The CLASSPATH is read from `/proc/<pid>/environ`, **not** `cmdline`: the pid in
 first: the replaced daemon takes its VMs down with it (`Daemon.cleanup`), and a crosvm that ends
 any way other than `vm_stop` leaks RM memparcels until the phone is rebooted. Remember that a
 daemon restart also drops everything `vm_extra.sh` put in the in-memory store.
+
+`wake` is a **camera precondition**, not a convenience: the app's `CAMERA` appop is
+`foreground`-only, so a sleeping screen leaves the app `TOP_SLEEPING` and cameraserver refuses or
+revokes the stream — see trap 10 for the three signatures it produces. It sends `input keyevent
+KEYCODE_WAKEUP` and `wm dismiss-keyguard`, waits a second, and prints one line:
+
+```
+screen: mScreenState=ON mWakefulness=Awake screen_off_timeout=300000
+```
+
+`start` runs it by itself when the VM's config carries a `virtio_camera` row (`lib.sh`'s
+`wake_for_camera`), and never fails a start over it. That is not enough on its own: the screen
+sleeps again after `screen_off_timeout`, so run `wake` **immediately before** each capture — a
+`guest.sh ssh` that runs `v4l2-ctl --stream-mmap`, an ffmpeg `-f v4l2` bar, the band detector —
+and put the printed timeout in the report. Nothing it does outlives the session; the appop is
+left exactly as found.
 
 ### Waiting on VM state: `hp.sh`
 
@@ -802,7 +820,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Nine ways a run has silently lied to a work package. Each one cost a session; none of them
+Twelve ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -814,7 +832,12 @@ announces itself. In short, as a checklist:
 > diff against a known-good dump); toybox `ps -AT -o ...` drops the thread `comm`, so a
 > `media pool` thread counter reads 0 on a VM that has three; **`--log-level debug` slows the VMM
 > enough to change a frame count — measure frame-exactness at the default level**; and **the `seek`
-> the device logs at ffmpeg's EOF is ffmpeg's own close path, not a driver mistranslation**.
+> the device logs at ffmpeg's EOF is ffmpeg's own close path, not a driver mistranslation**;
+> **the camera needs the phone's screen awake**, because a sleeping one revokes access
+> mid-capture and reads exactly like a device fault; an **overlay-only crosvm change leaves
+> Gradle's `regenPrebuilts` UP-TO-DATE**, so the APK ships the previous payload unless the
+> manifest sha256 is checked; and the probes are **copied, not stripped** — soong already emitted
+> the stripped binary.
 
 And at length:
 
@@ -928,6 +951,103 @@ mistranslation and no mid-stream `STREAMOFF(OUTPUT)`. Reading that end-of-stream
 line as a driver or device fault sent an earlier dig down a blind alley; it is the expected shape of
 ffmpeg closing the queue. (With F17's D71 fix that line reads `seek`, not `reinit`, because the
 initial announce no longer leaves `format_change_pending` set for the life of the session.)
+
+**10. The camera needs the phone's screen awake, and the failure reads as a device fault.** The
+app's `CAMERA` appop on 5566 is `foreground` (`cmd appops get cn.classfun.droidvm CAMERA` →
+`Uid mode: CAMERA: foreground`), so cameraserver allows a *streaming* op only while that uid is in
+a foreground procstate. The lab phone's screen sleeps on its own, and with it off the app is
+`TOP_SLEEPING` (`dumpsys activity oom` → `T/A/TPSL`) — still the resumed activity, and enumeration
+still answers, which is why `camera_probe` happily lists all 41 YUV sizes — but the stream is
+refused, or revoked **mid-operation** if it had already started. Three signatures, one event:
+
+```
+logcat     E Camera3-Device: Camera 0: notifyStatus: Camera access permission lost mid-operation:
+                             Permission denied (-13)
+vm.sh log  ERROR android_camera] android_camera: camera device error 4
+           ERROR virtio_media::devices::camera] camera 0: session 6 ends: camera device error 4
+guest      VIDIOC_DQBUF: failed: No such device        (ENODEV, and a 0-byte capture file)
+```
+
+**Only the logcat line tells this apart from D76** — at the device layer and in the guest the two
+are identical, which is what makes it expensive: B15-build §5.2 lost five capture runs over four
+minutes to it, and B14-accept-B's D76 diagnosis should be re-read on that basis (some of its
+`camera device error 4` episodes may have been this and not a wedged HAL). So when a camera bar
+fails this way, read `logcat -d | grep -iE 'Camera(2ClientBase|3-Device)'` **before** filing
+anything.
+
+The precondition is one verb, and it changes nothing that outlives the session:
+
+```sh
+deploy/vpu/vm.sh wake      # KEYCODE_WAKEUP + wm dismiss-keyguard + 1 s, then the state line
+```
+
+`vm.sh start` runs it for a VM whose config has a `virtio_camera` row, and after it the process
+reads `T/A/TOP LCMNFUAT` — note the `C`, the camera capability — and the capture works first
+time. Do **not** reach for the appop instead: `cmd appops set` from an adb shell is refused
+(`SecurityException: uid 2000 does not have android.permission.MANAGE_APP_OPS_MODES`), and the
+mode is the phone owner's decision, not a rig setting.
+
+And the half `wake` cannot fix: the screen sleeps again after `screen_off_timeout` (**300 000 ms**
+on 5566), so a long capture, or a gap between the wake and the run, walks back into it. **That is
+the product-level D76** — a user's camera VM dying because the phone dimmed — and since
+2026-09-13 it is a **known limitation, not a defect anyone is fixing**: the app will not touch the
+appop, the screen has to stay on while a VM uses the camera, and a guest that lost the session has
+to reopen it after the screen wakes (`plans/VPU_DESIGN.md` §7.1 and the D76 row in §7.4). It is
+still a different claim from "the HAL wedged", so a report has to say which. Wake immediately
+before each camera bar and record the timeout in the report:
+
+```sh
+adb -s "$PHONE" shell settings get system screen_off_timeout    # vm.sh wake prints it too
+```
+
+It is not recoverable afterwards, and without it "the capture ran for 3 s" and "the capture ran
+for 6 minutes" carry completely different weight.
+
+**11. An overlay-only crosvm change cannot invalidate Gradle's `regenPrebuilts`, so the APK ships
+the PREVIOUS payload.** `app/build.gradle.kts`'s `RegenPrebuiltsTask` declares only
+`DroidVM-Prebuilt-Root/auto-build/` and `auto-build.py` as inputs, and marks `prebuiltRoot`
+`@Internal` on purpose (*"hashing the whole root would drag in manual-build/, which carries
+hundreds of megabytes of binaries the script never reads"*). `6_build_apk_prepare.sh`'s overlay
+writes **only** into `manual-build/arm64-v8a/`, so Gradle sees nothing change. What it looks like
+(B15-build §3.2):
+
+```
+> Task :app:regenPrebuilts UP-TO-DATE
+> Task :app:mergeDebugAssets UP-TO-DATE          48 tasks, 6 executed -- a real repack is ~26
+136531586 app-debug.apk                          byte-for-byte the size of the previous build
+usr/bin/crosvm  apk=d6f53ae80715ff31b9ab237c  host=10530b8446269333e76152f8  MISMATCH
+```
+
+`7_build_apk.sh` now closes it from the rig side: it runs the task's own action itself
+(`python3 auto-build.py --out DroidVM/app/src/main/assets/prebuilts`) before `./build.sh`, which
+both fixes the assets and — by rewriting the task's `@OutputDirectory` — puts `regenPrebuilts`
+out of date so `mergeAssets` runs; and it ends by comparing the APK's own
+`assets/prebuilts/prebuilt-arm64-v8a.json` entry for `usr/bin/crosvm` against
+`sha256sum crosvm_out/crosvm`, failing loudly on a mismatch. Touching the inputs is not an
+alternative: Gradle hashes contents, not mtimes.
+
+**Keep checking anyway**, and keep checking the *manifest*: `install_apk.sh` verifies the phone
+against **the APK's own manifest**, so a stale APK installs, extracts and verifies clean end to
+end — every check passes and the phone runs last week's crosvm. "The install passed" is not
+evidence; `usr/bin/crosvm: MATCH` from `7_build_apk.sh`, or the phone's `md5sum` against
+`crosvm_out/crosvm`, is.
+
+**12. The probes are COPIED, not stripped — a second `llvm-strip` breaks comparability.** The
+recipe's wording "collected stripped" describes what soong already did:
+
+```
+crosvm_build/out/soong/.intermediates/external/crosvm/android_camera/camera_probe_bin/android_arm64_armv8-a/camera_probe
+crosvm_build/out/soong/.intermediates/external/crosvm/android_codec/codec_probe_bin/android_arm64_armv8-a/codec_probe
+```
+
+**are** the stripped binaries (the unstripped ones sit in `unstripped/` beside them), and every
+md5 this project has ever published — `camera_probe ab23e9c2072301a330a0f587d8d0142f`,
+`codec_probe 6318225f9591ae27597fbee92c959a8d`, unchanged since F11-misc and B7 — is those files'
+own. Running `llvm-strip` over them again writes *different* files (313 480 / 428 144 B,
+`fc52b166…` / `d05d431f…`) that match nothing anyone shipped, so the one thing the md5s are for
+— "is the probe on the phone the probe in the report" — stops working (B15-build §3.1). Collect
+with `cp`, then regenerate `md5sums.txt` beside them, and expect the md5s to be **unchanged**
+whenever the probe sources did not move.
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
