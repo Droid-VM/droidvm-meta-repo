@@ -822,6 +822,17 @@ reserve) and a **cross-package camera contender** (there is no consent screen an
 app evicts the VM, the guest gets `ENODEV`, `v4l2-ctl` exits 0 and a capture after the contender
 closes works with no VM restart; `plans/VPU_DESIGN.md` §7.1).
 
+**And a limitation to state, not a box to tick: concurrent, coupled decode + encode on one helper
+(D64).** A 1080p decode running alongside a 1080p encode on the same helper is not bit-exact (B17:
+0/6; 4K+1080p 0/3; 1080p+720p 0/3), and removing the old F19 back-pressure (F20) did not change
+that — the loss stays **mixed** (aligned head-GOP loss in some runs, decoded-but-wrong pixels in
+others), and the only thing F20 moved is the encoder half of the matrix, now solid 300. Sequential
+use is clean (decode fully, then encode, or the reverse), GStreamer is clean both ways (DRC 20/20,
+encode 300/300), and a single-session hardware decode is bit-exact and fast again (~0.71–0.95 s,
+past B15). So when a bar runs a decode and an encode at once and the pixels do not match, that is
+the documented limitation, not a regression — `plans/VPU_DESIGN.md` §7.4 D64 and
+`logs/vpu_wp/B17-acceptance.md` §6.
+
 ### Next rig WP: three things this round worked around by hand
 
 None of these is implemented — B16's acceptance was running live on the phone while this was
@@ -870,7 +881,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Fifteen ways a run has silently lied to a work package. Each one cost a session; none of them
+Sixteen ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -889,8 +900,10 @@ announces itself. In short, as a checklist:
 > manifest sha256 is checked; and the probes are **copied, not stripped** — soong already emitted
 > the stripped binary; a gst PSNR pipeline reads **24 dB of loss that is not there** unless
 > `colorimetry=` is pinned on **both** sides; **assert the VPU config before every start**,
-> because a daemon restart reverts it and `vm.sh start` then prints nothing at all; and after a
-> stop/start the guest's **IPv6 address is dead for ~5 minutes** (DAD), so reach it over DHCPv4.
+> because a daemon restart reverts it and `vm.sh start` then prints nothing at all; after a
+> stop/start the guest's **IPv6 address is dead for ~5 minutes** (DAD), so reach it over DHCPv4;
+> and the **first encode of a resolution after a helper starts is unfloored** — warm one up and
+> discard it before measuring, sessions 2+ are 300/300 at the ffmpeg default.
 
 And at length:
 
@@ -1051,9 +1064,10 @@ the product-level D76** — a user's camera VM dying because the phone dimmed.
 While any non-STOPPED VM that really attaches a camera has the switch on, the app holds a
 `SCREEN_DIM_WAKE_LOCK` tagged `droidvm:camera` from `PeripheralForegroundService`, released when
 the last such VM stops. So on a default VM the screen does not dim underneath a capture, and
-**the limitation above applies only when the switch is off** — which is a choice, not a
-regression: it trades "the screen stays lit for hours" for "the screen sleeps and a capture can
-die". Two things the switch does *not* buy:
+the limitation above was expected to apply only when the switch is off — a choice, not a
+regression, trading "the screen stays lit for hours" for "the screen sleeps and a capture can
+die" — **but on this build B16 could not make the switch-off case fail at all** (see below). Two
+things the switch does *not* buy:
 
 * **It cannot wake a screen that is already dark.** `ACQUIRE_CAUSES_WAKEUP` needs
   `android.permission.TURN_SCREEN_ON` (`signature|privileged|appop`), which this app does not
@@ -1061,6 +1075,22 @@ die". Two things the switch does *not* buy:
   lock anyway. **`vm.sh wake` therefore stays the precondition** for every camera bar, exactly as
   below.
 * **It does not touch the appop.** That is still the phone owner's setting.
+
+**On this platform build, B16 could not reproduce the switch-off failure at all**
+(`logs/vpu_wp/A7.md`, `logs/vpu_wp/B16-acceptance.md` §6 bar 3). With `camera_keep_screen_on` off
+and the screen genuinely asleep (`mWakefulness=Asleep`, `mState=OFF`), a 60 s capture still
+completed in full — 1500/1500, 2 073 600 000 B, `-13` count 0. The reason is in the oom line: the
+app sits at `F/A/FGS -C-NFUAT` — a foreground service carrying the camera capability — **not**
+`TOP_SLEEPING`/`T/A/TPSL`. `PeripheralForegroundService` runs with `FOREGROUND_SERVICE_TYPE_CAMERA`,
+and that procstate alone is enough for AppOps to resolve the `foreground` CAMERA op with the
+display off. So the everyday D76 outcome above — "the screen sleeps and the capture dies
+mid-operation" — **is contradicted on this platform build**: the camera foreground service by
+itself keeps a screen-off capture alive, which makes `camera_keep_screen_on` **belt-and-suspenders**
+(the FGS carries the procstate; the switch, default on, only *also* holds the screen lit). State
+this only as **B16-measured on this platform build** — whether D76's window is still reachable in
+some other procstate (the app not resumed, a longer capture) B16 did not determine (B16 §6
+issue 3). `vm.sh wake` still stays the precondition only for waking a screen that is already dark
+(`ACQUIRE_CAUSES_WAKEUP` is refused, as above).
 
 Check it on the phone with `dumpsys power | grep droidvm:camera`; if the lock is not held while a
 camera VM runs, read the switch (`cfg.sh show`) before blaming the platform
@@ -1192,6 +1222,22 @@ GUEST6=192.168.66.132 GUEST_SSH_VIA=proxy deploy/vpu/guest.sh ssh Ubuntu-resolut
 
 Take the address from the guest's own `ip -4 addr` (or the phone's DHCP lease) once, at the start
 of the run; it survives the restarts. This is the lab network, not the VM.
+
+**16. The first encode of a resolution after a helper starts is unfloored — warm one up before
+measuring frame counts** (**D78** residual, since **F20**). ffmpeg's `h264_v4l2m2m` encoder
+initialises only **4** CAPTURE (bitstream) buffers by default, too few to survive its own EOF
+drain, so at the default every `testsrc2` encode used to write **246–260 of 300** (B16 §5). Since
+WP F20 the device floors the encoder's `REQBUFS(CAPTURE, n)` to a value it **learns from the
+codec's `num-output-slots`** — `c2.qti.avc.encoder` reports 8 at 720p, floored to 16 — so at the
+ffmpeg **default** the three `testsrc2` encodes and the camera-fed encode are **300/300** and
+**133/133** (B17 §4). This supersedes the old "pass `-num_capture_buffers 16`" workaround: sessions
+2+ need nothing. But the floor is learned from a **running** codec, so the **first** encode session
+of a given fourcc per helper lifetime runs **unfloored** and can drop a couple of coded frames —
+B17's session 7 dropped 2. So run one warm-up encode of each resolution after the VM starts and
+discard it, or expect the first sample to come up a frame or two short. The tell is
+`REQBUFS(CAPTURE, 4)` with no `=> 16` in that session's strace, and the one-per-boot device line
+`encoder session N: codec fills 8 output slots; CAPTURE floor 16 for later sessions of H264`. gst
+over-provisions and never sees this (`plans/VPU_DESIGN.md` §7.3, the D78 row in §7.4).
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
