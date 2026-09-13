@@ -416,6 +416,19 @@ capture-result callbacks（`ACameraCaptureSession_captureCallbacks`，8 欄位�
 gst `v4l2src ! fakesink` 跑通；另跑 `driver_owned_queues=all`（幀寫進 `media_guest`）與 pseudo-unprotected 各一輪。
 前置 smoke：先用既有 `camera_probe capture --uid <app uid>` 在 5566 上確認 app 前景 + FGS 下相機開得了（舊 plan §0 的量測從未在 5566 做過）。
 
+**已知限制：相機在用的時候手機螢幕必須亮著（D76，2026-09-13 使用者定案「不修，寫進文件」）**：app 的 `CAMERA` appop 是
+**`foreground`**（`cmd appops get cn.classfun.droidvm CAMERA` → `Uid mode: CAMERA: foreground`），cameraserver 只在該 uid 處於
+前景 procstate 時放行**串流**動作。螢幕睡著時 app 就算還是 resumed activity 也只算 `TOP_SLEEPING`（`dumpsys activity oom` → `T/A/TPSL`），
+於是存取會在**串流進行中**被撤銷：logcat `Camera access permission lost mid-operation: Permission denied (-13)`、
+裝置端 `android_camera: camera device error 4`、guest 收到 `ENODEV`（`VIDIOC_DQBUF: failed: No such device`），
+該 session 就死了，**要等螢幕醒來之後重開 session**（列舉、`--info`、`--get-fmt` 不受影響，因為那些不是串流動作）。
+這不是裝置或 backend 的缺陷，app 也不打算修（改 appop 要 `MANAGE_APP_OPS_MODES`，而模式本來就是手機主人的決定）。
+驗收與量測的規矩：每一次擷取之前先 `deploy/vpu/vm.sh wake`（`KEYCODE_WAKEUP` + `wm dismiss-keyguard`，`start` 在 VM 有
+`virtio_camera` 列時自己會做），並把 `settings get system screen_off_timeout`（5566 上 **300 000 ms**）記進報告——螢幕會自己再睡著，
+所以「量測窗有多長」事後補不回來。徵狀與五次假失敗的完整經過在 `logs/vpu_wp/B15-build.md` §5.2；
+`logs/vpu_wp/B14-accept-B.md` §9 那份把 `camera device error 4` 歸給快速 stop/start 循環的 D76 診斷要照這條重讀，
+其中部分（甚至全部）episode 可能就是螢幕睡著，而不是 HAL 卡死。
+
 **已接受的 `v4l2-compliance` 失敗（D22，2026-09-05 定案，B8 量測更新）**：M5 的控制項落地**之前**，
 `v4l2-compliance -d /dev/video0 -s` 在 5566 上跑完是 59 / 56 / 3（`logs/vpu_wp/B5-acceptance.md` §4.6）；
 控制項落地**之後**一度是 **59 / 54 / 5**（`B7-ship.md` §5.3、`B7-controls.md` §15），多出來的兩條都是控制項的：
@@ -659,6 +672,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D73** | `REQBUFS`/`CREATE_BUFS` 是**全有或全無**：`libavdevice` 的 v4l2 indev 用寫死的 `desired_video_buffers = 256` 且沒有選項可改，裝置夾到 `MAX_BUFFERS`（32）後**一次配 32 個或一個都不配**，4K NV12 就是 32 × 12 443 648 = 379.75 MiB，320 MiB 的池裝不下 → 整個 `REQBUFS` 回 `ENOMEM`（B14-accept-B §2：帳爬到 311 091 200／25 個，第 27 個被拒），而同樣 4K 的 `REQBUFS(3)` 好好的。**沒有任何手機肯給的池大小能關掉它**，因為要幾個是客戶端寫死的 | **F18 修**（fork host 已改＋四個裝置各自的測試；B15 觀察 4K `ffmpeg -f v4l2` 拍得起來、`REQBUFS` 給約 25／256 且池的行指名它） | fork `camera.rs`／`loopback_device.rs`／`video_decoder.rs`／`video_encoder.rs` | **F18**：比照 vb2——`__vb2_queue_alloc` 配得到多少留多少，`vb2_core_reqbufs` 只在低於 queue 自己的底線時才 `-ENOMEM`（`videobuf2-core.c:977`），`vb2_core_create_bufs` 只在一個都沒配到時才失敗（`:1102`）；配不下就停在那裡並回**真的給了幾個**。底線＝camera／loopback／encoder 各 **1**（`streamon` 只擋空 queue），decoder CAPTURE 為 `session.min_capture_buffers`（**D72**，少於它是卡死不是變慢）。低於底線照舊 `undo_added` 全退 + `ENOMEM`（池的 exhausted 行照印）；短給時一條 `info!`，`CREATE_BUFS` 回真正建出來的 `index` + `count` |
 | **D74** | D65 的 32 MiB step 只以**位元組**設限，對「在邊界上來回」的 lease 等於沒設限：B14-accept-B §4 的 4K×6 storm（74.7 MiB lease、每個 cycle 跨四次、60 s 56 503 cycles）打出約 **226 000** 條 `info`，1 MiB 的 ring 塞滿並繞回，`launched media helper`／`pool served by the VMM over fd`／`the pool connection for` 全被擠掉，只剩 **2.07 秒**歷史 | **F18 修**（crosvm 已改＋mpt 測試；B15 觀察 60 s 跨 step storm 之後開機那幾行還在、且看得到 `(N step crossings not logged)`） | M8 / `pool.rs`——F16-codec §6 item 4 自己記下的 caveat，這是它指的那根槓桿 | **F18**：step 規則不動（不跨 step 仍然一條都不印），後面再加**每 lease 每秒最多一條**（`POOL_LOG_INTERVAL`，D51 的 `pr_warn_ratelimited` 型）；窗內被壓下的跨越會計數，下一條印出來的行以 `(N step crossings not logged)` 帶出，`ReleaseAll`／sweep 照舊**一定**印並開新窗。判斷函式 `info_line_due` 把時鐘當參數，測試用模擬時間跑 10 000 次振盪 |
 | **D75** | `deploy/vpu/tests/unbind_rebind.sh` 對真相機報 **6 個假失敗**（3 輪 × 2），而 **D66 的實質三輪全過**：(1) 斷言 `rc != 0`，但 v4l-utils 1.32.0 的 streaming loop 印完 ioctl 錯誤就 `return`——`v4l2-ctl --stream-mmap` 在自己的 ENODEV 路徑上**回 0**（B14-accept-B §1.2 直接量過）；(2) byte 檢查寫死 640×480 RGB3（921 600），那是合成 `kind=simple` 裝置的唯一格式，相機是 1280×720 NV12，於是正確的 30 × 1 382 400 = 41 472 000 B 被判成失敗 | **F18 修**（rig；B15 觀察相機上 `--rounds 3` 回 0 failures） | meta `deploy/vpu/tests/unbind_rebind.sh`（測試自己，不是產品） | **F18**：改判**症狀**——客戶端的輸出要出現 `No such device`／`ENODEV`／`POLLERR` 且行程在 15 s 窗內消失（結束碼只印出來備查）；期望位元組改成節點自己 `--get-fmt-video` 的各 plane `Size Image` 相加，m2m 的輸入檔同樣由 `--get-fmt-video-out` 決定，檔案裡不再有寫死的畫格大小。3 輪形狀、D/Z 檢查、dmesg splat 計數不動 |
+| **D76** | 相機串流中手機螢幕睡著 → app 變 `TOP_SLEEPING` → cameraserver 中途撤銷 `foreground` 的 CAMERA appop：logcat `Camera access permission lost mid-operation … (-13)`、裝置 `android_camera: camera device error 4`、guest `ENODEV`，session 死掉、要等螢幕醒來再開 | **關——已知限制**，2026-09-13 使用者定案 (c)：不在 app 修、寫進文件；rig 這一側補 `deploy/vpu/vm.sh wake` 當前置條件（`start` 遇到 `virtio_camera` 列自動做）並印 `screen_off_timeout`。B14-accept-B 原本把它記成「快速 stop/start 循環之後相機卡死」，那份診斷要重讀 | 平台／產品行為（Android appop 的 `foreground` 語意），**不是**裝置、backend 或池 | 沒有 WP：§7.1 的「已知限制」段落 + `deploy/vpu/README.md` trap 10（`logs/vpu_wp/B15-build.md` §5.2、`logs/vpu_wp/B14-accept-B.md` §9） |
 
 ## 8. app / daemon（WP-A1）
 

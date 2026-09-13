@@ -61,6 +61,36 @@ adb_wait() {
     die "adb: $PHONE is not reachable"
 }
 
+# --- the phone's screen -------------------------------------------------------------------------
+# The camera needs it awake. The app's CAMERA appop on the lab phone is `foreground`
+# (`cmd appops get cn.classfun.droidvm CAMERA` -> `Uid mode: CAMERA: foreground`), which
+# cameraserver reads as "only while that uid is in a foreground procstate". A sleeping screen puts
+# the app in TOP_SLEEPING -- still the resumed activity, not foreground enough -- and access is
+# revoked MID-OPERATION, so a capture that had already started dies. B15-build §5.2 lost five
+# capture runs to this before logcat explained it; see README trap 10 for the three signatures.
+#
+# Nothing here outlives the session or changes phone state a user would not: KEYCODE_WAKEUP plus
+# `wm dismiss-keyguard` is picking the phone up, the appop is left exactly as found (changing it
+# needs MANAGE_APP_OPS_MODES, which the shell uid does not have), and the screen sleeps again on
+# its own `screen_off_timeout`.
+phone_wake() {
+    ash "input keyevent KEYCODE_WAKEUP" >/dev/null
+    ash "wm dismiss-keyguard" >/dev/null
+    sleep 1   # read the state after the transition, not during it
+    phone_screen_state
+}
+
+# One line, one round trip: what the screen is doing and how long it stays that way. The timeout
+# is here because it is the number a report needs -- a screen that sleeps mid-capture is the
+# product-level defect D76, and "how long did we have" is not recoverable afterwards.
+phone_screen_state() {
+    # shellcheck disable=SC2016  # the $( ) is for the phone's shell, not this one
+    echo "screen: $(ash 'dumpsys display 2>/dev/null | grep -m1 -o "mScreenState=[A-Za-z]*"
+                         dumpsys power   2>/dev/null | grep -m1 -o "mWakefulness=[A-Za-z]*"
+                         echo "screen_off_timeout=$(settings get system screen_off_timeout)"' \
+                    | tr '\n' ' ')"
+}
+
 # --- daemon -------------------------------------------------------------------------------------
 daemon_pid() {
     local pid
@@ -210,6 +240,27 @@ print(sys.argv[2] if v is None else (v if isinstance(v, str) else json.dumps(v))
 # vm_list reports the state as the VMState enum NAME ("RUNNING"), while vm_status lowercases it
 # (StatusHandler.java:36-37). Normalise, so callers only ever compare against lowercase.
 vm_state() { vm_field "$1" state STOPPED | tr '[:upper:]' '[:lower:]'; }
+
+# Does this VM's stored config carry a camera? The peripherals array is part of the config
+# vm_list returns (VMInstance.toInfoJson -> item.toJson), and a camera row is
+# {"host_label":"Back camera (0)","type":"virtio_camera","host_device":"0"}.
+vm_has_camera() {  # vm_has_camera <json from vm_info>
+    printf '%s' "$1" | python3 -c '
+import json,sys
+cfg = json.load(sys.stdin)
+rows = cfg.get("peripherals") or []
+sys.exit(0 if any(isinstance(p, dict) and p.get("type") == "virtio_camera" for p in rows) else 1)'
+}
+
+# The precondition every camera bar has: wake the screen before the capture can be refused for
+# being asleep (see phone_wake above and README trap 10). A no-op for a VM with no camera row, so
+# callers can run it unconditionally; never fatal, because a failure to wake is not a reason to
+# refuse to start a VM -- it only means the capture may hit the TOP_SLEEPING revoke.
+wake_for_camera() {  # wake_for_camera <json from vm_info>
+    vm_has_camera "$1" || return 0
+    note "camera row in the config: waking the phone's screen first (B15-build §5.2)"
+    phone_wake || note "wake: could not wake $PHONE -- a capture may fail with camera device error 4"
+}
 
 # --- editing a stored config --------------------------------------------------------------------
 # vm_config_edit <name-or-id> <python program> [argv...]

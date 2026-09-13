@@ -25,11 +25,19 @@
 # up" / "it is really gone" long before ssh or vm_list do. The verdict is printed and never
 # fatal; HP_CHECK=0 skips it. wait-ssh does treat one verdict as fatal -- see below.
 #
-# Three verbs take no VM name and act on the daemon as a whole:
+# Four verbs take no VM name -- three act on the daemon as a whole, and `wake` on the phone:
 #
 #   vm.sh stop-all             vm_stop_all -- stop every running VM cleanly, and wait
 #   vm.sh daemon-check         is the running daemon the code the INSTALLED APK carries? (D12)
 #   vm.sh daemon-restart       stop every VM, then restart the daemon with --force onto that APK
+#   vm.sh wake                 wake the phone's screen, dismiss the keyguard, print what it did
+#
+# `wake` is a camera precondition, not a convenience. The app's CAMERA appop is `foreground`, so a
+# sleeping screen leaves it TOP_SLEEPING and cameraserver revokes access mid-capture: logcat
+# `Camera access permission lost mid-operation (-13)`, the VM log `camera device error 4`, and
+# ENODEV in the guest (B15-build §5.2, README trap 10). `start` runs it by itself when the VM's
+# config carries a camera row; run it by hand right before any capture, because the screen sleeps
+# again on its own `screen_off_timeout` -- which `wake` prints, and which a report should carry.
 #
 # PHONE=<host:port> overrides the device (default 172.22.74.2:5566).
 # The daemon is started if it is not running; see lib.sh's daemon_start.
@@ -73,6 +81,7 @@ case "$VERB" in
 stop-all)       vm_stop_all; rc=$?; hp expect off --wait 30 || true; exit "$rc" ;;
 daemon-check)   daemon_check;  exit ;;
 daemon-restart) daemon_restart && daemon_check; exit ;;
+wake)           phone_wake; exit ;;
 esac
 
 [ -n "$NAME" ] || usage
@@ -93,6 +102,11 @@ status)
     ;;
 start)
     if [ "$STATE" = running ]; then echo "already running (pid $PID)"; exit 0; fi
+    # A camera row means the first thing the guest does with /dev/video0 goes through the app's
+    # `foreground`-only CAMERA appop, so the screen has to be awake for it. Doing it here costs a
+    # second and removes the commonest false `camera device error 4` (B15-build §5.2); it does not
+    # remove the need to wake again right before a capture, since the screen sleeps on its own.
+    wake_for_camera "$INFO"
     dvm start "$ID" --clear-logs || exit 1
     # StartHandler returns as soon as the launch is accepted; poll for the state to settle.
     s=$STATE
