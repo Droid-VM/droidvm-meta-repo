@@ -881,7 +881,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Sixteen ways a run has silently lied to a work package. Each one cost a session; none of them
+Seventeen ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -1238,6 +1238,18 @@ discard it, or expect the first sample to come up a frame or two short. The tell
 `REQBUFS(CAPTURE, 4)` with no `=> 16` in that session's strace, and the one-per-boot device line
 `encoder session N: codec fills 8 output slots; CAPTURE floor 16 for later sessions of H264`. gst
 over-provisions and never sees this (`plans/VPU_DESIGN.md` §7.3, the D78 row in §7.4).
+
+**17. An ffmpeg hardware decode-back frame count is unreliable for a long fresh clip — trust the
+device or gst, not ffmpeg** (**D81**, client-side). Decoding an mp4 the hardware encoder produced
+seconds earlier with `ffmpeg -c:v h264_v4l2m2m` comes up **silently short** on a fraction of runs
+(`rc 0`, no device error), and B17-soak measured the rate scaling hard with clip length: **21 of
+30** on 300-frame clips (70%) versus ~5–12% on the ~80-frame clips earlier WPs used. It is **not**
+the device — the VM log prints the full `N frames out` for the session, and a GStreamer decode of
+the very same clip is **300/300** — so it is ffmpeg's own `h264_v4l2m2m` dequeue/CAPTURE path
+(the guest driver / ffmpeg loop, `plans/VPU_DESIGN.md` D81 in §7.4, B16 open item 4). A count bar
+that reads ffmpeg's `-f rawvideo` frame count as ground truth will fail here for no product
+reason; take the device's `frames out` line, or a gst decode, as the reference instead. `-num_capture_buffers`
+does not help this one (unlike trap 16's encoder case).
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
