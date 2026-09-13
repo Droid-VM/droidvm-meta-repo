@@ -437,6 +437,19 @@ tag `droidvm:camera`，由已經存在的 `PeripheralForegroundService` 持有�
 `logs/vpu_wp/B14-accept-B.md` §9 那份把 `camera device error 4` 歸給快速 stop/start 循環的 D76 診斷要照這條重讀，
 其中部分（甚至全部）episode 可能就是螢幕睡著，而不是 HAL 卡死。
 
+**跨行程的相機爭用：對方贏，我們乾淨地讓開，對方關掉就自己回來（2026-09-13 依 `logs/vpu_wp/B15-soak.md` §3.8 記為**已記載的爭用行為**，不是缺陷）**。B-final §6 只寫到「OEM 相機 app 卡在同意畫面所以量不到」；B15-soak 在 guest 已經串流 30 秒的時候
+`am start -n com.oplus.camera/.Camera`（沒有點任何東西，該 app 的 CAMERA 早就 `granted=true` / appop `allow`），
+平台**驅逐**我們：`EVICT device 0 client held by package cn.classfun.droidvm … Evicted by device 0 client for
+package com.oplus.camera`。四層各自的反應都是對的——裝置端印 `android_camera: camera device disconnected` 與
+`camera 0: session 22 ends: the camera was disconnected`（一個**專屬**訊息，不是通用的 `camera device error 4`）、
+guest driver `received error 19 for session 22, marking it dead`（ENODEV）、guest 客戶端 `VIDIOC_DQBUF: failed:
+No such device` 而 `v4l2-ctl` **乾淨地 rc 0** 結束（寫出 900 張裡的 178 張，沒有卡死、沒有 D state）、
+guest oops **0**。對方一關掉（`Active Camera Clients: []`），**不必重啟 VM**，下一次 30 張擷取就回到 41 472 000 B。
+所以規則是：**相機是手機的，先來後到由平台決定，被搶走時 guest 看到的是 `ENODEV`，重開 session 就好。**
+同一台 VM **掛兩台相機**也已經量過（同 §3.1）：兩個 helper、兩條 `media pool` 執行緒、`/dev/video0` 與 `/dev/video1`
+各自 30 張 41 472 000 B、兩個真的不同的視野（背面／正面 PNG 都看過），而 `served=2656, pool_avail=416/3072` 不變——
+**多一台相機不多花保留區**（codec 節點會往後移，`VpuConfig` 的註解早就說了）。
+
 **已接受的 `v4l2-compliance` 失敗（D22，2026-09-05 定案，B8 量測更新）**：M5 的控制項落地**之前**，
 `v4l2-compliance -d /dev/video0 -s` 在 5566 上跑完是 59 / 56 / 3（`logs/vpu_wp/B5-acceptance.md` §4.6）；
 控制項落地**之後**一度是 **59 / 54 / 5**（`B7-ship.md` §5.3、`B7-controls.md` §15），多出來的兩條都是控制項的：
@@ -632,6 +645,35 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
     行尾。D75 是 `tests/unbind_rebind.sh` 自己的兩個合成裝置假設（`v4l2-ctl` 在 ENODEV 路徑上回 0、byte 檢查寫死
     640×480 RGB3），害 D66 的三輪實質全過卻報 6 個假失敗。
 
+  * **D64 第三度定案（F19），D77 一起修，客戶端從此該預期什麼**（2026-09-13 依 `logs/vpu_wp/F19-decoder.md` §1–§4 補）。
+    F17 的「grace 一次性」沒有關掉 D64（B15 仍量到 12 個 contended session 掉頭），orchestrator 接著提的
+    **`DEC_CMD_START` 假說在程式碼裡被證偽**：`decoder_cmd(V4L2_DEC_CMD_START)` 整段包在 `if session.drain != Drain::None`
+    裡（`video_decoder.rs:2395`），而**初次**宣告時 `drain` 是 `None`（`FormatChanged` 只在 `format_announced` 已為真時
+    才設 `Drain::Stopped`），所以 ffmpeg 用來回應初次 `SOURCE_CHANGE` 的那個 `DEC_CMD_START` **是完全的 no-op**——
+    不 `resume()`、不 flush、不動任何扣住的輸出；fork 測試 `dec_cmd_start_on_the_initial_source_change_loses_no_produced_frame`
+    把這件事釘住（六張都到得了客戶端、`resumes/flushes/clears` 全 0）。
+    **真正的機制**：`frames out` 是 **270**、seek 那行是 `0 held output(s) dropped`——裝置一張都沒丟，那 30 張
+    codec **根本沒產出過**。ffmpeg 在 `SOURCE_CHANGE` 之前就用 `S_FMT(OUTPUT)` 的佔位尺寸把 CAPTURE 排好、之後
+    **不再 `REQBUFS`**（D77），於是宣告之後沒有一個 CAPTURE buffer 借出，codec 的 21 個 output slot 全被我們扣著，
+    而 ffmpeg 在 ~1.1 s 內把 300 個 packet 全灌進來、`pump_input` 一路餵進 codec；有並行 encoder session 搶同一顆
+    硬體時（純 CPU 負載不會，B15 §2.4），那批積壓的輸入被 codec 自己丟掉，解碼從下一個 IDR 重來。
+    窗口單獨跑 ~50 ms、被編碼器搶時 ~330 ms，這就是「只有宣告慢的時候才整個 GOP 不見」的原因。
+    **修法是 back-pressure**：`pump_input` 在「手上未交付的輸出 ≥ `min_capture_buffers`」時停止餵 codec，
+    位元流留在 `pending`（guest 早就收過 `InputBufferDone`，D28/D48），等 `pump_output` 交付一張、slot 空出來才續餵。
+    **客戶端該預期的三件事**：
+    (a) 一個格式的**第一次**解碼，`REQBUFS(CAPTURE, n)` 可能就照 n 給（那時還沒有東西可學），**第二次以後**會被抬到
+    學到的最小值（5566 的 H264 是 **21**）——V4L2 本來就允許 `REQBUFS` 回比要求更多，D72 已經立過這條規矩；
+    (b) 把 CAPTURE 排滿的客戶端（gst 排 25 個）**碰不到** back-pressure，不會被限速；
+    (c) 餓著 CAPTURE 的客戶端從此是**變慢**，不是**安靜掉一整個 GOP**——`EOS` 永遠不會被扣住（drain 一定走得完），
+    D28 那個不產出畫格的合規串流也永遠碰不到上限。
+    **fork 這一側新增的 trait 面**：`VideoDecoderBackend::min_capture_buffers(&self, fourcc: PixelFormat) -> Option<u32>`
+    （預設 `None`），裝置在 `new_session` 與 `s_fmt(OUTPUT)` 用它種下 `session.min_capture_buffers`；
+    backend 端記憶體是 `android.rs` 的 `learned_min: Arc<Mutex<HashMap<u32, u32>>>`（以 `fourcc.to_u32()` 為 key，
+    因為 `PixelFormat` 不是 `Hash`；跟著裝置 factory 的 `Clone` 走，所以活得比一個 session 久）。
+    **沒有任何數字寫死**——底線只會是某一次真宣告報過的值。另一半是「宣告值大於正在 streaming 的 CAPTURE 數量時
+    **扣住而不是失敗**」：只 warn 一次（`warned_capture_below_announced_min`）並繼續扣，session 不死。
+    兩條都**只有主機側的型別檢查與 fork 測試**（host 沒有真 codec），**B16 才是門檻**。
+
 ### 7.3 編碼器（WP-M7 = 舊 plan C1–C3）
 
 * crate 新 `devices/video_encoder.rs`：形狀鏡像 `video_decoder.rs`（OUTPUT = 原始 NV12、guest-owned；CAPTURE = 位元流、host-owned）；
@@ -642,6 +684,31 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
   把 guest 的緊排 NV12 逐行填進 `getInputBuffer`（padding 到 stride，chroma 從 `stride*sliceHeight` 起），`queueInputBuffer` 整個 padded size；輸出 `BUFFER_FLAG_CODEC_CONFIG`
   依 `HEADER_MODE` 決定另發或併入第一幀，`KEY_FRAME` flag → `V4L2_BUF_FLAG_KEYFRAME`；動態改碼率/強制 I 幀用 `setParameters`（`video-bitrate`、`request-sync`）。
 * 驗收：舊 plan C2（guest `ffmpeg -c:v h264_v4l2m2m out.mp4` 可播、釘時脈後 CPU ≤ libx264 的 1/3）、C3（kdenlive profile）。
+* **輸入 staging 與 `STREAMOFF(OUTPUT)` 排空契約（WP F19-encoder，修 D78；2026-09-13 依 `logs/vpu_wp/F19-encoder.md` §1–§3 補）。**
+  * **staging**：`encode()` 立刻把 guest 的 NV12 拷成自有的 `PendingInput::Staged { data, timestamp }` 並**當場**推
+    `InputBufferDone(index)`，之後才照 codec 的 input slot 空檔從那份拷貝餵進去（不會再推第二次 `InputBufferDone`）。
+    guest 因此不再被 codec 的 input slot 節流；更重要的是——**一旦告訴 guest「這張收下了」，我們就欠它一次編碼**，
+    所以那份拷貝必須撐得過一個 `STREAMOFF`。預算是 `INPUT_STAGE_BYTES = 64 MiB`（約 46 張 1080p 或 5 張 4K）：
+    超過預算的畫格退回 `PendingInput::Lent`（＝staging 之前的行為，也就是 OUTPUT queue 對快餵者的反壓），
+    等 slot 收下它才 ack。`staged_bytes` 記帳，在 `start`／`flush`／`stop`／`fail` 歸零。
+  * **`STREAMOFF(OUTPUT)` 排空**：新的 trait method `VideoEncoderBackendSession::drain_for_streamoff`（預設 no-op，
+    所以 `stub.rs` 與任何不做 staging 的 backend 完全不受影響）。裝置在 `streamoff(OUTPUT)` 時**先**呼叫它、**再**呼叫
+    `flush`，並把它產生的 `FrameEncoded` 事件在 CAPTURE queue 被拆掉之前交給 guest。backend 的實作
+    （`drain_output_for_streamoff`）排一個 `EOS`、把還沒餵的 staged 畫格全餵完、以 `Codec::wait_events` 等 codec
+    把在飛的畫格吐出來、寫進**當下還借著的** CAPTURE buffer，**上界 `ENCODER_STREAMOFF_DRAIN = 2 s`**。
+    **不帶 `LAST`**（`strip_streamoff_last` 把空的 EOS marker 丟掉、把帶 EOS 的 coded frame 變回普通畫格）——
+    guest 根本沒有下 drain，不該收到一個結束標記。放不下的畫格（CAPTURE 沒在 streaming、或上界到了而 queue 還是滿的）
+    **丟掉並 `warn!` 出數量**（`STREAMOFF(OUTPUT) drain could not place …` / `with no CAPTURE buffer lent …`），
+    這兩行就是「還有什麼沒送出去」的唯一憑據。真正的 `ENC_CMD_STOP` drain（`drain()` → `Drain::Pending` → `LAST` + `EOS`）
+    **一個字都沒改**。
+  * **規格論證**（寫在 `video_encoder.rs` 的 module doc 與 trait doc 裡）：`vidioc-streamoff.rst` 只要求 `STREAMOFF`
+    把 buffer 從 queue 上移除，並**允許** driver 完成它已經開始的 buffer；這些畫格是我們收下的（guest 已經被 ack）；
+    而編碼器跟解碼器不一樣——**沒有一個 seek 能把丟掉的畫格重新導出來**。所以把收下的工作寫完進 CAPTURE queue，
+    比丟掉正確。F16-codec §4.3 曾以「一個有上界的 linger 不合規」為由不做這件事，那段的前提（ffmpeg 用 `STREAMOFF`
+    取代 `ENC_CMD_STOP`）是錯的，見 §7.4 ffmpeg 限制第 (5) 條與該報告的勘誤。
+  * **誠實的天花板**：排空只寫得進 `STREAMOFF(OUTPUT)` 當下**還借著**的 CAPTURE buffer。ffmpeg 大約先借 16–20 個，
+    所以有地方可寫；但**它的 mp4 拿不拿得到那條尾巴，取決於它放棄自己的 drain 迴圈之後還會不會把那些 buffer dequeue
+    出來**——那是 B16 的量測。裝置這一側無論結果如何都是對的：收下的工作被寫完，而不是被一次 codec reset 丟掉。
 
 ### 7.4 codec 共同事項
 
@@ -657,6 +724,15 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
   另外 `-stream_loop` 對 raw elementary stream 本來就沒有作用，要餵 mp4。
   (4) **自家錄的 mp4 目前解不回來**（D44 + D48）——ffmpeg 的 muxer 把 SPS/PPS 寫成獨立的 31-byte sample，正好踩中 D48；
   D48 修好之前請改用 GStreamer，或以 raw Annex-B 餵進去。
+  (5) **編碼的 EOF 是 `ENC_CMD_STOP`，`STREAMOFF` 是它關檔時才做的事**（2026-09-13 依 `logs/vpu_wp/F19-encoder.md` §1 更正；
+  F16-codec §4.3 寫成「ffmpeg 以 `STREAMOFF` 取代 `ENC_CMD_STOP`」是**錯的**，該報告已加勘誤）。ffmpeg 8.0.1 的
+  `ff_v4l2_context_enqueue_frame` 收到 NULL frame 就走 `v4l2_stop_encode`，送 `VIDIOC_ENCODER_CMD(V4L2_ENC_CMD_STOP)`
+  （`v4l2_context.c:543-561, 619-640`），**只有**該 ioctl 回 `ENOTTY` 才退回 `STREAMOFF`——而 guest driver 有實作
+  `vidioc_encoder_cmd`（`virtio_media_ioctls.c:1736-1747`），所以那條退路走不到。之後它在 CAPTURE 上 `poll` 等
+  `bytesused == 0` 或 `V4L2_BUF_FLAG_LAST`，**關檔時**（`ff_v4l2_m2m_codec_end`）才 `STREAMOFF(OUTPUT)` +
+  `STREAMOFF(CAPTURE)`。問題出在它**等不夠久**：手機上量到 `ENC_CMD_STOP` 之後 20 ms 就來了 `STREAMOFF(OUTPUT)`，
+  在 F19 之前那會 reset codec 並丟掉在飛的畫格（**D78**）。F19 之後裝置會把收下的工作排空進 CAPTURE
+  （§7.3 的契約），但客戶端會不會把它們 dequeue 出來仍是客戶端的事。
 * `ResourceManagerService` 搶回：helper 是 app uid 的子行程、AM 看得到 app 但看不到 helper → 按舊 plan §2.2 估價不到、不易被選為受害者；被搶回時 `AMEDIACODEC_ERROR_RECLAIMED` → session dead。
 
 **B12 驗收帶回來的缺陷帳（D62–D69，2026-09-06 依 `logs/vpu_wp/B12-acceptance.md` §15 與 `critic5.md` §2 記）。**
@@ -668,7 +744,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 |---|---|---|---|---|
 | **D62** | `wip/vpu` 編不過：R8-11 把 `MappedPool::new` 搬進 `MediaBackend::start` 卻沒補 `use`（`media.rs:216`，`error[E0433]`） | **關**（曾是 blocker） | M8 / 建置 | crosvm **`6aac45b`**（一行 import）。教訓（`critic5.md` §2.1）：`deploy/vpu/harness.sh` 編不了 VMM 那個 crate，所以動到它又沒有 soong build 的 WP 就是在出沒編過的碼——F14 §7 item 3 自己白紙黑字預言了這一條，還是踩了 |
 | **D63** | `harness.sh all` 不再確定性：fork 的 `a_refused_drain_leaves_no_drain_pending` 在有負載時 4 跑 2 敗（安靜時 12 跑 0 敗）；`collect_capture(…, 1)` 取第一個 CAPTURE dequeue 就斷言 `LAST`，grace 執行緒搶得贏它 | 開，minor | fork 測試 | **F16-codec**（順手修，否則每個未來的 gate 都是 flaky） |
-| **D64** | 解碼 session 與編碼 session **幾乎同時建立**時，解碼輸出**安靜地少張**：1080p+1080p 掉 30/300（同一個錯 md5 `34c34d371c…`）、1080p+720p 掉 5、4K+1080p 掉 1。`ffmpeg` 回 0、stderr 全空 | **F17 修，待 B15 手機驗收**（HOST 已改，`0 seek(s)`／`reinit: keeping 0`——B14 §4 證偽了 F16「F15 關掉它」的說法） | codec 層 + 我們的 grace 節流，**不是池**、**不是 seek/reinit** | **F17-decoder**：D55/D56 grace 對「一個 buffer 在飛」的 ffmpeg 節流到 4 packets/s（30 grace 線 = 30 丟張），codec 於 contention 下丟輸入畫格。修法＝**grace 一次性**（`grace_expired`）；gst 只需壓第一個 buffer，會續餵的客戶端不可被限速。B15 門檻：1080p decode+encode 6/6 `bf32f00e5c4bca747bf7827ea5797b33`，4K+1080p 與 1080p+720p 各 3/3，每 session ≤ 1 條 grace 線 |
+| **D64** | 解碼 session 與編碼 session **幾乎同時建立**時，解碼輸出**安靜地少張**：1080p+1080p 掉 30/300（同一個錯 md5 `34c34d371c…`）、1080p+720p 掉 5、4K+1080p 掉 1。`ffmpeg` 回 0、stderr 全空。**F17 的 grace 一次性沒有關掉它**（B15 仍量到 12 個 contended session 掉頭），F19 第三度定案：orchestrator 的 `DEC_CMD_START` 假說**在程式碼裡被證偽**（初次宣告時 `session.drain == None`，`decoder_cmd(START)` 整段是 no-op），真機制是 **codec 丟掉它自己收下的輸入**——`frames out` 270、`0 held output(s) dropped`，裝置一張都沒丟；ffmpeg 在宣告前排好 CAPTURE 又不再 `REQBUFS`（**D77**），宣告後沒有一個 CAPTURE buffer 借出，codec 的 21 個 output slot 全被我們扣住，它卻在 ~1.1 s 內灌完 300 個 packet，有並行 encoder 搶硬體時那批積壓就被丟掉，解碼從下一個 IDR 重來（單獨 ~50 ms 窗、被編碼器搶時 ~330 ms，所以只有宣告慢時才整個 GOP 不見） | **F19 修（crosvm `1dddac050`），B16 驗收中**——門檻：1080p decode+encode **6/6 `bf32f00e5c4bca747bf7827ea5797b33`**，解碼 session 行要讀到 `300 bitstream buffers in, 300 frames out`，且不得因 back-pressure 卡住（`frames out` 要到 300、wall clock 不得爆掉） | codec 層，**被我們的 output-slot 停滯觸發**；不是池、不是 seek/reinit、不是 `DEC_CMD_START` | **F19-decoder**：**back-pressure**——`pump_input` 在「未交付的輸出 ≥ `min_capture_buffers`」時停止餵 codec，位元流留在 `pending`（guest 早已收過 `InputBufferDone`，D28/D48），等 `pump_output` 交付一張、slot 空出來才續餵（`use_as_capture`／`take_events` 重新觸發）。codec 因此永遠不會被餵超過它的輸出容量，也就沒有東西可丟；排滿 CAPTURE 的客戶端（gst 25 個）碰不到上限，`EOS` 永不扣住，D28 的零畫格合規串流也碰不到。細節見 §7.2 |
 | **D65** | R8-3 的 `pool: "<card>" holds N bytes, pool used M of S` 是**每次 `Release` 一條 `INFO`**（`pool.rs:645`）；~9 400 releases/s 之下 1 MiB 的 `vm.sh log` ring **不到一秒**就被自己蓋掉 | **關**——F16-codec `e4e81a0da` 降成 32 MiB step 制，F18 再補每 lease 每秒一條的 ratelimit（見 **D74**，那才是振盪 lease 的解） | M8 / R8-3 | **F16-codec**：降成 `debug!`（`pool.rs:642` 那句「per REQBUFS/close, not per frame」正是被推翻的前提），或照 D51 的 ratelimit，或一次 REQBUFS 只印一條。降級之後怎麼讀，見 `deploy/vpu/README.md` |
 | **D66** | `echo <dev> > /sys/bus/virtio/drivers/virtio_media/unbind`（session 還開著）**oops guest**：`vmedia_dbuf_buffer_from_host+0x70`，level-3 translation fault，留下 `modprobe -r` 清不掉的 `Zl [ffmpeg] <defunct>`；`modprobe -r` 這條路是**安全拒絕**的（B2 finding 2），sysfs 這條繞過了 refcount | 開，**high**（在 guest 內；VMM 這一側完全正確：`returns 20 outstanding pool reservations`、`pool used 0`、helper 活著、沒有 sweep） | guest driver r21（fork `driver/`） | **F16-driver**，交付新的 DKMS（**r22**）deb |
 | **D67** | **4K 硬體編碼不可能**：編碼器的 OUTPUT queue 是 driver-owned，`virtio-media: driver-owned buffer allocation of 12441600 bytes (buffer 10 plane 0) failed: -12`——11 × 12 441 600 > 134 217 728，撞的是 **128 MiB 的 `media_guest`**，不是 VMM 的池（連 encoder session 都沒建起來） | 開，**high**——整個能力停在 2560×1440 | **容量**，不是程式：app 的 `vpu_guest_pool_mb`（`VpuConfig.java:41`，預設 128） | 沒有 WP：**§8 的「容量」段落**寫了兩個選項與代價，等使用者決定 |
@@ -681,6 +757,46 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D74** | D65 的 32 MiB step 只以**位元組**設限，對「在邊界上來回」的 lease 等於沒設限：B14-accept-B §4 的 4K×6 storm（74.7 MiB lease、每個 cycle 跨四次、60 s 56 503 cycles）打出約 **226 000** 條 `info`，1 MiB 的 ring 塞滿並繞回，`launched media helper`／`pool served by the VMM over fd`／`the pool connection for` 全被擠掉，只剩 **2.07 秒**歷史 | **F18 修**（crosvm 已改＋mpt 測試；B15 觀察 60 s 跨 step storm 之後開機那幾行還在、且看得到 `(N step crossings not logged)`） | M8 / `pool.rs`——F16-codec §6 item 4 自己記下的 caveat，這是它指的那根槓桿 | **F18**：step 規則不動（不跨 step 仍然一條都不印），後面再加**每 lease 每秒最多一條**（`POOL_LOG_INTERVAL`，D51 的 `pr_warn_ratelimited` 型）；窗內被壓下的跨越會計數，下一條印出來的行以 `(N step crossings not logged)` 帶出，`ReleaseAll`／sweep 照舊**一定**印並開新窗。判斷函式 `info_line_due` 把時鐘當參數，測試用模擬時間跑 10 000 次振盪 |
 | **D75** | `deploy/vpu/tests/unbind_rebind.sh` 對真相機報 **6 個假失敗**（3 輪 × 2），而 **D66 的實質三輪全過**：(1) 斷言 `rc != 0`，但 v4l-utils 1.32.0 的 streaming loop 印完 ioctl 錯誤就 `return`——`v4l2-ctl --stream-mmap` 在自己的 ENODEV 路徑上**回 0**（B14-accept-B §1.2 直接量過）；(2) byte 檢查寫死 640×480 RGB3（921 600），那是合成 `kind=simple` 裝置的唯一格式，相機是 1280×720 NV12，於是正確的 30 × 1 382 400 = 41 472 000 B 被判成失敗 | **F18 修**（rig；B15 觀察相機上 `--rounds 3` 回 0 failures） | meta `deploy/vpu/tests/unbind_rebind.sh`（測試自己，不是產品） | **F18**：改判**症狀**——客戶端的輸出要出現 `No such device`／`ENODEV`／`POLLERR` 且行程在 15 s 窗內消失（結束碼只印出來備查）；期望位元組改成節點自己 `--get-fmt-video` 的各 plane `Size Image` 相加，m2m 的輸入檔同樣由 `--get-fmt-video-out` 決定，檔案裡不再有寫死的畫格大小。3 輪形狀、D/Z 檢查、dmesg splat 計數不動 |
 | **D76** | 相機串流中手機螢幕睡著 → app 變 `TOP_SLEEPING` → cameraserver 中途撤銷 `foreground` 的 CAMERA appop：logcat `Camera access permission lost mid-operation … (-13)`、裝置 `android_camera: camera device error 4`、guest `ENODEV`，session 死掉、要等螢幕醒來再開 | **關——已緩解（開關，預設開）**，2026-09-13 使用者改定案：做成每台 VM 的 `camera_keep_screen_on`（預設 `true`），app 在相機 VM 執行期間持 `SCREEN_DIM_WAKE_LOCK`（tag `droidvm:camera`）壓著螢幕；**關掉開關就回到原本的已知限制**。rig 這一側的 `deploy/vpu/vm.sh wake` 前置條件留著（wake lock 叫不醒已經睡著的螢幕，那要 `TURN_SCREEN_ON`）並繼續印 `screen_off_timeout`。B14-accept-B 原本把它記成「快速 stop/start 循環之後相機卡死」，那份診斷要重讀 | 平台／產品行為（Android appop 的 `foreground` 語意），**不是**裝置、backend 或池 | **WP A7**（app：`DroidVM@843d8d9`）+ §7.1 的「已知限制／緩解」段落 + §8 的 `camera_keep_screen_on` + `deploy/vpu/README.md` trap 10（`logs/vpu_wp/B15-build.md` §5.2、`logs/vpu_wp/A7.md`、`logs/vpu_wp/B14-accept-B.md` §9） |
+| **D77** | ffmpeg 的 `REQBUFS(CAPTURE, 20)` 被**照數答 20**：它在 `SOURCE_CHANGE` **之前**就問，那時 `session.min_capture_buffers` 還是底線 1，而它從不再問第二次（B15 §3 的 strace）。於是每一個 session 都比 codec 真正的 `num-output-slots`（**21**）少一個 buffer，裝置只好在宣告當下扣住已解碼的輸出——**這正是 D64 那段停滯窗打得開的原因**（D72 抬過 `REQBUFS`，但只在宣告**之後**才有數字可抬） | **F19 修（fork `c478100` + crosvm `1dddac050`），B16 驗收中**——門檻：同一個 helper 內**第二次**解同一格式時 strace 讀到 `REQBUFS(CAPTURE) count=20 => 21`；**第一次**仍可能是 20（還沒有東西可學），但不得再在 contention 下掉頭 | fork `video_decoder.rs` + crosvm backend | **F19-decoder**：backend 以 coded fourcc 為 key 記住每次宣告的 CAPTURE 最小值（`android.rs` `learned_min: Arc<Mutex<HashMap<u32,u32>>>`，跟著裝置 factory 的 `Clone` 走、活得比 session 久），fork 加 trait 查詢 `VideoDecoderBackend::min_capture_buffers(fourcc) -> Option<u32>`（預設 `None`），裝置在 `new_session` 與 `s_fmt(OUTPUT)` 用它種下 `session.min_capture_buffers`。**沒有數字寫死**：底線只會是某次真宣告報過的值。另一半＝宣告值大於正在 streaming 的數量時**扣住而不是失敗**（只 warn 一次，session 不死） |
+| **D78** | 快餵的 720p 硬體編碼**安靜掉尾巴**：300 進、mp4 只有 287／270（`-b:v 4M`／`8M`），1080p 8M 0 掉、相機餵的 30 fps 只掉 ~3 張的尾——**餵得越快掉越多**。機制：ffmpeg 送 `ENC_CMD_STOP` 之後只等了 **20 ms** 就去關檔，它的 `STREAMOFF(OUTPUT)` 觸發我們的 `flush()` → `AMediaCodec_flush` + `start`，**把 codec 重置**，13 張在飛的加 13 張扣著的 = 26 張就沒了（`flush #1: 0 pending frame(s) dropped, 13 held coded frame(s) kept`，然後 `300 frames in, 274 coded frames out`）。**F16-codec §4.3 的前提是錯的**（ffmpeg 不是用 `STREAMOFF` 取代 `ENC_CMD_STOP`），見 §7.4 ffmpeg 限制第 (5) 條 | **F19 修（crosvm `dd0c9cab2`、fork `82cf991`），B16 驗收中**——門檻：720p **4M 與 8M 都 300 coded out / 300 in the mp4**、1080p 8M 維持 300/300、相機餵的 720p 144/144、D64 的 contended encoder 仍 300/300、gst（走 `ENC_CMD_STOP` 的正路）不變 | crosvm encoder backend + fork `video_encoder.rs` | **F19-encoder**（契約全文見 §7.3）：(a) 輸入 staging + `INPUT_STAGE_BYTES` 64 MiB 預算；(b) 新 trait method `VideoEncoderBackendSession::drain_for_streamoff`（預設 no-op），裝置在 `streamoff(OUTPUT)` 時先排空再 `flush`，上界 `ENCODER_STREAMOFF_DRAIN` **2 s**，**不帶 `LAST`**，放不下的畫格丟掉並 `warn!` 出數量。**誠實的天花板**：只寫得進當下還借著的 CAPTURE buffer，ffmpeg 的 mp4 拿不拿得到尾巴要看它還會不會 dequeue |
+| **D79** | daemon 一重啟就**安靜地**把 VM 的設定倒回 `files/vms.json`，下一次 `start` 起來的 VM **完全沒有 VPU**：`vpu_enabled false`、camera 列不見、池回到 256/128、`ps -AT` 數不到 `media pool` 執行緒、`served` 2656 → 2560——而 `daemon.log`／VM log／`vm.sh start`／`hp.sh` **一條錯誤都沒有**，VM 還「起得好好的」（21 s 進 login prompt）。B15-soak 被它吃掉三個 cycle（03:00:31Z 換 pid 18471，第二次 start 撞到 `Another daemon (pid=18471) is already running`）。這是 README trap 6 的機制（`vm_modify` 只寫 daemon 的記憶體），但**不需要裝 APK**——閒置的 rig 上自己發生。**舊 daemon 為什麼不見沒有查出來**（rig 沒重啟它，沒有任何 `daemon: starting`）[unverified] | **開，high**——`logs/vpu_wp/B15-soak.md` §5.1；daemon 側的分析另開 **D79-analysis** | app／daemon | 未定。最便宜的真修法是**一行 log**：daemon 啟動時大聲說它重載了 store、幾台 VM 換了形狀（安靜地倒回才是問題本身）；持久化 `vm_modify` 與 app/daemon 的分工衝突，`vm_get` 加一個「這份設定從未落地」的標記是第三條路。rig 這一側先擋著：**每次 `vm.sh start` 之前斷言設定**（`scratch-B15s/cycles.sh` 的 guard，30 個 cycle 觸發 0 次，但這一次它會第一時間抓到），見 `deploy/vpu/README.md` trap 14 |
+| **D80** | stop/start 之後 guest 的 EUI-64 IPv6 位址**死約 5 分鐘**：`vm.sh wait-ssh` 300 s 內沒有回應（連兩次），而 serial console 上 guest 早就到 login prompt、DHCPv4 位址 ~20 s 就通。guest 自己的 `systemd-networkd` 說得很清楚：`Address 2a0e:…:4d67 with tentative flag is removed, maybe a duplicated address is assigned on another node or link?`——DAD 找到有人在防衛同一個位址（手機的 neighbour table 上該 global 位址在 `wlan0` 是 `FAILED`、guest 的 link-local 在 `br-wifi` 是 `STALE`），約五分鐘後自己回來（03:06:05 開機 → 03:11:22 可達）。`wait-ssh` 的預設 `BUDGET` **240 s**、記載的上限 300 s，兩個都比它短，於是記成一次假的「guest 沒起來」 | **開，medium**——`logs/vpu_wp/B15-soak.md` §5.2；§2 的前兩個 cycle 就是這樣掉的 | rig／實驗室網路，**不是 VM** | 未定。緩解＝走 DHCPv4 位址、經手機轉接：`GUEST6=<v4 addr> GUEST_SSH_VIA=proxy deploy/vpu/guest.sh ssh <vm> …`，30 個 cycle 全部 **14–22 s** 就通。rig 的正解是讓 `wait-ssh` 把 DHCPv4 位址當第三條路試，至少在失敗訊息裡說一句「IPv6 可能卡在 DAD」。見 `deploy/vpu/README.md` trap 15 |
+| **D81** | 剛硬體編出來的 clip 拿去硬體解，**120 次裡有 14 次（11.7 %）短給**（87–89 張的檔只解出 42–86 張），`rc 0`、ffmpeg 除了 `All capture buffers returned to userspace…` 什麼都沒說、裝置側一條錯都沒有。**不是輸入**（同一個存下來的檔連解 12 次是 87/87）、**不是 gst**（同一個 iteration 裡 gst 解那支 300 張的樣本 120/120 全中）、**不是 D27/D41**（那是 raw elementary stream，這是 mp4）。條件是「decoder session 在同一組 helper 上緊接著一個 encoder session 之後開起來」，每 6 次重現 1 次，整個小時平均分布（不是熱、不是漂移）。`rc 0` 加一個短檔是最壞的失敗模式：只看結束碼的自動檢查全部會過 | **開，medium**——`logs/vpu_wp/B15-soak.md` §5.3。與 **D64／D77／D78 同一族**（codec 在時序邊緣丟掉排隊中的工作），**F19 是候選修法**，**B16 量 20/20**（20 對「新鮮編碼 → 立刻解碼」） | 解碼器 backend 或 fork | 先看 F19：D77 的 learned minimum 正好解釋「為什麼沒有餘裕」（ffmpeg 少借一個 CAPTURE buffer），back-pressure 則移掉超餵。若 B16 的 20/20 還是短給，就是這一族裡 F19 沒蓋到的第四個時序邊緣，要自己一個 WP。注意 `-num_capture_buffers 24` **沒有用**（D64 的 0/5；這裡的 12/12 只是因為輸入是靜態的） |
+| **D82** | 一條 gst `videotestsrc` 來回管線和它自己的參考管線**畫出來的畫素不一樣**：`videotestsrc` 用**協商出來的 colorimetry** 畫圖案，`v4l2h264enc` 協商到 `bt601`，接 `filesink` 的那條卻拿到 720p 預設的 `bt709`——彩條 luma 一邊是 BT.601 的 (235,210,170,145,106,81,41)、一邊是 BT.709 的 (235,219,188,173,78,63,32)。拿它算 PSNR 會讀到 **~24 dB** 根本不存在的「codec 損失」，而且每一張都一樣（連 `smpte100` 這種 150 張只有 1 張不同的靜態圖案都是 22.8 dB，這就是破綻） | **關——量測方法，不是產品缺陷**；記進 `deploy/vpu/README.md` **trap 13** | 量測（`logs/vpu_wp/B15-soak.md` §5.4） | 兩條管線的 caps filter 都要釘 `colorimetry=`（或一次產生 source、餵同一份位元組給兩邊）。釘 `colorimetry=bt709` 之後同一條來回是 **35.96 dB**（`pattern=ball` 77.58 dB），過 35 dB 的門檻。順帶兩條沒有立案的事實：`v4l2h264enc` 直接拒絕 `colorimetry=bt601` 的 caps（協商失敗 rc 1）；`ffmpeg -f lavfi -i testsrc2 … -c:v h264_v4l2m2m` 少了 `-pix_fmt nv12` 會死在 `Could not open encoder before EOF` / `-22`，與裝置無關 |
+
+### 7.5 耐久：一小時 soak 與 30 次 stop/start（M8 的端到端證據）
+
+2026-09-13 依 `logs/vpu_wp/B15-soak.md` §1–§2 記。這是這個專案第一次跑超過 60 秒的東西
+（在此之前最長的量測是 B12 那兩次 60 s 的 REQBUFS storm），也是 `deploy/vpu/README.md`
+「每次出貨都被漏掉的三件事」第 3 條所要的那個 soak。
+
+**一小時 soak，120 次 iteration，0 失敗。** 每 30 秒一輪：相機擷取（每一輪都**剛好 41 472 000 B**，120/120）、
+從相機硬體編 3 秒、硬體解回那支 clip、再用 gst `v4l2h264dec` 把 300 張的 720p 樣本解到 `fakesink`
+（**120/120 EOS、120/120 剛好 300 張**），每一步 `rc 0`。整個小時的漂移（13 個取樣點）：
+
+| 量 | 結果 |
+|---|---|
+| VMM RSS | 5 286 652 → 5 272 856 kB，t=10 之後最小平方斜率 **+267 kB/min**＝5.2 GB 的 **+0.005 %/min**，而且 t=40 的值**低於** t=0。**平的** |
+| 三個 helper 的 RSS | 斜率全部**是負的**（camera −31、decoder −290、encoder −79 kB/min），snd 單調往下 22.7 → 20.3 MB |
+| 池 | `served` **2656 pages**、`pool_avail` **416/3072** 十三個取樣點**一字不變**；`pool used` 峰值 **34 611 200 B of 335 544 320** 在**每一個** 5 分鐘窗裡都一樣 |
+| 執行緒與行程 | `media pool` 執行緒全程 **3**、四個 helper 的 pid **一次都沒變**（**0 helper exits**） |
+| 錯誤 | **0** `camera device error`、**0** guest dmesg splat、**0** `media_host pool exhausted`、**0** panic |
+
+`pool used` 是**下界不是峰值**（F16 之後那行只在跨 32 MiB step 時 `info!`），所以真正的峰值落在 [32, 64) MiB；
+重點在於它**十三個窗完全相同**——**池不會爬**，這正是 M8 要證的東西。CPU 從 ~40 °C 爬到 56.3 °C 峰值再回來，
+唯一看得見的效果是每輪編碼時間從前 20 輪的 4.00 s 變成後 20 輪的 4.90 s。
+
+**30 次 stop/start，30/30 乾淨。** 每一次：停下之後 `served=0, pool_avail=3072/3072`、
+關機期間 **0** 條殘留的 `media pool` 執行緒／media helper／crosvm 行程、起來之後
+`served=2656 pages, pool_avail=416/3072` 與 **3** 條 pool 執行緒、10 張擷取剛好 **13 824 000 B**、
+1 秒硬體解碼剛好 **93 312 000 B**（30 張 1080p）、guest oops **0**。停 3–4 s、起 8–9 s、guest ssh 14–22 s
+（走 DHCPv4，因為 **D80**）。**`served` 每一次 stop 都回到 0**——沒有一頁大頁漏掉。
+
+這一輪也帶回四條缺陷：**D79**（設定會自己倒回，high，是這一輪最貴的）、**D80**（IPv6 DAD）、
+**D81**（新鮮編碼 → 解碼 14/120 短給）、**D82**（量測用的 colorimetry）；全部在 §7.4 的缺陷帳裡。
+還有一件**沒有失敗但值得記**的事：那個小時裡螢幕自己睡著過一次（第 7 次 `vm.sh wake` 讀回
+`mScreenState=OFF mWakefulness=Asleep`），前後幾輪照樣 `v=ok` 且位元組數精確——與 B15-accept §7.1 互相印證：
+只要 VM 的前景服務撐著，`foreground` 的 `CAMERA` appop 在螢幕關著時仍然放行（§7.1 的 D76 講的是**串流中**被撤銷）。
 
 ## 8. app / daemon（WP-A1）
 
