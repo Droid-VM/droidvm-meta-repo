@@ -989,6 +989,53 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 5. **軟體 codec** 是否列入 ENUM_FMT（VP8 / AV1 編碼只有軟體）：預設不列。
 6. **CAPTURE 也由 guest 擁有（`driver_owned_queues=all`）** 是否作為 pVM 預設：可省掉 `media_host`，但相機幀寫入 guest 池的路徑要先量（cacheable 映射下 CPU-CPU 同調沒問題，量的是 host 寫入 pool memfd 的速度）。本設計預設 `output`。
 7. **推送，以及 manifest 的 `revision=` 要不要跟著動**（2026-09-06 記錄，這裡只是**紀錄現況**，沒有動任何檔案；每個 session 都被規則禁止 push，只有你能做）。
+
+   **2026-09-14 推送完成（使用者當日指示「全部推到 wip/vpu」）。** 七個 repo 的 `wip/vpu` 全部推上 GitHub，
+   每一個都是純 fast-forward、沒有 force，推完再從遠端 `ls-remote` 讀回核對：
+
+   | repo | remote | 推前遠端 | 推後 = 本機 HEAD | 這次推的 commit 數 |
+   |---|---|---|---|---|
+   | `v4l2r` | `droidvm`（Droid-VM/v4l2r） | `1676974` | **`7eb3afa`** | 1 |
+   | `crosvm` | `droidvm`（Droid-VM/crosvm） | `2d58205b2` | **`bfccd3d5a`** | 69 |
+   | fork `virtio-media` | `droidvm`（Droid-VM/virtio-media） | `32d7366` | **`6b6d2b3`** | 55 |
+   | `crosvm-minimal-manifest` | `origin` | `d68dfc1` | **`8143624`** | 1 |
+   | `droidvm-guest-additions` | `origin` | `cccd907` | **`0761b41`** | 9 |
+   | `DroidVM`（app） | `origin` | `61d8e07` | **`5b300b4`**（見下） | 40 |
+   | meta（本 repo） | `origin` | `13bbeb3` | **`b7489bd`** → 本 commit | 41 |
+
+   三個落在 `crosvm_build/` 內的 repo（v4l2r、crosvm、fork）是 repo-manifest 檢出，remote 名叫 `droidvm`
+   而不是 `origin`——之前的推送帳寫 `origin` 的地方以此為準。**meta 的 `origin` 走 SSH，該金鑰的身分
+   （KusakabeShi）沒有 `droidvm-meta-repo` 的推送權，所以 meta 是用
+   `git push https://github.com/Droid-VM/droidvm-meta-repo.git wip/vpu`（gh 的 HuJK 憑證）一次性推的，
+   remote 設定沒有改**；下次推 meta 也要走這條。
+
+   **出貨鏈的另一半也接上了（APK 的 crosvm 不是從本機 overlay 出貨的）。** app 的 `release.yml`／`dev-release.yml`
+   只從 `DroidVM-Prebuilts` submodule 拿 payload，而那個 payload 由 `DroidVM-Prebuilt-Root` 的
+   「Publish prebuilts」workflow 從它的 `manual-build/` 打包；推送前 app 釘的 `c4998e15`（2026-09-12）是沒有 VPU
+   crosvm 的 payload，**那時打 tag 出貨會 ship 到舊 crosvm**。這次補上：
+   * `DroidVM-Prebuilt-Root` 開了 `wip/vpu` 分支，commit **`2d03644`** 把 `manual-build/arm64-v8a/usr/bin/crosvm`
+     從 `703e6d3c…`（pre-VPU）換成 B17 那顆 **md5 `1e136313…`／sha256 `4b7bf7b1…`**（其餘 11 個 runtime `.so`
+     與 HEAD 位元相同，只有 crosvm 動）。推上去後 workflow（run 34802805202）約兩分鐘成功；
+   * `DroidVM-Prebuilts` 因此多了 `wip/vpu` 分支，commit **`bc5553ae`**「Update prebuilts from DroidVM-Prebuilt-Root
+     2d03644…」，其 `prebuilt-arm64-v8a.json` 列出 `usr/bin/crosvm` sha256 **`4b7bf7b1…`**——與 B17-build／B17-acceptance
+     驗證的同一顆位元（`tar.xz` 70 103 500 B，level 9）；
+   * app **`5b300b4`**「prebuilts: the payload the release path packs now carries the VPU crosvm」把
+     `app/src/main/assets/prebuilts` 的 gitlink 從 `c4998e15` 指到 `bc5553ae`，app 原始碼不動。
+   一個要記的副作用：Prebuilt-Root 的 `droidvm` 分支在 `f653df3` 之後就追蹤著 `manual-build/arm64-v8a/usr/bin/crosvm.bak1400`
+   （另一顆 crosvm，sha256 `a767c59b…`，14 MB），舊 payload `c4998e15` 沒有它，這次是它**第一次被發布**——每個
+   APK 從此多帶一個死檔。它在使用者自己的 `droidvm` 分支 commit 裡，不是這次引入的；清法是 Prebuilt-Root 一個
+   `git rm` commit → 再發布 → app 再 bump pointer。**沒有做，等決定。**
+
+   **這次沒有動的，仍是獨立決定：** (1) `crosvm-minimal.xml` 的 `external/crosvm`／`external/virtio-media` 仍釘
+   `revision="droidvm"`——用 manifest 全新檢出拿到的是沒有 VPU 的 crosvm，只有走 `1_build_crosvm_prepare.sh`
+   （會挑同名 `wip/vpu`）才建得出這份（下面 2026-09-06 的分析仍然成立）；(2) `droidvm-guest-additions` 的
+   `install.sh` one-liner 預設 `DROIDVM_GA_REF=wip/3d-accel`，而 `wip/vpu` 與它已分叉（本機量：wip/vpu 多 22 個、
+   wip/3d-accel 多 42 個 commit，不能 fast-forward），使用者要帶 `DROIDVM_GA_REF=wip/vpu` 才裝得到 r22 驅動，
+   或另開一個真合併的 WP；(3) **沒有下 `accepted-b17` tag**（下面說的 b11／b12 tag 仍只在本機，也沒推）；
+   (4) 沒有合併進 master、沒有打版本 tag，所以 `release.yml`／`dev-release.yml` 都還沒跑。
+
+   以下是 2026-09-06 當時的分析與數字，留作歷史；「尚未推送」「只有你能做」的句子從那天的視角讀。
+
    現況：`crosvm-minimal.xml` 把 `external/crosvm` 與 `external/virtio-media` 都釘在 **`revision="droidvm"`**，只有
    `external/rust/crates/v4l2r` 釘 `wip/vpu`（那個 fork 上還沒有 `droidvm` 分支）。手機上跑的這份建置——crosvm、
    fork 的 device/ 與 guest driver、v4l2r、guest-additions、app、meta——完全落在七個**尚未推送**的 `wip/vpu` head 上。
