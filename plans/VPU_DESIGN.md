@@ -1000,7 +1000,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
    | fork `virtio-media` | `droidvm`（Droid-VM/virtio-media） | `32d7366` | **`6b6d2b3`** | 55 |
    | `crosvm-minimal-manifest` | `origin` | `d68dfc1` | **`8143624`** | 1 |
    | `droidvm-guest-additions` | `origin` | `cccd907` | **`0761b41`** | 9 |
-   | `DroidVM`（app） | `origin` | `61d8e07` | **`5b300b4`**（見下） | 40 |
+   | `DroidVM`（app） | `origin` | `61d8e07` | **`a6d8386`**（見下） | 41 |
    | meta（本 repo） | `origin` | `13bbeb3` | **`b7489bd`** → 本 commit | 41 |
 
    三個落在 `crosvm_build/` 內的 repo（v4l2r、crosvm、fork）是 repo-manifest 檢出，remote 名叫 `droidvm`
@@ -1021,6 +1021,17 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
      驗證的同一顆位元（`tar.xz` 70 103 500 B，level 9）；
    * app **`5b300b4`**「prebuilts: the payload the release path packs now carries the VPU crosvm」把
      `app/src/main/assets/prebuilts` 的 gitlink 從 `c4998e15` 指到 `bc5553ae`，app 原始碼不動。
+   **CI 也證明了這條鏈。** app 的 `build.yml` 在每次 push 都建 APK 並上傳 artifact；推上 `5b300b4` 的那次
+   （run 34803013259）成功，兩個 artifact（`app-debug.apk` 127 309 766 B、`app-release-unsigned.apk`
+   115 869 496 B）內的 `assets/prebuilts/prebuilt-arm64-v8a.tar.xz` 是同一個檔（sha256 `1dfa6071…`，70 103 500 B），
+   **從裡面抽出的 `usr/bin/crosvm` 位元 sha256 = `4b7bf7b1…`**——與 B17-acceptance 在手機上驗證的同一顆；
+   manifest 也列它。所以「打 tag → `release.yml`」現在會 ship 到對的 crosvm。同時 `checks.yml` 在 `843d8d9` 與
+   `5b300b4` 都**紅**：`scripts/ci/check_string_concat.py`（「字串串接要用 `fmt()` 不用 `+`」）抓到 VPU 這批
+   commit 的 12 處（6 個檔），9/3 的 `61d8e07` 之前是綠的。app **`a6d8386`**「vpu: the strings the VPU work
+   built with + now go through fmt(), so Checks is green again」逐處改成等價的 `fmt()`（訊息文字不變），本機五個
+   lint 腳本全過、四個受影響測試類 36/36，推上去後 Checks run 34803328588 **綠**。教訓寫進 rig：每個 app WP commit
+   前跑 `python3 scripts/ci/*.py`（五個，兩秒）。
+
    一個要記的副作用：Prebuilt-Root 的 `droidvm` 分支在 `f653df3` 之後就追蹤著 `manual-build/arm64-v8a/usr/bin/crosvm.bak1400`
    （另一顆 crosvm，sha256 `a767c59b…`，14 MB），舊 payload `c4998e15` 沒有它，這次是它**第一次被發布**——每個
    APK 從此多帶一個死檔。它在使用者自己的 `droidvm` 分支 commit 裡，不是這次引入的；清法是 Prebuilt-Root 一個
