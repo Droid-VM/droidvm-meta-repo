@@ -803,6 +803,8 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D86** | **排空是一次性的**：B18 §7.2 用 `LIBVA_V4L2_SYNC_TIMEOUT_MS` 逼出恢復路徑，**第一次**排空確實保住位元組（5 ms 預算、一次恢復、仍然 300 張 `bf32f00e…`；B-frame 片每 run 一次也 bit-exact），但**同一個 session 的第二次**排空、或**第一次 `SOURCE_CHANGE` 宣告之前**的排空（1 ms 預算、sequence 1）一律以 `Stateful sync failed` 收場、session 死掉、客戶端退回軟解。順帶：50 ms 的預算在參考片上**一次都逼不出來**（一次 sync 遠快於 50 ms），所以任務原本指定的探針值太鬆，要 5 ms 才碰得到 | **開，medium，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §7.2（`scratch-B18a/52_recovery.txt`）。§7.6 第 5 點寫的「兩道保險」只有第一次成立，這是 **D84** 那條死鎖救不回來的原因 | `libva-v4l2` `src/stateful/session.cc`（排空後的狀態重建：宣告前排空、以及第二次排空的 CAPTURE 重配） | **VA1-fix**；B19 以「同一 session 連兩次強制恢復仍 300/300」當回歸 bar |
 | **D87** | **環境，不是產品**：實驗手機的 `gh_hugepage_reserve` 模組參數 `pool_want` 在 B17 那個 boot 期間被**別人**改成 **2048**（4 GiB），而 B11 起每一份報告與 `deploy/vpu/README.md` 記的都是 3072（6 GiB）；而且連 2048 都填不滿——`acquire` 停在 `cma sources exhausted`、`pool_avail` 1874–1906。後果不是表格裡一個小一點的數字：**`memory_mb=4096` 的 VM 起不來**（`GH-PIN[preboot]: refusing 1024 MB … 296/512 2MB samples (57%) cannot be long-term pinned … CmaFree 9376 kB` → `crosvm exiting with error 1: failed to create vm  Caused by: Out of memory (os error 12)`；3072 時卡在最後 192 MB 的 `media_guest`）。B18 只好把 VM 降到 `memory_mb=2048` 跑完，所以它的 `served=1632／pool_avail=272/2048` **與 B11–B17 不可比**，而 B11–B17 的每一個 hp 數字在 `pool_want` 復原之前都是**過期的** | **開——需要手機的主人**。rig 這一側只能讀不能寫（B18 想寫回 3072 被權限層擋在 `Modify Shared Resources`）。記進 `deploy/vpu/README.md` **量測陷阱 18**：量任何東西之前先看 `hp.sh status` 的 `pool_want` 對不對得上前一份報告 | 實驗室環境／手機設定，**不是** VMM、device、driver 或池 | 沒有 WP：`pool_want=3072` 由機主復原之後，下一個上手機的 WP 重新記一次基準數字。`logs/vpu_wp/B18-acceptance.md` §0 |
 | **D88** | B19（r378）：`vaBeginPicture` 回 `VA_STATUS_ERROR_SURFACE_BUSY`(16) 接著 `invalid VASurfaceID`，run 拖到 EOF 但 md5 錯、張數短（參考片 2/30、-bf 3 片 2/13）。機制：一次 sync 失敗（或 stale-generation 的 release 不重排）讓 surface 永遠停在 Rendering | **VA1-fix2 修（libva-v4l2 `bf6b4b5`：sync 失敗的 surface 重置為 Ready＋解除綁定；`12d1126`：provisioning 遇 EBUSY 退避重試而非逐張報忙），B21 驗** | libva-v4l2 stateful | 同一輪也把 D83 的殘留關掉：upstream `driver_data` 的五個 id map 在熱路徑無鎖讀（`picture.cc`/`surface.cc`/`image.cc`）而 ffmpeg 的 frame thread 同時建/毀 buffer——`8761810` 改 `shared_mutex`，TSan 以 mutation 證明。**量測註記**：B18/B19 前半的排空計數全是 0，因 rig 的 `${VAR:-word}` 預設吃掉反斜線（meta `9f4f4f3` 修）；只有修後的數字算數 |
+| **D89** | B21：libva r385 每個 `vaCreateContext` 丟 `std::bad_function_call`（`GbmAllocator` 的空 logger），所有 VA 客戶端 0 幀，Epiphany 從 300 退到 0 | **VA3-fix-libva 修中（logger 永不為空＋真 vtable 的 gbm 測試），B22 驗** | libva-v4l2 | 教訓：seam 以下的假裝置測試抓不到第一個真呼叫的崩潰，要有走 vtable 的測試 |
+| **D90** | B21：pVM 的 restricted DMA pool 讓 `dma_map_resource` 對 virtio 裝置失敗，`QBUF(CAPTURE, DMABUF)` GBM bo 回 -EIO；udmabuf 對照成功 | **VA3-fix-driver 修中（resolver 裝置取 GPA），r25，B22 驗** | virtio-media guest 驅動；根因是 §7.7 契約寫成走 DMA API | host 要 GPA 不要 DMA 映射；不可存取頁面由 host EFAULT 拒絕 |
 
 ### 7.5 耐久：一小時 soak 與 30 次 stop/start（M8 的端到端證據）
 
@@ -1027,8 +1029,8 @@ vm.log 的 tell 是那行 set_iova。
 預先算好的 SG 清單**送出，回覆再改回使用者要的型別；佇列記錄的型別才是使用者同意的型別。`V4L2_MEMORY_DMABUF` 是這套的**第三種
 口味**：`REQBUFS/CREATE_BUFS(memory=DMABUF)` 對 host 送 USERPTR、回覆改回 DMABUF 並補 `V4L2_BUF_CAP_SUPPORTS_DMABUF`（拿掉
 `:1235-1236` 的整片遮罩；DMABUF 在 host 回報支援 USERPTR 的每個佇列上都成立）；`QBUF(memory=DMABUF)` 時 `dma_buf_get(fd)` →
-`dma_buf_attach` → `dma_buf_map_attachment(DMA_BIDIRECTIONAL)` 取 sgt，**以 `sg_dma_address/len` 填 SG 清單、不假設有 struct
-page**（virtio-gpu vram 匯出的 sgt 只有 DMA 位址；無 IOMMU 的 transport 上 dma_addr == GPA），對 host 仍是 USERPTR，附著保留到
+`dma_buf_attach`／`dma_buf_map_attachment(DMA_BIDIRECTIONAL)` **以一個沒有 dma-ranges 限制的 resolver 裝置**（不是受限的 virtio 裝置，見 B21 的 D90）取 sgt，**以 `sg_dma_address/len` 填 SG 清單、不假設有 struct
+page**（direct ops 下 dma_addr == GPA；受限裝置的 `dma_map_resource` 會失敗），對 host 仍是 USERPTR，附著保留到
 `DQBUF`／`REQBUFS(0)`／`STREAMOFF`／close；每個 plane 可各帶 fd（同一個 fd 不同 `data_offset` 亦可）；`EXPBUF` 仍為 NULL。
 **device 端因此沒有任何改動**（它只看到 USERPTR，guest-owned CAPTURE 的 `guest_buf.rs` 路徑已存在），**crosvm 也不動**：
 pVM 下 helper 可寫的視窗由 `host_accessible_windows`（`guest_buf.rs:155`）決定，清單含 `GpuPoolGuest`／`Drm2KgslPool`／
@@ -1039,6 +1041,29 @@ CAPTURE（1-plane 或 2-plane 皆以同一 fd 對應各 plane 的 `data_offset`�
 `vaDeriveImage`／`vaGetImage` 走 `gbm_bo_map`；初始化探一次 GBM NV12；池在第一次 `vaBeginPicture` 才配（surface 齊全，
 share 不再看 `vaCreateSurfaces` 進度）；梯子 GBM NV12 → GBM R8 → VA1 MMAP（r22 驅動沒有 `SUPPORTS_DMABUF` 時自動退回，同一顆
 deb 在 r22 與 r23 上都能用；`LIBVA_V4L2_SURFACES=mmap|gbm` 可強制）。
+
+**B21 結果（2026-09-15，`logs/vpu_wp/B21-acceptance.md`、`B21-browser.md`）：驅動半邊成立，兩個新缺陷擋住其餘。** r24 在
+guest DKMS 編過、`modprobe` 真的換了模組（srcversion 變）、`REQBUFS(memory=DMABUF)` 在 CAPTURE 與 OUTPUT 都被接受且
+`capabilities=0x17` 含 `SUPPORTS_DMABUF`；r24 對 MMAP 路徑零成本（B19 的 r378 .so 在 r24 上重現 B19）。`G_FMT(CAPTURE).num_planes`
+= **1**（VA1-fix2 的「兩平面」猜想出局）。然後：
+
+* **D89**（libva，小而致命）：r385 的 `GbmAllocator` 建構子呼叫預設空的 `std::function` logger → 每個 `vaCreateContext` 丟
+  `std::bad_function_call`，所有模式、所有客戶端 0 幀；host 的七個測試從未以 context 的方式建構它。修法：logger 永不為空＋
+  一個走真 vtable 的 gbm 模式測試。
+* **D90**（驅動，架構性——**且是本節「線上契約」寫錯的**）：pVM 把每個 virtio-pci 裝置綁到 restricted DMA pool（swiotlb
+  0x158000000，256 MiB，force-bounce）。r24 照契約用 `dma_buf_attach(vv->dma_dev)` + `dma_buf_map_attachment`，於是
+  virtio-gpu vram exporter 的 `map_dma_buf` 對這個受限裝置呼叫 `dma_map_resource(phys=0x16ec00000, 2 MiB)` → `DMA_MAPPING_ERROR`
+  （受限裝置的 dma-range 只有池、資源位址不能 bounce）→ `QBUF(CAPTURE, DMABUF)` 的 GBM bo 得 `-EIO`。對照：udmabuf（memfd 頁面）
+  的 QBUF 成功，匯入路徑本身沒錯。**契約更正**：host 要的是「SHARE 過視窗內的 guest 實體位址」，**永遠不是 DMA 映射**；驅動改用一個
+  沒有 dma-ranges 限制的 resolver 裝置（direct ops，`dma_addr == phys`）去 attach/map 取得 GPA，其餘不變；不可存取的頁面由
+  host 以 EFAULT 拒絕（udmabuf 在 pVM 下就會這樣，是正確結果）。r25。
+* 另一件定案：GStreamer 的 va 外掛在**協商時、任何解碼前**就呼叫 `vaDeriveImage`，失敗就談成 system memory（`use derived:
+  false`）——所以 gbm 模式要在 `vaCreateSurfaces` 就配 bo（尺寸由 VA 給，`SOURCE_CHANGE` 後與 `G_FMT` 核對，不合再降級），
+  derive 隨時可映射；這也消掉 gbm 模式的池 share 競態。梯子還要涵蓋**執行期**失敗：第一個 DMABUF QBUF 回 EIO/EFAULT 就拆掉
+  重配 MMAP 並記原因——零拷貝路徑壞掉不准少一張（B21 的 Epiphany 從 300 退到 0 就是反例）。
+* 瀏覽器：Firefox 在 r385 上 0/3（死在 D89，未到 export）；r378+r24 對照重現 B19（`vaExportSurfaceHandle failed`）。Epiphany
+  在真 :0 與 Xvfb 下都以 system memory 硬解 300/300（B19 §7 的疑問解決：不是 Xvfb 假象），但**光有 export 不會讓 WebKit 零拷貝**，
+  它只在 derive 成功時才要 VA memory。Chromium 仍為 snap 打包問題。
 
 **已知風險，spike 要先答。** (a) **GPU 能否匯入並取樣這種 blob**：freedreno 的 EGL 對自家 virtio-gpu 物件的
 dma-buf re-import 與 NV12 兩平面（`EGL_DMA_BUF_PLANE0/1_*`、`LINEAR` modifier）；(b) **快取一致性**：頁面由 host 的
