@@ -18,6 +18,7 @@ MANIFEST_BRANCH=$(pick "$MANIFEST_URL" $(branch_chain))
 }
 clone_at crosvm-minimal-manifest "$MANIFEST_URL"
 clone_at droidvm-guest-additions https://github.com/Droid-VM/droidvm-guest-additions.git
+clone_at libva-v4l2 https://github.com/Droid-VM/libva-v4l2.git
 clone_at mesa https://github.com/Droid-VM/mesa.git
 # The guest mesa build recipe (cross container, packaging, mesa-config.sh). Step 8 clones it
 # too if it is missing, so it still works on its own; fetching it here means the prepare step
