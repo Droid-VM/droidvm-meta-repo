@@ -995,7 +995,7 @@ pVM)」），而 crosvm 把這些「on top of `--mem`」的池註冊成 `GuestMe
 
 **B 路要改的三處（都小）。**
 
-1. **virtio-media guest 驅動（fork `driver/`，r23）**：CAPTURE 的 `QBUF` 收 `V4L2_MEMORY_DMABUF`：`dma_buf_get` →
+1. **virtio-media guest 驅動（fork `driver/`，出貨版本 r24——不是原先預估的 r23：guest-additions 的版本是 rev-list 計數，`install.sh` 的 `DROIDVM_VA_URL` commit 排在 r22 之後，所以 VA3 的 re-vendor 是第 24 個；VA3-driver 定案，fork `98f3326`、guest-additions `6d426bc`）**：CAPTURE 的 `QBUF` 收 `V4L2_MEMORY_DMABUF`：`dma_buf_get` →
    `attach`／`map_attachment` 取 sg_table → 走 **既有的 USERPTR SG 路徑**（`scatterlist_filler`）把頁面清單送給 host；
    `DQBUF`／`REQBUFS(0)`／close 時 unmap／detach；`REQBUFS` 回覆對 CAPTURE 不再遮掉 `V4L2_BUF_CAP_SUPPORTS_DMABUF`
    （`virtio_media_ioctls.c:1235-1236` 的 TODO）。`EXPBUF` 暫不做（B 路用不到）。
@@ -1065,7 +1065,7 @@ NV12 兩平面, LINEAR)` → `glEGLImageTargetTexture2DOES`（`GL_TEXTURE_EXTERN
 `decoder session … c2.qti.avc.decoder … started` 且 `frames out` 隨播放增加、瀏覽器 log 無 export/import 失敗行；
 V4L2 客戶端不退步；strace 顯示 CAPTURE 走 `V4L2_MEMORY_DMABUF`、`EXPBUF` 0 次。
 
-**分期。** VA3-spike → VA3-driver（r23，DKMS）＋ VA3-device（fork，一行放行＋能力位元）＋ VA3-libva（blob 配置器、
+**分期。** VA3-spike → VA3-driver（r24，DKMS）＋ VA3-device（fork，一行放行＋能力位元）＋ VA3-libva（blob 配置器、
 靜態綁定、export、退回）→ B20（含瀏覽器）→ 之後才是 VA1b（profile 控制項）、VA2（HEVC/VP9）、VA4（編碼）。
 
 ## 8. app / daemon（WP-A1）
