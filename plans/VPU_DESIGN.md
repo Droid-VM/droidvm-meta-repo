@@ -983,6 +983,8 @@ pVM)」），而 crosvm 把這些「on top of `--mem`」的池註冊成 `GuestMe
   fd（NV12、`DRM_FORMAT_MOD_LINEAR`、offset/pitch 取自 `G_FMT(CAPTURE)`）→ 瀏覽器用 virtio-gpu **自己的** 物件匯入
   EGL（re-import 本來就支援）。virtio-gpu 一行不動；這是 ChromeOS 上 V4L2 解碼＋native context 零拷貝的慣用形狀。
 
+**耦合度（使用者 2026-09-15 問「VA-API 必須耦合 virtio-gpu 嗎」）：不必。** VA 後端只講 V4L2（VA1 已證）；零拷貝要求的是「輸出記憶體是 GPU 能匯入的記憶體」，裸機高通的 VPU 與 GPU 也是兩顆分開的 IP、兩個驅動靠 dma-buf 共享。B 路下 virtio-media 只多**標準的** `V4L2_MEMORY_DMABUF` 匯入（不認識匯出者；udmabuf、別的 V4L2 節點、將來相機→編碼器都走同一條），「從 GPU 配置」只存在於 libva-v4l2 的使用者空間配置器且走標準 GBM；host 端 kgsl 與 MediaCodec 亦互不相識，只共享 guest 頁面。真正會耦合的兩條路都避開：改 virtio-gpu 匯入 virtio-media 的 buffer（A 路）、或 virtio 規格的 cross-device UUID（兩邊 host 都要解 UUID）。
+
 **B 路要改的三處（都小）。**
 
 1. **virtio-media guest 驅動（fork `driver/`，r23）**：CAPTURE 的 `QBUF` 收 `V4L2_MEMORY_DMABUF`：`dma_buf_get` →
@@ -991,7 +993,7 @@ pVM)」），而 crosvm 把這些「on top of `--mem`」的池註冊成 `GuestMe
    （`virtio_media_ioctls.c:1235-1236` 的 TODO）。`EXPBUF` 暫不做（B 路用不到）。
 2. **device（fork `device/`）**：`ioctl.rs:1139` 的 `MemoryType::DmaBuf` 與 `UserPtr` 同等放行（guest 自有 SG），
    `video_decoder.rs` 的 CAPTURE guest-owned 分支同樣對待；crosvm backend 不動（它透過 mapper 寫 GPA）。能力位元照實回報。
-3. **libva-v4l2（stateful 路徑）**：surface 改為「一個 surface = 一個 virtio-gpu MEM_GUEST blob」，大小與 plane 版面取
+3. **libva-v4l2（stateful 路徑）**：surface 改為「一個 surface = 一個 GPU 配置的 linear buffer」——**用標準 GBM**（`gbm_bo_create` 在 VA display 開的 render node 上，`GBM_BO_USE_LINEAR`；DroidVM 的 Mesa freedreno 在 GBM 配置時本來就產生 `MEM_GUEST` blob，`virtgpu_ioctl.c:41-44`），原生 `RESOURCE_CREATE_BLOB` 只當 GBM 不支援該格式時的備援；如此 libva-v4l2 不含任何 virtio-gpu 專屬碼，裸機高通（GBM 從 msm 配、匯進 venus）同形。大小與 plane 版面取
    `G_FMT(CAPTURE)`（device 的 stride；若 GPU 端要求對齊不同，以 `S_FMT(CAPTURE).bytesperline` 協商，不合就退回 VA1
    的 MMAP 路徑）；`SOURCE_CHANGE` 後才知道版面，所以 blob 在第一次宣告後配、之後尺寸變更時重配；surface↔CAPTURE 綁定
    從此**靜態**（DQBUF 的 index 就是 surface），timestamp/sequence 對應保留為一致性檢查；`vaExportSurfaceHandle` 回
