@@ -994,7 +994,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Eighteen ways a run has silently lied to a work package. Each one cost a session; none of them
+Nineteen ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -1380,7 +1380,7 @@ changed it, and the uptime says it happened during the same boot, so **read `hp.
 compare `pool_want` against the number your predecessor measured on, before you measure
 anything** — and if it is low, that is a question for the phone's owner, not a VPU defect.
 
-**18. A browser test page served by `python3 -m http.server` stalls the NEXT browser, silently.** The
+**19. A browser test page served by `python3 -m http.server` stalls the NEXT browser, silently.** The
 stock server is single-threaded; the keep-alive connection a `pkill`ed WebKit or Firefox leaves
 behind occupies it, and the next run sits after qtdemux with no decoder autoplugged and nothing
 on the phone -- it looks exactly like a decoder that never started (B21-browser lost three
