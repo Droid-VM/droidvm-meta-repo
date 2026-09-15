@@ -994,7 +994,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Nineteen ways a run has silently lied to a work package. Each one cost a session; none of them
+Twenty ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -1389,6 +1389,19 @@ Two more browser papercuts from the same round: leave `XAUTHORITY` UNSET and rel
 `xhost +local:` -- pointing it at sddm's cookie makes Firefox refuse to run as root outright; and
 never `pkill -f <pattern>` inside a `guest.sh ssh` remote command, because the remote bash's own
 command line contains the pattern and the shell kills itself (split the pattern into variables).
+
+**20. `pkill -f <browser>` inside a `guest.sh ssh` command kills the ssh session itself, even with the
+name split.** The remote `bash -c` command line CONTAINS the browser name (it is right there in the
+`pkill` argument and often in the surrounding text), so `pkill -f firefox` matches the shell running it;
+splitting the literal (`'fire''fox'`) does not help because the whole command text is what is matched.
+B22-browser lost two ssh sessions to it (`client_loop: send disconnect: Broken pipe`). Launch browsers
+detached (`setsid nohup … > guest-file 2>&1 &`) and kill by PID from a pidfile, or run the `pkill` from
+a script file in the guest whose own command line does not carry the name. Related gating note for a
+future `va.sh browser` verb: Firefox prints `Using preferred software codec h264` (a per-codec
+capability line) even on the hardware path -- gate on `Using preferred hardware codec h264` plus the
+ABSENCE of `IsHardwareAccelerated=false`, never on the word `software`. And in gbm-dmabuf mode the
+backend's pool line reads `CAPTURE pool: 21 (surfaces K, spares S, min 21)`, which `VA_POOL_RE` (the
+MMAP wording) does not match -- the bar still passes, the regex is owed an update.
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
