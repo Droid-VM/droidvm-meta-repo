@@ -832,6 +832,89 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 `mScreenState=OFF mWakefulness=Asleep`），前後幾輪照樣 `v=ok` 且位元組數精確——與 B15-accept §7.1 互相印證：
 只要 VM 的前景服務撐著，`foreground` 的 `CAMERA` appop 在螢幕關著時仍然放行（§7.1 的 D76 講的是**串流中**被撤銷）。
 
+### 7.6 VA-API 後端：libva-v4l2 的 stateful 路徑（2026-09-15 定案，VA1 進行中）
+
+**給誰、為什麼。** §7.2/§7.3 交付的是 V4L2 M2M 介面，ffmpeg `h264_v4l2m2m`、GStreamer `v4l2videodec/enc`
+都通；拿不到硬體的是只講 VA-API 的客戶端——Chromium/Firefox、mpv `--hwdec=vaapi`、ffmpeg `-hwaccel vaapi`、
+GStreamer `va*`。VA-API 是 libva 加一個由它載入的後端 `<name>_drv_video.so`；Android 主機沒有 libva，所以它
+只存在於 guest。guest 今天**沒有任何 VA 驅動**：step 8 的 guest Mesa 只建 `-Dgallium-drivers=zink,llvmpipe`
+（`mesa-cross/mesa-config.sh:49-50`），沒開 gallium-va、沒有 virgl；libva 依 DRM 名稱對 `virtio_gpu` 會去找
+`virtio_gpu_drv_video.so`，那個檔不存在，`vaInitialize` 失敗。
+
+**放哪裡（決定：新 repo，不進 Mesa）。** `Droid-VM/libva-v4l2` 是 mxsrc/libva-v4l2（Bootlin libva-v4l2-request
+的復活版）的 fork：預設分支 `droidvm` 依決定**留空**（一個無檔案的空 commit `e4b48f3`），所有工作在 `wip/vpu`，
+它帶著上游完整歷史（367 個 commit），stateful 後端做出來可以原樣往上游送（上游 README 的 roadmap 就是它）。
+不進 Mesa 的理由：Mesa 的 VA 是 Gallium 前端、底下要一個 pipe driver，把 `/dev/videoN` 塞進 pipe driver 沒有
+上游前例也沒有上游未來；我們的 guest Mesa 刻意只有 zink/llvmpipe，要嵌就得動 mesa-cross 的選項、綁上
+3d-accel 那三條 Mesa 分支與 gfxstream/venus 的版本耦合，每改一行跑一次整個交叉編譯；libva 後端 ABI 小而穩，
+mxsrc 的 libva 樣板（driver/config/context/surface/image/buffer/picture，約 1.4k 行）直接可用；零拷貝兩邊
+都同樣卡在 virtio-media 的 EXPBUF/DMABUF，Mesa 給不了捷徑。meta 的 step 1 以 `clone_at` 沿分支鏈拉它
+（`1_build_crosvm_prepare.sh:21`），`.gitignore` 同其他元件；§11 的 accepted 標籤慣例從此是**八個** repo。
+
+**為什麼是「合成碼流」而不是別的（型態不合，見 §7.2 的 stateful 決定）。** VA-API 是 slice 層級的 stateless
+介面：客戶端自己解析，交 `VAPictureParameterBufferH264`／`VAIQMatrixBufferH264`／`VASliceParameterBufferH264`
+＋slice 資料；我們的 decoder 是 stateful、主機是 MediaCodec，只吃碼流。上游 libva-v4l2 只會 stateless＋Request
+API（`picture.cc:116-141` 每張圖一個 request，`v4l2.cc:231-233,403-405`），我們的 device 沒有 `_SLICE` 格式、
+guest 驅動沒有 media node，主機也不可能收 slice。所以後端的核心工作就是**把 VA 結構合成回 Annex-B**，這件事放在
+guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Request API），且 GStreamer 1.28 的
+`gsth264bitwriter` 現成可用（guest 是 Ubuntu 26.04、GStreamer 1.28.2）。
+
+**契約（stateful 後端，VA1 = H.264 解碼、拷貝路徑）：**
+
+1. **選擇與探測。** 驅動名 `v4l2`（`v4l2_drv_video.so`），guest 由 `/etc/profile.d/droidvm-va.sh` 匯出
+   `LIBVA_DRIVER_NAME=v4l2`（並 `GST_VAAPI_ALL_DRIVERS=1` 給舊的 gstreamer-vaapi）；`LIBVA_V4L2_VIDEO_PATH` 可
+   覆寫。udev 探測 M2M 節點；**模式判定**：coded 格式帶 `V4L2_FMT_FLAG_DYN_RESOLUTION` 且沒有 `_SLICE/_FRAME`
+   → stateful（我們的 decoder，`video_decoder.rs:183`）；有 `_SLICE/_FRAME` 且有 media node → 沿用上游
+   stateless 路徑（不刪，留給上游）。
+2. **Profile／entrypoint。** 只有 `VAEntrypointVLD`、`VA_RT_FORMAT_YUV420`、輸出 NV12。device 目前**沒有**
+   profile/level 控制項（唯一控制項是唯讀的 `MIN_BUFFERS_FOR_CAPTURE`，`video_decoder.rs:298`），所以 VA1 依
+   fourcc 給固定清單（H264 → ConstrainedBaseline/Main/High），**這是 VA1 明知的暫時硬編碼**；VA1b 讓 device 把
+   MediaCodec 的真實能力以 `V4L2_CID_MPEG_VIDEO_H264_PROFILE/LEVEL` menu 暴露（fork＋crosvm），驅動改讀控制項，
+   回到「不寫死」規則。
+3. **碼流合成（H.264）。** 每個 `vaEndPicture` = 一個 access unit 進一個 OUTPUT buffer：`[SPS][PPS]`（只在
+   參數變動時重送，IDR 前一律送）＋每個 slice 前補 4-byte start code——VA 的 slice data 是**整個 NAL**（含 NAL
+   header 與 emulation prevention bytes，`slice_data_offset` 指向 `nal_unit_type` 那個 byte），原樣搬。SPS/PPS 由
+   `VAPictureParameterBufferH264` 的 `seq_fields/pic_fields/num_ref_frames/log2_max_*/pic_order_cnt_type/…` 與
+   `VAIQMatrixBufferH264` 的 scaling list 以 `gst_h264_bit_writer_sps/pps` 寫出；**VUI 必寫
+   `bitstream_restriction`，`max_num_reorder_frames = num_ref_frames`**（重排死鎖規則，第 5 點）。VA2 的 HEVC
+   同法但 VPS 憑空合成；VP9 由 `VADecPictureParameterBufferVP9` 重建 uncompressed header；AV1 的 OBU 待議。
+4. **Surface 模型。** `VASurface` 是**邏輯圖槽**，`vaCreateSurfaces` 不預綁 CAPTURE（上游一 surface 一對
+   source/destination buffer 的模型只對 stateless 成立）。CAPTURE 池由 device 在 `SOURCE_CHANGE` 後決定：驅動
+   讀 `MIN_BUFFERS_FOR_CAPTURE`，配 `min + N`（N = surface 數與 8 取小，總數上限 32），`S_FMT(CAPTURE)` 取
+   device 宣告的 coded size 與 stride。**對應規則**：送出的 OUTPUT buffer `timestamp` = 該 surface 的 64-bit
+   序號；device 以 `TIMESTAMP_COPY` 把它帶到產出的 CAPTURE（`video_decoder.rs:244-246, 918-920`）；
+   `vaSyncSurface(S)` 反覆 `DQBUF(CAPTURE)` 直到 timestamp == S，途中取到的其他畫格進「已解未取」表；
+   `vaDeriveImage` 直接映射該 CAPTURE 的 NV12 mmap（stride 取 `G_FMT`，零額外複製），`vaGetImage` 複製；surface
+   被下一個 `vaBeginPicture` 重用或 destroy 時，其 CAPTURE 重新 `QBUF`。
+5. **重排死鎖規則。** VA 客戶端自己重排、按顯示順序取畫格，**拿到 S 之前不會再送輸入**；stateful 解碼器若扣住
+   比客戶端更多的畫格，雙方互等。兩道保險：(a) 第 3 點的 VUI，讓 codec 的延遲不超過客戶端的假設；(b)
+   `vaSyncSurface` 等待逾時（預設 500 ms，環境變數可調）→ 發 `DEC_CMD_STOP` 排空、收回所有已送畫格 →
+   `DEC_CMD_START` 續解，並記一行 log（codec 重啟有代價，出現次數是 B18 要看的數字）。
+6. **Flush／結束／錯誤。** `vaDestroyContext` → `DEC_CMD_STOP` 排空 → `STREAMOFF` 兩邊 → `REQBUFS(0)`。VA 沒有
+   seek 訊號，驅動**不猜**：IDR 與 POC 回繞交給 stateful codec 自己處理。`DQBUF` 回 `ENODEV`（device 退出、相機
+   搶占那類）→ 該 surface 之後的 sync 回 `VA_STATUS_ERROR_DECODING_ERROR`，session 標記死亡，客戶端重建 context。
+7. **零拷貝。** VA1 的 `vaExportSurfaceHandle` 回 `VA_STATUS_ERROR_UNIMPLEMENTED`（瀏覽器據此乾淨退回軟解；
+   mpv/ffmpeg 的 copy 路徑不受影響）。VA3 才補：driver `vidioc_expbuf`＋拿掉 `V4L2_BUF_CAP_SUPPORTS_DMABUF`
+   的遮罩（`driver/virtio_media_ioctls.c:1235-1236, :1848`）、device 收 DMABUF（`device/src/ioctl.rs:1142` 現在
+   拒絕）、`media_guest` 池的 guest dma-buf 匯出、再匯進 virtio-gpu 顯示。
+8. **建置與出貨。** repo 內 `packaging/`（Dockerfile 仿 mesa-cross：Ubuntu multiarch，
+   `libva-dev libdrm-dev libgstreamer-plugins-bad1.0-dev libudev-dev` 的 `:arm64`，無 sysroot）＋
+   `build-packages.sh deb` → `libva-v4l2_<git describe>_arm64.deb`（`/usr/lib/aarch64-linux-gnu/dri/v4l2_drv_video.so`、
+   `/etc/profile.d/droidvm-va.sh`）；meta 的 `10_build_guest_va.sh` 把 deb 放進 `dist-guest/`（同 step 8/9）；
+   guest-additions 的 `install.sh` 比照 `DROIDVM_MESA_URL` 加 `DROIDVM_VA_URL`。
+9. **驗收（B18；rig 新增 `va` smokes）。** `vainfo` 列出 H264 的 VLD 與 vendor string；`ffmpeg -hwaccel vaapi
+   -hwaccel_output_format vaapi -i 1080p.mp4 -vf hwdownload,format=nv12 -f rawvideo -pix_fmt nv12` 的 md5 =
+   `bf32f00e5c4bca747bf7827ea5797b33`（B17 那支 300 張的參考，同一條軟解基準）；mpv `--hwdec=vaapi-copy` 播完
+   不掉幀；GStreamer `vah264dec` 300/300；vaapi-fits `--platform V4L2` 的 H264 decode 子集；ffmpeg
+   `h264_v4l2m2m` 300/300 不退步；同一個 helper 上 VA 客戶端與 V4L2 客戶端交替使用互不影響；第 5(b) 點的
+   排空次數在 1080p 參考片上為 **0**。
+10. **分期。** VA1 = 本節主體（H.264、拷貝路徑，virtio-media 一行不動）→ VA1b（profile 控制項，device）→
+    VA2（HEVC/VP9）→ VA3（零拷貝）→ VA4（編碼 `VAEntrypointEncSlice`，看瀏覽器是否需要）。
+
+**主機端能驗到哪。** x86 原生 build 型別檢查；SPS/PPS writer 以 gst parser 往返的單元測試（寫出 → 解析 → 逐欄位
+比對）；以假的 `V4L2M2MDevice` 介面測 stateful session 狀態機（`SOURCE_CHANGE` 後配池、timestamp 對應、逾時排空、
+ENODEV）。真解碼與 vaapi-fits 只能在 guest（B18）。
+
 ## 8. app / daemon（WP-A1）
 
 * `CrosvmBackendInstance.buildCommand` `:322-402`：三條 GPU 路線各自組 `--pre-alloc` 改成整台 VM 一個 `StringBuilder`；`appendMediaPoolOptions(sb, item, pvm)`：`vpu_enabled` 才加，`media-host-mb=<vpu_host_pool_mb>`，`media-guest-mb=<VpuConfig.guestPoolMbFor(..)>`（>0 才加）；**VPU-only VM（無 GPU）也要出**。`protected_vm` 讀取要提前到 `:346` 之前。
@@ -1101,6 +1184,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 
    分支名記不住一個建置——`wip/vpu` 會動，報告裡的「crosvm `114de78`」在下一個 WP commit 之後就找不回來了；
    七個 tag 一起下才記得住。約定是 `accepted-<wp>-<date>`，七個全下或一個都不下
+   **2026-09-15 起是八個 repo：`libva-v4l2` 加入（§7.6），它的 `droidvm` 分支依決定留空，tag 一樣下在 `wip/vpu` 的 head。**
    （只下一部分比不下更糟：讀的人會以為沒下的那幾個沒動過）。怎麼從 tag 重建，見
    `deploy/vpu/README.md` 的「The `accepted-*` tags」。
    **但 tag 只是配方，不是成品**：B11 驗收過的那顆二進位（md5 `a289e03fe6e16c6f7a1d8825cc99989a`、
