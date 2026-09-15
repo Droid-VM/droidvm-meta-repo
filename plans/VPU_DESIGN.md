@@ -1021,17 +1021,24 @@ gpu-guest pool（GPA 0x168000000 起）；30 個 surface 的池配置約 2 ms。
 GPU 腿死在同一道 set_iova 牆——比 B 多兩個缺口，維持備援。**B20 驗收必須比像素**：錯的 buffer 會無錯匯入、取樣全零；
 vm.log 的 tell 是那行 set_iova。
 
-**線上契約（driver ↔ device，兩邊各自實作時的共同依據）。** `V4L2_MEMORY_DMABUF` 的 buffer 在 virtio-media 線上**與 USERPTR
-完全同形**：`v4l2_buffer.memory` 說 `DMABUF`，附帶的 SG 清單是 guest 實體位址範圍。驅動端：`QBUF` 時 `dma_buf_get(fd)` →
-`dma_buf_attach(dev)` → `dma_buf_map_attachment(DMA_BIDIRECTIONAL)` 取 sg_table，**用 `sg_dma_address/sg_dma_len` 填清單，
-不假設有 struct page**（virtio-gpu vram 匯出的 sgt 只有 DMA 位址；無 IOMMU 的 transport 上 dma_addr == GPA），附著保留到
-該 buffer `DQBUF`／`REQBUFS(0)`／close；`REQBUFS`/`CREATE_BUFS` 回覆不再遮 `V4L2_BUF_CAP_SUPPORTS_DMABUF`（照 device 回報）。
-device 端：`MemoryType::DmaBuf` 在 REQBUFS/CREATE_BUFS/QBUF 的每個閘與 `UserPtr` **同等放行、同一條 guest-owned SG 映射路徑**
-（`guest_buf.rs`，GuestMemory 涵蓋 gpu-guest pool），能力位元回報 `SUPPORTS_MMAP|SUPPORTS_USERPTR|SUPPORTS_DMABUF`
-（CAPTURE 與 OUTPUT 皆是，兩者的 guest-owned 路徑已存在）；crosvm 的 MediaCodec 後端不動。libva 端：一個 surface = 一個
-`gbm_bo`（R8 容器），`gbm_bo_get_fd` 的 dma-buf 以 `DMABUF` `QBUF` 進 CAPTURE，`DQBUF` 的 index 就是 surface；
-`vaExportSurfaceHandle` 回同一個 fd 的 NV12/LINEAR descriptor（offset 0 / w*h，pitch = stride）；`vaDeriveImage`／`vaGetImage`
-走 `gbm_bo_map`；初始化時探一次 GBM NV12 以便未來 Mesa 支援時自動用上。
+**線上契約（2026-09-15 定案：替換在驅動端，device 與 crosvm 一行不動）。** 驅動本來就有「driver-owned buffer」的替換機制
+（`virtio_media_ioctls.c` ~205-290 `virtio_media_send_buffer_ioctl`、~1030-1075 `virtio_media_fixup_driver_owned_reply`／
+`virtio_media_check_buffer_memory`、`scatterlist_filler_add_buffer_dbuf`）：使用者看到 MMAP，對 host 卻以 **USERPTR＋cookie＋
+預先算好的 SG 清單**送出，回覆再改回使用者要的型別；佇列記錄的型別才是使用者同意的型別。`V4L2_MEMORY_DMABUF` 是這套的**第三種
+口味**：`REQBUFS/CREATE_BUFS(memory=DMABUF)` 對 host 送 USERPTR、回覆改回 DMABUF 並補 `V4L2_BUF_CAP_SUPPORTS_DMABUF`（拿掉
+`:1235-1236` 的整片遮罩；DMABUF 在 host 回報支援 USERPTR 的每個佇列上都成立）；`QBUF(memory=DMABUF)` 時 `dma_buf_get(fd)` →
+`dma_buf_attach` → `dma_buf_map_attachment(DMA_BIDIRECTIONAL)` 取 sgt，**以 `sg_dma_address/len` 填 SG 清單、不假設有 struct
+page**（virtio-gpu vram 匯出的 sgt 只有 DMA 位址；無 IOMMU 的 transport 上 dma_addr == GPA），對 host 仍是 USERPTR，附著保留到
+`DQBUF`／`REQBUFS(0)`／`STREAMOFF`／close；每個 plane 可各帶 fd（同一個 fd 不同 `data_offset` 亦可）；`EXPBUF` 仍為 NULL。
+**device 端因此沒有任何改動**（它只看到 USERPTR，guest-owned CAPTURE 的 `guest_buf.rs` 路徑已存在），**crosvm 也不動**：
+pVM 下 helper 可寫的視窗由 `host_accessible_windows`（`guest_buf.rs:155`）決定，清單含 `GpuPoolGuest`／`Drm2KgslPool`／
+`MediaPool*` 等 SHARE 過的用途，spike 量到的 blob 就在 gpu-guest pool——所以 B21 只裝 r23 驅動 deb 與 libva deb，crosvm
+維持 B17 的 `1e136313`。libva 端：一個 surface = 一個 `gbm_bo`（R8 容器），`gbm_bo_get_fd` 的 dma-buf 以 `DMABUF` `QBUF` 進
+CAPTURE（1-plane 或 2-plane 皆以同一 fd 對應各 plane 的 `data_offset`），`DQBUF` 的 index 就是 surface；
+`vaExportSurfaceHandle` 回同一個 fd 的 NV12/LINEAR descriptor（offset 0 / stride×h，pitch = stride；分層與合成兩種都支援）；
+`vaDeriveImage`／`vaGetImage` 走 `gbm_bo_map`；初始化探一次 GBM NV12；池在第一次 `vaBeginPicture` 才配（surface 齊全，
+share 不再看 `vaCreateSurfaces` 進度）；梯子 GBM NV12 → GBM R8 → VA1 MMAP（r22 驅動沒有 `SUPPORTS_DMABUF` 時自動退回，同一顆
+deb 在 r22 與 r23 上都能用；`LIBVA_V4L2_SURFACES=mmap|gbm` 可強制）。
 
 **已知風險，spike 要先答。** (a) **GPU 能否匯入並取樣這種 blob**：freedreno 的 EGL 對自家 virtio-gpu 物件的
 dma-buf re-import 與 NV12 兩平面（`EGL_DMA_BUF_PLANE0/1_*`、`LINEAR` modifier）；(b) **快取一致性**：頁面由 host 的
