@@ -5,6 +5,7 @@
 /mesa/
 /mesa-cross/
 /droidvm-guest-additions/
+/libva-v4l2/
 /crosvm-minimal-manifest/
 # Soong-tree entries (symlinks into crosvm_build; the tree itself is repo-synced)
 /crosvm
