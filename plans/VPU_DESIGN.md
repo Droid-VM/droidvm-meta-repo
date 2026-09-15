@@ -898,12 +898,12 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
    的遮罩（`driver/virtio_media_ioctls.c:1235-1236, :1848`）、device 收 DMABUF（`device/src/ioctl.rs:1142` 現在
    拒絕）、`media_guest` 池的 guest dma-buf 匯出、再匯進 virtio-gpu 顯示。
 8. **建置與出貨。** repo 內 `packaging/`（Dockerfile 仿 mesa-cross：Ubuntu multiarch，
-   `libva-dev libdrm-dev libgstreamer-plugins-bad1.0-dev libudev-dev` 的 `:arm64`，無 sysroot）＋
-   `build-packages.sh deb` → `libva-v4l2_<git describe>_arm64.deb`（`/usr/lib/aarch64-linux-gnu/dri/v4l2_drv_video.so`、
+   `libva-dev libdrm-dev libgstreamer-plugins-bad1.0-dev libudev-dev` 的 `:arm64`，無 sysroot；runtime 的 codecparsers 在 Ubuntu 26.04 resolute 是 **`libgstreamer-plugins-extra1.0-0`**，不是 `-bad1.0-0`——Depends 由 `DT_NEEDED` 對容器內套件反查得出，VA1-pkg 實測）＋
+   `build-packages.sh deb` → `libva-v4l2_0+droidvm.r<N>.g<sha>_arm64.deb`（上游從未打 tag，`git describe` 無名可用，沿用 guest-additions 的單調計數方案）（`/usr/lib/aarch64-linux-gnu/dri/v4l2_drv_video.so`、
    `/etc/profile.d/droidvm-va.sh`）；meta 的 `10_build_guest_va.sh` 把 deb 放進 `dist-guest/`（同 step 8/9）；
    guest-additions 的 `install.sh` 比照 `DROIDVM_MESA_URL` 加 `DROIDVM_VA_URL`。
 9. **驗收（B18；rig 新增 `va` smokes）。** `vainfo` 列出 H264 的 VLD 與 vendor string；`ffmpeg -hwaccel vaapi
-   -hwaccel_output_format vaapi -i 1080p.mp4 -vf hwdownload,format=nv12 -f rawvideo -pix_fmt nv12` 的 md5 =
+   -hwaccel_output_format vaapi -i 1080p.mp4 -fps_mode passthrough -vf hwdownload,format=nv12 -f rawvideo -pix_fmt nv12` 的 md5 =（`-fps_mode passthrough` 不可省：B16/B17 的參考值是帶著它量的，少了它 md5 會變而沒有任何東西錯）
    `bf32f00e5c4bca747bf7827ea5797b33`（B17 那支 300 張的參考，同一條軟解基準）；mpv `--hwdec=vaapi-copy` 播完
    不掉幀；GStreamer `vah264dec` 300/300；vaapi-fits `--platform V4L2` 的 H264 decode 子集；ffmpeg
    `h264_v4l2m2m` 300/300 不退步；同一個 helper 上 VA 客戶端與 V4L2 客戶端交替使用互不影響；第 5(b) 點的
