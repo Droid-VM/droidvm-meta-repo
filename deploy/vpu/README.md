@@ -1380,6 +1380,16 @@ changed it, and the uptime says it happened during the same boot, so **read `hp.
 compare `pool_want` against the number your predecessor measured on, before you measure
 anything** — and if it is low, that is a question for the phone's owner, not a VPU defect.
 
+**18. A browser test page served by `python3 -m http.server` stalls the NEXT browser, silently.** The
+stock server is single-threaded; the keep-alive connection a `pkill`ed WebKit or Firefox leaves
+behind occupies it, and the next run sits after qtdemux with no decoder autoplugged and nothing
+on the phone -- it looks exactly like a decoder that never started (B21-browser lost three
+Epiphany runs to it). Serve the page with `deploy/vpu/va_serve.py` (a ThreadingTCPServer) instead.
+Two more browser papercuts from the same round: leave `XAUTHORITY` UNSET and rely on
+`xhost +local:` -- pointing it at sddm's cookie makes Firefox refuse to run as root outright; and
+never `pkill -f <pattern>` inside a `guest.sh ssh` remote command, because the remote bash's own
+command line contains the pattern and the shell kills itself (split the pattern into variables).
+
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
 launch line above (**D57**). `crosvm --log-level debug run ...` is what forwards it to every
