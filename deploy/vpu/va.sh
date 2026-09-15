@@ -57,7 +57,10 @@ FRAMES=${FRAMES:-300}
 # The marker the backend writes when 7.6 point 5(b) fires (timeout -> DEC_CMD_STOP -> restart).
 # Kept as a setting because the exact wording belongs to the backend, not to this script; what
 # the design fixes is that there IS one line per drain and that the count is 0 on this clip.
-VA_DRAIN_RE=${VA_DRAIN_RE:-drain}
+# The exact line the stateful session emits on a sync timeout (libva-v4l2 src/stateful/session.cc):
+#   "sync timeout after <ms> ms on sequence <n>: DEC_CMD_STOP drain + restart (occurrence <k>)"
+# Anchored on the literal so a client's own "drain" chatter can never count as a recovery.
+VA_DRAIN_RE=${VA_DRAIN_RE:-DEC_CMD_STOP drain \+ restart}
 
 VERB=${1:-}; NAME=${2:-}
 [ -n "$VERB" ] || usage
@@ -139,7 +142,10 @@ do_vainfo() {
     [ "$rc" = 0 ] || bad "vainfo exited $rc"
     # The vendor string is how you tell OUR backend from a fallback: libva happily reports a
     # different driver's string and vainfo still exits 0.
-    grep -qi 'v4l2' vainfo.txt || bad "no v4l2 in the vainfo vendor string -- a different driver answered"
+    # Upstream's stateless path answers with the vendor string "v4l2" too, so "v4l2" alone cannot
+    # tell our path from a fallback to it; the stateful path says "DroidVM libva-v4l2 (stateful
+    # virtio-media)" (libva-v4l2 src/driver.h V4L2_STR_VENDOR_STATEFUL).
+    grep -qi 'stateful virtio-media' vainfo.txt || bad "vendor string is not the stateful backend's -- a different driver (or the stateless path) answered"
     grep -Eq 'VAProfileH264High[[:space:]]*:[[:space:]]*VAEntrypointVLD' vainfo.txt ||
         bad "VAProfileH264High : VAEntrypointVLD is not listed"
 }
