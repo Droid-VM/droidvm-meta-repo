@@ -1007,6 +1007,31 @@ pVM)」），而 crosvm 把這些「on top of `--mem`」的池註冊成 `GuestMe
    blob fd；`vaDeriveImage`／`vaGetImage` 改走 `VIRTGPU_MAP` + mmap（mpv/ffmpeg 的拷貝路徑不變）；render node 不是
    `virtio_gpu` 或 blob 建立失敗 → 自動退回 VA1 的 MMAP 模式並記一行 log。
 
+**VA3-spike 結果（2026-09-15，`logs/vpu_wp/VA3-spike.md`）：B 路 GPU 腿綠燈，但要改兩處。** (1) guest 的 GL 是
+**zink-on-turnip**（`GL_RENDERER` = `zink Vulkan 1.4 (Adreno (TM) 840 … MESA_TURNIP)`），不是上文假設的 freedreno；turnip 在
+drm2kgsl native context 裡**只綁 Mesa 自己 guest-alloc 的 blob**（`HOST3D_GUEST`，ctx+blob_id 相關聯）——直接
+`RESOURCE_CREATE_BLOB(MEM_GUEST)` 的裸 blob 匯進 EGL **無任何錯誤但 GPU 取樣全零**，host log 是
+`kgsl_ccmd_gem_set_iova … Could not lookup obj`；`CREATE_GUEST_HANDLE` 從 Mesa 之外打則 host create `-22`。所以裸 blob 那一階
+**是死的**，梯子改為 **GBM NV12 → GBM R8 位元組容器 → VA1 MMAP**。(2) GBM 拒絕 `GBM_FORMAT_NV12`（`EINVAL`，
+`is_format_supported`=0），**`gbm_bo_create(w, h*3/2, GBM_FORMAT_R8, GBM_BO_USE_LINEAR)` 的位元組容器是主配置**，實測
+stride 1920 == device 的 `G_FMT` bytesperline、EGL 以 NV12 兩平面（offset 0 / w*h，pitch w）匯入後 Y/UV 平面**逐位元組相符**、
+`samplerExternalOES` 對 BT.601-limited 100% 在 1 LSB 內；CPU 寫→GPU 讀**不需** `DMA_BUF_IOCTL_SYNC`；blob 147/147 落在 SHARE 過的
+gpu-guest pool（GPA 0x168000000 起）；30 個 surface 的池配置約 2 ms。A 路探針：guest 腿（udmabuf 的 `PRIME_FD_TO_HANDLE`）成功，
+GPU 腿死在同一道 set_iova 牆——比 B 多兩個缺口，維持備援。**B20 驗收必須比像素**：錯的 buffer 會無錯匯入、取樣全零；
+vm.log 的 tell 是那行 set_iova。
+
+**線上契約（driver ↔ device，兩邊各自實作時的共同依據）。** `V4L2_MEMORY_DMABUF` 的 buffer 在 virtio-media 線上**與 USERPTR
+完全同形**：`v4l2_buffer.memory` 說 `DMABUF`，附帶的 SG 清單是 guest 實體位址範圍。驅動端：`QBUF` 時 `dma_buf_get(fd)` →
+`dma_buf_attach(dev)` → `dma_buf_map_attachment(DMA_BIDIRECTIONAL)` 取 sg_table，**用 `sg_dma_address/sg_dma_len` 填清單，
+不假設有 struct page**（virtio-gpu vram 匯出的 sgt 只有 DMA 位址；無 IOMMU 的 transport 上 dma_addr == GPA），附著保留到
+該 buffer `DQBUF`／`REQBUFS(0)`／close；`REQBUFS`/`CREATE_BUFS` 回覆不再遮 `V4L2_BUF_CAP_SUPPORTS_DMABUF`（照 device 回報）。
+device 端：`MemoryType::DmaBuf` 在 REQBUFS/CREATE_BUFS/QBUF 的每個閘與 `UserPtr` **同等放行、同一條 guest-owned SG 映射路徑**
+（`guest_buf.rs`，GuestMemory 涵蓋 gpu-guest pool），能力位元回報 `SUPPORTS_MMAP|SUPPORTS_USERPTR|SUPPORTS_DMABUF`
+（CAPTURE 與 OUTPUT 皆是，兩者的 guest-owned 路徑已存在）；crosvm 的 MediaCodec 後端不動。libva 端：一個 surface = 一個
+`gbm_bo`（R8 容器），`gbm_bo_get_fd` 的 dma-buf 以 `DMABUF` `QBUF` 進 CAPTURE，`DQBUF` 的 index 就是 surface；
+`vaExportSurfaceHandle` 回同一個 fd 的 NV12/LINEAR descriptor（offset 0 / w*h，pitch = stride）；`vaDeriveImage`／`vaGetImage`
+走 `gbm_bo_map`；初始化時探一次 GBM NV12 以便未來 Mesa 支援時自動用上。
+
 **已知風險，spike 要先答。** (a) **GPU 能否匯入並取樣這種 blob**：freedreno 的 EGL 對自家 virtio-gpu 物件的
 dma-buf re-import 與 NV12 兩平面（`EGL_DMA_BUF_PLANE0/1_*`、`LINEAR` modifier）；(b) **快取一致性**：頁面由 host 的
 媒體 helper 以 CPU 寫、由 host 的 kgsl 以 GPU 讀（透過 udmabuf 映射）——`virtgpu_vram.c:948` 註明一致性仰賴匯入的
