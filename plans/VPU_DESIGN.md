@@ -802,6 +802,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D85** | 帶 B-frame 的碼流**結尾一定吃一次排空**：`-bf 3` 的 1280x720（150 張、`has_b_frames=2`）每一 run 都在 **sequence 148** 記一次 `sync timeout after 500 ms … DEC_CMD_STOP drain + restart`，而 **md5 與軟解 bit-exact、150/150 全到**。這**不是缺陷而是 VA-API 的形狀**：VA 沒有 flush／EOS 呼叫（§7.6 第 6 點只在 `vaDestroyContext` 排空），B-frame 的尾巴被 codec 扣著等後續輸入，客戶端對尾巴那張的 sync **只可能**由一次排空滿足。原本「排空次數 0」的 bar 是**參考片的性質**（那支沒有 B-frame），不是後端的性質 | **關——改成兩層等待與兩個門檻**（§7.6 第 5、9 點已改寫）：`sync timeout` 每支片子 0、`idle drain` 參考片 0／B-frame 片正好 1。後端要把這條尾巴排空記成獨立的 `idle drain` 行（VA1-fix），B19 以新 bar 驗 | 介面語意（VA-API 無 EOS），**不是** device、driver 或池 | **VA1-fix**（後端分出 `idle drain` 行）＋ rig 的 `va.sh bframes` 動詞（已加，meta `aa96349`）；`logs/vpu_wp/B18-acceptance.md` §7.1 |
 | **D86** | **排空是一次性的**：B18 §7.2 用 `LIBVA_V4L2_SYNC_TIMEOUT_MS` 逼出恢復路徑，**第一次**排空確實保住位元組（5 ms 預算、一次恢復、仍然 300 張 `bf32f00e…`；B-frame 片每 run 一次也 bit-exact），但**同一個 session 的第二次**排空、或**第一次 `SOURCE_CHANGE` 宣告之前**的排空（1 ms 預算、sequence 1）一律以 `Stateful sync failed` 收場、session 死掉、客戶端退回軟解。順帶：50 ms 的預算在參考片上**一次都逼不出來**（一次 sync 遠快於 50 ms），所以任務原本指定的探針值太鬆，要 5 ms 才碰得到 | **開，medium，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §7.2（`scratch-B18a/52_recovery.txt`）。§7.6 第 5 點寫的「兩道保險」只有第一次成立，這是 **D84** 那條死鎖救不回來的原因 | `libva-v4l2` `src/stateful/session.cc`（排空後的狀態重建：宣告前排空、以及第二次排空的 CAPTURE 重配） | **VA1-fix**；B19 以「同一 session 連兩次強制恢復仍 300/300」當回歸 bar |
 | **D87** | **環境，不是產品**：實驗手機的 `gh_hugepage_reserve` 模組參數 `pool_want` 在 B17 那個 boot 期間被**別人**改成 **2048**（4 GiB），而 B11 起每一份報告與 `deploy/vpu/README.md` 記的都是 3072（6 GiB）；而且連 2048 都填不滿——`acquire` 停在 `cma sources exhausted`、`pool_avail` 1874–1906。後果不是表格裡一個小一點的數字：**`memory_mb=4096` 的 VM 起不來**（`GH-PIN[preboot]: refusing 1024 MB … 296/512 2MB samples (57%) cannot be long-term pinned … CmaFree 9376 kB` → `crosvm exiting with error 1: failed to create vm  Caused by: Out of memory (os error 12)`；3072 時卡在最後 192 MB 的 `media_guest`）。B18 只好把 VM 降到 `memory_mb=2048` 跑完，所以它的 `served=1632／pool_avail=272/2048` **與 B11–B17 不可比**，而 B11–B17 的每一個 hp 數字在 `pool_want` 復原之前都是**過期的** | **開——需要手機的主人**。rig 這一側只能讀不能寫（B18 想寫回 3072 被權限層擋在 `Modify Shared Resources`）。記進 `deploy/vpu/README.md` **量測陷阱 18**：量任何東西之前先看 `hp.sh status` 的 `pool_want` 對不對得上前一份報告 | 實驗室環境／手機設定，**不是** VMM、device、driver 或池 | 沒有 WP：`pool_want=3072` 由機主復原之後，下一個上手機的 WP 重新記一次基準數字。`logs/vpu_wp/B18-acceptance.md` §0 |
+| **D88** | B19（r378）：`vaBeginPicture` 回 `VA_STATUS_ERROR_SURFACE_BUSY`(16) 接著 `invalid VASurfaceID`，run 拖到 EOF 但 md5 錯、張數短（參考片 2/30、-bf 3 片 2/13）。機制：一次 sync 失敗（或 stale-generation 的 release 不重排）讓 surface 永遠停在 Rendering | **VA1-fix2 修（libva-v4l2 `bf6b4b5`：sync 失敗的 surface 重置為 Ready＋解除綁定；`12d1126`：provisioning 遇 EBUSY 退避重試而非逐張報忙），B21 驗** | libva-v4l2 stateful | 同一輪也把 D83 的殘留關掉：upstream `driver_data` 的五個 id map 在熱路徑無鎖讀（`picture.cc`/`surface.cc`/`image.cc`）而 ffmpeg 的 frame thread 同時建/毀 buffer——`8761810` 改 `shared_mutex`，TSan 以 mutation 證明。**量測註記**：B18/B19 前半的排空計數全是 0，因 rig 的 `${VAR:-word}` 預設吃掉反斜線（meta `9f4f4f3` 修）；只有修後的數字算數 |
 
 ### 7.5 耐久：一小時 soak 與 30 次 stop/start（M8 的端到端證據）
 
@@ -919,10 +920,10 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
    **排空是一次性的（D86，B18 §7.2 實測）**：同一個 session 裡第二次排空、或第一次 `SOURCE_CHANGE` 宣告之前
    的排空，會以 `Stateful sync failed` 收場、session 死掉、客戶端退回軟解。所以「多排幾次就好」不是可用的
    策略，兩個計數要分開讀：一次 idle drain 是設計的一部分，兩行任何一種都是死掉的 run。
-6. **Flush／結束／錯誤。** `vaDestroyContext` → `DEC_CMD_STOP` 排空 → `STREAMOFF` 兩邊 → `REQBUFS(0)`。VA 沒有
+6. **Flush／結束／錯誤。** `vaDestroyContext` → 若仍有已送未取的輸入才 `DEC_CMD_STOP` 排空（乾淨解完的 context 不發，B19 strace 的 `DECODER_CMD` 計數 0 是預期）→ `STREAMOFF` 兩邊 → `REQBUFS(0)`。VA 沒有
    seek 訊號，驅動**不猜**：IDR 與 POC 回繞交給 stateful codec 自己處理。`DQBUF` 回 `ENODEV`（device 退出、相機
    搶占那類）→ 該 surface 之後的 sync 回 `VA_STATUS_ERROR_DECODING_ERROR`，session 標記死亡，客戶端重建 context。
-7. **零拷貝。** VA1 的 `vaExportSurfaceHandle` 回 `VA_STATUS_ERROR_UNIMPLEMENTED`（瀏覽器據此乾淨退回軟解；
+7. **零拷貝。** VA1 的 `vaExportSurfaceHandle` 回 `VA_STATUS_ERROR_UNIMPLEMENTED`（瀏覽器據此乾淨退回軟解——但退回前已開了一個真的硬體 session：B19 的 Firefox 在 :0 上走到 `GetVAAPISurfaceDescriptor(): vaExportSurfaceHandle failed` 才退，vm.log session 228 是 1 進 0 出、42.6 ms；Epiphany（WebKitGTK→GStreamer `vah264dec`）在 Xvfb 下則以 `vaGetImage` 拷貝真的硬解了 300 張；Chromium 在 Ubuntu 26.04 只有 snap，其 mount namespace 看不到 `/usr/lib/aarch64-linux-gnu/dri/`、內建 libva 1.20 也載不了我們的 `__vaDriverInit_1_23`，那是打包問題不是 VA 能力；
    mpv/ffmpeg 的 copy 路徑不受影響）。VA3 才補：driver `vidioc_expbuf`＋拿掉 `V4L2_BUF_CAP_SUPPORTS_DMABUF`
    的遮罩（`driver/virtio_media_ioctls.c:1235-1236, :1848`）、device 收 DMABUF（`device/src/ioctl.rs:1142` 現在
    拒絕）、`media_guest` 池的 guest dma-buf 匯出、再匯進 virtio-gpu 顯示。
@@ -940,7 +941,7 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
    **排空的門檻（B18 之後改寫）：`sync timeout` 在每一支片子上都是 0；`idle drain` 在 1080p 參考片上是 0、
    在 `-bf 3` 的 720p 探針上正好是 1**（第 5 點的 EOS 理由）。mpv 那條 bar 另外要記下**客戶端建了幾個
    surface、CAPTURE 池配了幾個**——後端在 `LIBVA_MESSAGING_LEVEL=2` 印
-   `CAPTURE pool: min N + share S = M (surfaces K)`，B18 的 strace 讀到 `REQBUFS(CAPTURE, 21)`＝device 宣告的
+   `CAPTURE pool: min N + share S = M (surfaces K, granted G)`，B18 的 strace 讀到 `REQBUFS(CAPTURE, 21)`＝device 宣告的
    裸最小值（share 沒套上），這正是 **D84** 的機制而不只是症狀。**vaapi-fits 在 Ubuntu 26.04 arm64 沒有套件**
    （B18 查證，未跑）：那是一筆**欠的建置**，不是一條可以判 pass/fail 的 bar，在它被建出來之前不列入計分。
 
