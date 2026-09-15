@@ -55,7 +55,7 @@ restart stops every VM (`Daemon.cleanup`).
 | `install_apk.sh` | `<apk>` → stop every VM, install, unpack the payload, restart the daemon, verify all of it |
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
-| `va.sh` | `fixture\|vainfo\|decode\|mpv\|gst\|v4l2-still-ok\|all\|install-tools <name>` — the **VA-API** smokes (design §7.6 point 9); every bar is [unverified until B18] |
+| `va.sh` | `fixture\|vainfo\|decode\|mpv\|gst\|bframes\|v4l2-still-ok\|all\|install-tools <name>` — the **VA-API** smokes (design §7.6 point 9), measured on the phone in **B18** |
 | `vm_extra.sh` | `show\|set\|takeover\|restore\|clear <name>` — the VM's `extra_options` array |
 | `harness.sh` | `<gbt\|kvt\|kst\|mpt\|vmt\|acb\|acc\|acd\|all>` — the host-side cargo harnesses; no phone, no network |
 | `tests/pick_device.sh` | not a test: the guest-side snippet the three below prepend to their remote script to pick `/dev/videoN` **by capability** |
@@ -564,39 +564,60 @@ deploy/vpu/va.sh all Ubuntu-resolute
 ### `va.sh`
 
 ```sh
-deploy/vpu/va.sh fixture       Ubuntu-resolute   # make/verify the 1080p reference clip
+deploy/vpu/va.sh fixture       Ubuntu-resolute   # verify (and if needed push) the reference clip
 deploy/vpu/va.sh vainfo        Ubuntu-resolute
 deploy/vpu/va.sh decode        Ubuntu-resolute
 deploy/vpu/va.sh mpv           Ubuntu-resolute
 deploy/vpu/va.sh gst           Ubuntu-resolute
+deploy/vpu/va.sh bframes       Ubuntu-resolute   # a -bf 3 720p clip, and its ONE tail drain
 deploy/vpu/va.sh v4l2-still-ok Ubuntu-resolute
-deploy/vpu/va.sh all           Ubuntu-resolute
+deploy/vpu/va.sh all           Ubuntu-resolute   # the decode runs 8x (VA_DECODE_RUNS)
 ```
 
-**Every bar below is `[unverified until B18]`** — the backend's stateful path is being written in
-the same round as this script and none of these verbs has ever run. They are the numbers the
-design names, not numbers anyone has seen.
+**B18 ran every verb on the lab phone**, so the bars below are measurements, not predictions —
+except `mpv`, which B18 measured **failing** 0 of 6 (**D84**) and which is kept as a bar because
+it is one.
 
 | verb | bar |
 |---|---|
-| `fixture` | `$VA_DIR/1080p.mp4` (default `/root/va`) decodes in **software** to `bf32f00e5c4bca747bf7827ea5797b33`. Remade in the guest from B12's own ffmpeg recipe when missing, so no 10 MB blob lives in the rig |
-| `vainfo` | exits 0, the vendor string contains `v4l2`, and `VAProfileH264High : VAEntrypointVLD` is listed |
-| `decode` | `ffmpeg -hwaccel vaapi … -vf hwdownload,format=nv12` md5 = **`bf32f00e5c4bca747bf7827ea5797b33`**, **300** frames, and **0** drain lines |
-| `mpv` | `--hwdec=vaapi-copy --frames=300` exits 0, log says `Using hardware decoding (vaapi-copy)`, no drops |
-| `gst` | `vah264dec ! fakesink` delivers **300** buffers |
+| `fixture` | `$VA_DIR/1080p.mp4` (default `/root/va`) decodes in **software** to `bf32f00e5c4bca747bf7827ea5797b33`. **Verified, never generated**: the clip is an artefact (see below) |
+| `vainfo` | exits 0, the vendor string says **`DroidVM libva-v4l2 (stateful virtio-media)`** — `v4l2` alone is also upstream's stateless string — and `VAProfileH264High : VAEntrypointVLD` is listed |
+| `decode` | `ffmpeg -hwaccel vaapi … -vf hwdownload,format=nv12` md5 = **`bf32f00e5c4bca747bf7827ea5797b33`**, **300** frames, **0** sync timeouts and **0** idle drains. Under `all` it runs **8 times** and reports **aborts apart from md5 mismatches** (**D83** kills about one run in nine, and an abort is not a wrong decode) |
+| `mpv` | `--hwdec=vaapi-copy --frames=300` exits 0, log says `Using hardware decoding (vaapi-copy)`, no drops, no `Stateful sync failed`, **0** sync timeouts. It also prints the backend's `CAPTURE pool: min N + share S = M (surfaces K)` line, because **D84** is a number on that line |
+| `gst` | `vah264dec ! fakesink` delivers **300** buffers (needs `GST_VA_ALL_DRIVERS=1`; see the env table) |
+| `bframes` | a guest-encoded `-bf 3` 720p clip: VA md5 == **its own** software md5, 150/150, **0** sync timeouts and **exactly 1** idle drain — the B-frame tail at EOS (**D85**) |
 | `v4l2-still-ok` | `h264_v4l2m2m` still **300/300** and still bit-exact — VA1 touches nothing in virtio-media, so a change here is a regression, not a VA bug |
+
+**The reference clip is an artefact, not a recipe.** B18 §4.1 measured what that means: the
+recipe that used to live in `va.sh` produced `66677bf3…`, the same recipe at the real bitrate
+produced `753a8dc5…`, and neither is `bf32f00e…` — the guest's x264 is not the build host's x264
+that made the bytes in B12, and no `-b:v` closes that gap. So `fixture` **verifies**: if the
+guest's clip software-decodes to the reference md5 it passes; otherwise it pushes the host-side
+copy `$VA_FIXTURE` (default `logs/vpu_wp/fixtures/1080p.mp4`) with `guest.sh scp` and verifies
+again; if there is no host copy it says so and fails. **B19 owes that file** — from the guest
+overlay B18 left it on, `/root/b12a/1080p.mp4` (10 503 274 B) — and owes its own `sha256` in the
+report, so a later copy can be checked without decoding it.
+
+**Two drain counts, not one.** `sync timeout` (a client waited past its budget and the codec was
+restarted under it) must be **0 on every clip**. `idle drain` (the codec was holding a tail
+nobody had asked for) must be **0 on the 1080p reference** and is **exactly 1** on a B-frame
+clip: VA-API has no EOS or flush call, so a `-bf 3` stream's tail sits in the codec until
+something drains it, and a client's sync of a tail frame can only be satisfied by that drain
+(**D85**). `VA_TIMEOUT_RE` and `VA_IDLE_RE` are the two markers `va.sh` greps for; the wording
+belongs to the backend, so set them rather than editing the script.
 
 The env the package's `/etc/profile.d/droidvm-va.sh` sets, and which `va.sh` therefore sets for
 itself on every verb:
 
 | variable | why |
 |---|---|
-| `LIBVA_DRIVER_NAME=v4l2` | libva's default lookup asks DRM for the driver name, gets `virtio_gpu`, and looks for a `virtio_gpu_drv_video.so` that does not exist (step 8's mesa has no VA state tracker). Without this, `vaInitialize` fails and **every** VA client falls back to software |
-| `GST_VAAPI_ALL_DRIVERS=1` | the old `gstreamer-vaapi` elements keep a whitelist of vendor strings. GStreamer 1.28's newer `va` plugin (`vah264dec`) does not, so this only matters to whoever reaches for `vaapidecode` |
+| `LIBVA_DRIVER_NAME=v4l2` | libva's default lookup asks DRM for the driver name and gets `virtio_gpu` — and a `virtio_gpu_drv_video.so` **does** exist in this guest (B18 §2: the distro Mesa ships it as a symlink into `libgallium`). It is Gallium's virgl video driver and decodes nothing here, which is exactly why naming ours is **required**: without this, libva opens the wrong file and **every** VA client falls back to software |
+| `GST_VA_ALL_DRIVERS=1` | GStreamer 1.28's `va` plugin (`vah264dec`) keeps its **own** vendor whitelist and reads **this** name. Without it `gstvadisplay.c:186` logs `Unsupported driver: DroidVM libva-v4l2 (stateful virtio-media)` and the plugin registers **0 features** — `vah264dec` does not exist at all, which reads as a missing package (B18 §4.4) |
+| `GST_VAAPI_ALL_DRIVERS=1` | the same whitelist in the **old** `gstreamer-vaapi` elements (`vaapidecode`), which read the other name. Both are shipped: a guest may carry either plugin |
 | `LIBVA_V4L2_VIDEO_PATH` | optional: pins one `/dev/videoN` when the udev probe picks the wrong node |
 | `LIBVA_MESSAGING_LEVEL=2` | not shipped, set by `va.sh`: without it a failed `vaInitialize` is one unexplained number instead of a driver-search trace |
 
-### Measurement traps this one can already foresee
+### Measurement traps in this corner
 
 **`/etc/profile.d` reaches login shells and nothing else.** `ssh host command` is not a login
 shell, and neither is a systemd unit, a `cron` job, or anything a desktop session spawns before
@@ -620,11 +641,15 @@ md5 in this project (B12 §0 onwards) was taken with it.
 fails with "no element", which reads like a missing package rather than a driver that would not
 initialise. `gst-inspect-1.0 va` shows the plugin's own load error.
 
-**A drain is a failure even when the md5 matches.** §7.6 point 5(b) restarts the codec when a
-`vaSyncSurface` waits too long, and a restart recovers — the bytes still come out right. The
-count is the measurement: on this clip the design's bar is **0**, and any non-zero number means
-the bitstream's reorder promise (the VUI of point 3) does not match what the codec holds.
-`VA_DRAIN_RE` is the marker `va.sh` greps the client log for; the wording belongs to the backend.
+**A drain is a failure even when the md5 matches — but only one of the two kinds is.** §7.6
+point 5(b) restarts the codec when a `vaSyncSurface` waits too long, and a restart recovers: the
+bytes still come out right (B18 §7.2 measured one forced recovery at a 5 ms budget and still got
+300 frames at `bf32f00e…`). The count is the measurement, and there are two of them. A **sync
+timeout** is always a failure — a client waited past its budget. An **idle drain** is the
+expected end of a B-frame stream and must be **exactly 1** there, **0** on the reference clip.
+And the recovery is **one-shot** (**D86**): a second drain in one session, or one before the
+first `SOURCE_CHANGE`, ends in `Stateful sync failed` and a dead session — so a run with two
+drain lines is not "twice as slow", it is a run that died.
 
 **The first-run warm-up analogue.** The decoder learns its buffer floor on the first session of a
 boot (B16 §2 / B17, the `REQBUFS(CAPTURE,20) => 21` line), so the *first* VA decode after a fresh VM
@@ -969,7 +994,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Seventeen ways a run has silently lied to a work package. Each one cost a session; none of them
+Eighteen ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -991,7 +1016,9 @@ announces itself. In short, as a checklist:
 > because a daemon restart reverts it and `vm.sh start` then prints nothing at all; after a
 > stop/start the guest's **IPv6 address is dead for ~5 minutes** (DAD), so reach it over DHCPv4;
 > and the **first encode of a resolution after a helper starts is unfloored** — warm one up and
-> discard it before measuring, sessions 2+ are 300/300 at the ffmpeg default.
+> discard it before measuring, sessions 2+ are 300/300 at the ffmpeg default; and **check
+> `gh_hugepage_reserve`'s `pool_want` before trusting any `hp` number**, because somebody can
+> lower it between boots and the VM then simply will not start.
 
 And at length:
 
@@ -1338,6 +1365,20 @@ the very same clip is **300/300** — so it is ffmpeg's own `h264_v4l2m2m` deque
 that reads ffmpeg's `-f rawvideo` frame count as ground truth will fail here for no product
 reason; take the device's `frames out` line, or a gst decode, as the reference instead. `-num_capture_buffers`
 does not help this one (unlike trap 16's encoder case).
+
+
+**18. `pool_want` can change under you, and then every hugepage number in every past report is
+stale** (**D87**, environment). B18 found the lab phone's `gh_hugepage_reserve` `pool_want` at
+**2048** pages (4 GiB) where `README` and every report from B11 on record **3072** (6 GiB), and
+the module could not even fill that: `hp.sh reclaim` stopped at `cma sources exhausted` with
+`pool_avail` 1874–1906. The consequence is not a smaller number in a table — the **VM would not
+start**: at `memory_mb=4096` the preboot pin refused 1024 MB (`296/512 2MB samples (57%) cannot
+be long-term pinned … CmaFree 9376 kB`) and crosvm exited `Out of memory (os error 12)`; at 3072
+it refused the last 192 MB (`media_guest`). The session had to run the VM at `memory_mb=2048`,
+so its `served` / `pool_avail` figures are **not comparable** with B11–B17's. Nobody on the rig
+changed it, and the uptime says it happened during the same boot, so **read `hp.sh status` and
+compare `pool_want` against the number your predecessor measured on, before you measure
+anything** — and if it is low, that is a question for the phone's owner, not a VPU defect.
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
