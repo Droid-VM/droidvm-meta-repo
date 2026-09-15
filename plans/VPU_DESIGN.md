@@ -973,10 +973,17 @@ pVM)」），而 crosvm 把這些「on top of `--mem`」的池註冊成 `GuestMe
 
 **兩條路，選 B。**
 
-* **A 匯出（否決）**：virtio-media 配 CAPTURE、`VIDIOC_EXPBUF` 匯出 dma-buf、瀏覽器把它匯進 virtio-gpu。DroidVM 的
-  `virtio_gpu` 模組 `virtgpu_gem_prime_import_sg_table` 直接回 `-ENODEV`（`virtio_gpu/virtgpu_prime.c:347-352`）——
-  外來 dma-buf 匯入不支援，上游亦然；補它等於在 3d-accel 那條線開一個 guest blob 匯入路徑，且 pVM 下外來頁面（媒體池／
-  shmem）還得是 SHARE 過的。兩層不確定，不走。
+* **A 匯出（備援，2026-09-15 更正）**：virtio-media 配 CAPTURE、`VIDIOC_EXPBUF` 匯出 dma-buf、瀏覽器把它匯進 virtio-gpu。
+  **先前寫的「virtio-gpu 不匯入外來 sg（`-ENODEV`）」是看錯了 stub**：`virtgpu_gem_prime_import_sg_table` 那個舊
+  callback 回 `-ENODEV` 是上游原樣（DroidVM 只 vendor、沒動 `virtgpu_prime.c`），真正的外來匯入在
+  `virtgpu_gem_prime_import`（`virtgpu_prime.c:300-346`）：自家物件直接重用；外來 dma-buf 在 host 有 `RESOURCE_BLOB`
+  時動態 attach、`virtgpu_dma_buf_import_sgt` 取 sg、`resource_create_blob(MEM_GUEST, SHAREABLE, ents)`（上游 6.14
+  起，vendor 版含 7.1 相容）。所以 A 的 guest 腿**存在**。A 仍不當主線的理由：(i) virtio-media 驅動要新寫一個 dma-buf
+  **exporter**，而媒體池是 `/reserved-memory`／host 記憶體、沒有 struct page，sgt 只能給 DMA 位址；(ii) **host 腿無法在做出
+  exporter 前驗證**——crosvm 的 gpu device 得把「媒體池 GPA 清單」包成 udmabuf 當 guest blob 背景（udmabuf 要 memfd 頁面，
+  媒體池區域的背景在程式碼裡看不出），pVM 下又只有 SHARE 過的頁面可用；(iii) B 的每一腿 spike 都能先驗。若 B 的 GBM
+  配置給不出 decoder 的版面，再回頭做 A。
+
 * **B 匯入（定案）**：libva 以 `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB`（`blob_mem=MEM_GUEST`，`USE_MAPPABLE|USE_SHAREABLE`，
   純 size、不帶格式）在 `/dev/dri/renderD128` 配 surface → `PRIME_HANDLE_TO_FD` 得 dma-buf → 以 **`V4L2_MEMORY_DMABUF`**
   `QBUF` 進 decoder 的 CAPTURE → device 直接把 NV12 寫進 GPU 可見的 guest 頁面 → `vaExportSurfaceHandle` 回同一個
