@@ -802,9 +802,9 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D85** | 帶 B-frame 的碼流**結尾一定吃一次排空**：`-bf 3` 的 1280x720（150 張、`has_b_frames=2`）每一 run 都在 **sequence 148** 記一次 `sync timeout after 500 ms … DEC_CMD_STOP drain + restart`，而 **md5 與軟解 bit-exact、150/150 全到**。這**不是缺陷而是 VA-API 的形狀**：VA 沒有 flush／EOS 呼叫（§7.6 第 6 點只在 `vaDestroyContext` 排空），B-frame 的尾巴被 codec 扣著等後續輸入，客戶端對尾巴那張的 sync **只可能**由一次排空滿足。原本「排空次數 0」的 bar 是**參考片的性質**（那支沒有 B-frame），不是後端的性質 | **關——改成兩層等待與兩個門檻**（§7.6 第 5、9 點已改寫）：`sync timeout` 每支片子 0、`idle drain` 參考片 0／B-frame 片正好 1。後端要把這條尾巴排空記成獨立的 `idle drain` 行（VA1-fix），B19 以新 bar 驗 | 介面語意（VA-API 無 EOS），**不是** device、driver 或池 | **VA1-fix**（後端分出 `idle drain` 行）＋ rig 的 `va.sh bframes` 動詞（已加，meta `aa96349`）；`logs/vpu_wp/B18-acceptance.md` §7.1 |
 | **D86** | **排空是一次性的**：B18 §7.2 用 `LIBVA_V4L2_SYNC_TIMEOUT_MS` 逼出恢復路徑，**第一次**排空確實保住位元組（5 ms 預算、一次恢復、仍然 300 張 `bf32f00e…`；B-frame 片每 run 一次也 bit-exact），但**同一個 session 的第二次**排空、或**第一次 `SOURCE_CHANGE` 宣告之前**的排空（1 ms 預算、sequence 1）一律以 `Stateful sync failed` 收場、session 死掉、客戶端退回軟解。順帶：50 ms 的預算在參考片上**一次都逼不出來**（一次 sync 遠快於 50 ms），所以任務原本指定的探針值太鬆，要 5 ms 才碰得到 | **開，medium，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §7.2（`scratch-B18a/52_recovery.txt`）。§7.6 第 5 點寫的「兩道保險」只有第一次成立，這是 **D84** 那條死鎖救不回來的原因 | `libva-v4l2` `src/stateful/session.cc`（排空後的狀態重建：宣告前排空、以及第二次排空的 CAPTURE 重配） | **VA1-fix**；B19 以「同一 session 連兩次強制恢復仍 300/300」當回歸 bar |
 | **D87** | **環境，不是產品**：實驗手機的 `gh_hugepage_reserve` 模組參數 `pool_want` 在 B17 那個 boot 期間被**別人**改成 **2048**（4 GiB），而 B11 起每一份報告與 `deploy/vpu/README.md` 記的都是 3072（6 GiB）；而且連 2048 都填不滿——`acquire` 停在 `cma sources exhausted`、`pool_avail` 1874–1906。後果不是表格裡一個小一點的數字：**`memory_mb=4096` 的 VM 起不來**（`GH-PIN[preboot]: refusing 1024 MB … 296/512 2MB samples (57%) cannot be long-term pinned … CmaFree 9376 kB` → `crosvm exiting with error 1: failed to create vm  Caused by: Out of memory (os error 12)`；3072 時卡在最後 192 MB 的 `media_guest`）。B18 只好把 VM 降到 `memory_mb=2048` 跑完，所以它的 `served=1632／pool_avail=272/2048` **與 B11–B17 不可比**，而 B11–B17 的每一個 hp 數字在 `pool_want` 復原之前都是**過期的** | **開——需要手機的主人**。rig 這一側只能讀不能寫（B18 想寫回 3072 被權限層擋在 `Modify Shared Resources`）。記進 `deploy/vpu/README.md` **量測陷阱 18**：量任何東西之前先看 `hp.sh status` 的 `pool_want` 對不對得上前一份報告 | 實驗室環境／手機設定，**不是** VMM、device、driver 或池 | 沒有 WP：`pool_want=3072` 由機主復原之後，下一個上手機的 WP 重新記一次基準數字。`logs/vpu_wp/B18-acceptance.md` §0 |
-| **D88** | B19（r378）：`vaBeginPicture` 回 `VA_STATUS_ERROR_SURFACE_BUSY`(16) 接著 `invalid VASurfaceID`，run 拖到 EOF 但 md5 錯、張數短（參考片 2/30、-bf 3 片 2/13）。機制：一次 sync 失敗（或 stale-generation 的 release 不重排）讓 surface 永遠停在 Rendering | **VA1-fix2 修（libva-v4l2 `bf6b4b5`：sync 失敗的 surface 重置為 Ready＋解除綁定；`12d1126`：provisioning 遇 EBUSY 退避重試而非逐張報忙），B21 驗** | libva-v4l2 stateful | 同一輪也把 D83 的殘留關掉：upstream `driver_data` 的五個 id map 在熱路徑無鎖讀（`picture.cc`/`surface.cc`/`image.cc`）而 ffmpeg 的 frame thread 同時建/毀 buffer——`8761810` 改 `shared_mutex`，TSan 以 mutation 證明。**量測註記**：B18/B19 前半的排空計數全是 0，因 rig 的 `${VAR:-word}` 預設吃掉反斜線（meta `9f4f4f3` 修）；只有修後的數字算數 |
-| **D89** | B21：libva r385 每個 `vaCreateContext` 丟 `std::bad_function_call`（`GbmAllocator` 的空 logger），所有 VA 客戶端 0 幀，Epiphany 從 300 退到 0 | **VA3-fix-libva 修中（logger 永不為空＋真 vtable 的 gbm 測試），B22 驗** | libva-v4l2 | 教訓：seam 以下的假裝置測試抓不到第一個真呼叫的崩潰，要有走 vtable 的測試 |
-| **D90** | B21：pVM 的 restricted DMA pool 讓 `dma_map_resource` 對 virtio 裝置失敗，`QBUF(CAPTURE, DMABUF)` GBM bo 回 -EIO；udmabuf 對照成功 | **VA3-fix-driver 修中（resolver 裝置取 GPA），r25，B22 驗** | virtio-media guest 驅動；根因是 §7.7 契約寫成走 DMA API | host 要 GPA 不要 DMA 映射；不可存取頁面由 host EFAULT 拒絕 |
+| **D88** | B19（r378）：`vaBeginPicture` 回 `VA_STATUS_ERROR_SURFACE_BUSY`(16) 接著 `invalid VASurfaceID`，run 拖到 EOF 但 md5 錯、張數短（參考片 2/30、-bf 3 片 2/13）。機制：一次 sync 失敗（或 stale-generation 的 release 不重排）讓 surface 永遠停在 Rendering | **VA1-fix2 修（libva-v4l2 `bf6b4b5`：sync 失敗的 surface 重置為 Ready＋解除綁定；`12d1126`：provisioning 遇 EBUSY 退避重試而非逐張報忙），B22 驗證通過（crash probe 3/3、0 次 surface-is-in-use）** | libva-v4l2 stateful | 同一輪也把 D83 的殘留關掉：upstream `driver_data` 的五個 id map 在熱路徑無鎖讀（`picture.cc`/`surface.cc`/`image.cc`）而 ffmpeg 的 frame thread 同時建/毀 buffer——`8761810` 改 `shared_mutex`，TSan 以 mutation 證明。**量測註記**：B18/B19 前半的排空計數全是 0，因 rig 的 `${VAR:-word}` 預設吃掉反斜線（meta `9f4f4f3` 修）；只有修後的數字算數 |
+| **D89** | B21：libva r385 每個 `vaCreateContext` 丟 `std::bad_function_call`（`GbmAllocator` 的空 logger），所有 VA 客戶端 0 幀，Epiphany 從 300 退到 0 | **VA3-fix-libva 修（libva-v4l2 `1eeaa3d`），B22 驗證通過：vaCreateContext 全模式成功、Firefox 零拷貝 3/3** | libva-v4l2 | 教訓：seam 以下的假裝置測試抓不到第一個真呼叫的崩潰，要有走 vtable 的測試 |
+| **D90** | B21：pVM 的 restricted DMA pool 讓 `dma_map_resource` 對 virtio 裝置失敗，`QBUF(CAPTURE, DMABUF)` GBM bo 回 -EIO；udmabuf 對照成功 | **VA3-fix-driver 修（fork `fa39951`，r25 `138de14`），B22 驗證通過：resolver dma-direct、驅動探針 rc 0 且 md5 bf32f00e** | virtio-media guest 驅動；根因是 §7.7 契約寫成走 DMA API | host 要 GPA 不要 DMA 映射；不可存取頁面由 host EFAULT 拒絕 |
 
 ### 7.5 耐久：一小時 soak 與 30 次 stop/start（M8 的端到端證據）
 
@@ -1076,6 +1076,22 @@ derive 對未綁定 surface 記一次原因、`2095eb7` 容器小於 sizeimage �
 （allocator 綁 context 而 surface 先於 context，需要 driver 層級的 allocator 與 1:1 surface↔bo 模型；host 驗不到）——
 所以 WebKit 的 derive-at-negotiation 這輪仍失敗、Epiphany 維持 system memory 拷貝（B22 的 Epiphany bar 是 300/300 不退步，
 不是零拷貝）；**Firefox 的 export 路徑是 B22 的 VA3 主 bar**。WebKit 零拷貝另開 WP。
+
+**B22 定案（2026-09-15，`B22-acceptance.md`、`B22-browser.md`）：VA3 目標達成，D83–D90 全部在實機驗證通過。** r25 的
+resolver 在三個 virtio-media 裝置上印出 `dma-direct, no swiotlb force-bounce`；B21 回 -EIO 的驅動探針現在 rc 0、300 張、host 寫進
+GBM 頁面的 NV12 md5 = `bf32f00e…`（**host 解碼像素直接落在 GPU 可見頁面的首次證明**）。libva r389：`vaCreateContext` 全模式成功，
+mode line `stateful surfaces: gbm-dmabuf (R8 container, stride 1920, planes 1)`，D90 執行期降級 0 次。VA1-fix2 的 bar 首次全過：
+decode ×16 16/16 位元精確、0 abort、0 sync timeout、0 idle drain；mpv vaapi-copy 6/6；gst 300/300；`h264_v4l2m2m` 3/3；共存
+12/12；-bf 3 位元精確且 idle drain 恰 1；crash probe 3/3 且 0 次 `surface is in use`（D88 串聯消失）。pixel compare 在 SEPARATE 與
+COMPOSED 兩種 descriptor 下 300/300 匯出、Y/UV 平面逐位元組相符、NV12 取樣全在 BT.601 1 LSB 內；strace 見
+`REQBUFS(CAPTURE, memory=DMABUF, 21=>21)`、EXPBUF 0、kprobe 證實 21 個相異 per-plane fd。同一開機 wall clock：VA gbm-dmabuf
+中位 2.099 s、VA mmap 2.108 s、`h264_v4l2m2m` 2.349 s——VA 重回領先；pool share 0 與 8 只差 9 ms（VA1-fix2 開放項 7 解決）。
+93 個 decoder session 全部 in==out。**瀏覽器：Firefox 155 在真 X :0 上零拷貝硬解 3/3**（`VA-API FFmpeg init successful`、
+`IsHardwareAccelerated=true`、0 次 `vaExportSurfaceHandle failed`、每次 300× `ImportPRIMESurfaceDescriptor() FOURCC NV12` +
+`UpdateYUVData() copy 0`、vm.log session 222/228/234 各 300 進 300 出；B19 是 1 進 0 出、B21 連 session 都沒有）。Epiphany 在真 :0
+與 Xvfb 都 300/300（system memory 拷貝，`use derived: false` 屬延後項的預期形狀）。**唯一未過：mpv `--hwdec=vaapi --vo=gpu`
+退回軟解**——它的 VO 探測對「從未解碼過的 surface」呼叫 `vaExportSurfaceHandle`（回 6）／`vaDeriveImage`（回 1），正是延後的
+eager 配置，非新缺陷。Chromium 仍為 snap 打包問題。手機還原：VM 停、3072/3072、設定與快照逐位元相同。
 
 **已知風險，spike 要先答。** (a) **GPU 能否匯入並取樣這種 blob**：freedreno 的 EGL 對自家 virtio-gpu 物件的
 dma-buf re-import 與 NV12 兩平面（`EGL_DMA_BUF_PLANE0/1_*`、`LINEAR` modifier）；(b) **快取一致性**：頁面由 host 的
