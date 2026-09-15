@@ -55,6 +55,7 @@ restart stops every VM (`Daemon.cleanup`).
 | `install_apk.sh` | `<apk>` → stop every VM, install, unpack the payload, restart the daemon, verify all of it |
 | `guest.sh` | `ssh\|scp\|install-tools\|install-deb\|dmesg <name> [args]` |
 | `push_crosvm.sh` | `crosvm_out/` → phone, md5-verified, dated backup, `--dry-run` |
+| `va.sh` | `fixture\|vainfo\|decode\|mpv\|gst\|v4l2-still-ok\|all\|install-tools <name>` — the **VA-API** smokes (design §7.6 point 9); every bar is [unverified until B18] |
 | `vm_extra.sh` | `show\|set\|takeover\|restore\|clear <name>` — the VM's `extra_options` array |
 | `harness.sh` | `<gbt\|kvt\|kst\|mpt\|vmt\|acb\|acc\|acd\|all>` — the host-side cargo harnesses; no phone, no network |
 | `tests/pick_device.sh` | not a test: the guest-side snippet the three below prepend to their remote script to pick `/dev/videoN` **by capability** |
@@ -542,6 +543,93 @@ The device also logs the size and `error_idx` of every ext-controls error reply 
 `debug!`, so only if the helper was started at that level: see the trap below.
 
 ---
+
+## VA-API
+
+The VPU's V4L2 side is reached by clients that speak V4L2 M2M: `ffmpeg -c:v h264_v4l2m2m`,
+GStreamer `v4l2videodec`. Clients that only speak **VA-API** — Chromium and Firefox, `mpv
+--hwdec=vaapi`, `ffmpeg -hwaccel vaapi`, GStreamer's `va*` elements — reach nothing, because the
+guest has no libva backend at all. `Droid-VM/libva-v4l2` is that backend (design
+`plans/VPU_DESIGN.md` §7.6); the meta repo's `10_build_guest_va.sh` builds
+`libva-v4l2_<ver>_arm64.deb` into `dist-guest/`, and the guest-additions installer takes it as
+`DROIDVM_VA_URL` exactly as it takes `DROIDVM_MESA_URL`.
+
+```sh
+bash 10_build_guest_va.sh                                   # on the build host
+deploy/vpu/guest.sh install-deb Ubuntu-resolute dist-guest/libva-v4l2_*_arm64.deb
+deploy/vpu/va.sh install-tools Ubuntu-resolute              # vainfo, mpv, the va gst plugin
+deploy/vpu/va.sh all Ubuntu-resolute
+```
+
+### `va.sh`
+
+```sh
+deploy/vpu/va.sh fixture       Ubuntu-resolute   # make/verify the 1080p reference clip
+deploy/vpu/va.sh vainfo        Ubuntu-resolute
+deploy/vpu/va.sh decode        Ubuntu-resolute
+deploy/vpu/va.sh mpv           Ubuntu-resolute
+deploy/vpu/va.sh gst           Ubuntu-resolute
+deploy/vpu/va.sh v4l2-still-ok Ubuntu-resolute
+deploy/vpu/va.sh all           Ubuntu-resolute
+```
+
+**Every bar below is `[unverified until B18]`** — the backend's stateful path is being written in
+the same round as this script and none of these verbs has ever run. They are the numbers the
+design names, not numbers anyone has seen.
+
+| verb | bar |
+|---|---|
+| `fixture` | `$VA_DIR/1080p.mp4` (default `/root/va`) decodes in **software** to `bf32f00e5c4bca747bf7827ea5797b33`. Remade in the guest from B12's own ffmpeg recipe when missing, so no 10 MB blob lives in the rig |
+| `vainfo` | exits 0, the vendor string contains `v4l2`, and `VAProfileH264High : VAEntrypointVLD` is listed |
+| `decode` | `ffmpeg -hwaccel vaapi … -vf hwdownload,format=nv12` md5 = **`bf32f00e5c4bca747bf7827ea5797b33`**, **300** frames, and **0** drain lines |
+| `mpv` | `--hwdec=vaapi-copy --frames=300` exits 0, log says `Using hardware decoding (vaapi-copy)`, no drops |
+| `gst` | `vah264dec ! fakesink` delivers **300** buffers |
+| `v4l2-still-ok` | `h264_v4l2m2m` still **300/300** and still bit-exact — VA1 touches nothing in virtio-media, so a change here is a regression, not a VA bug |
+
+The env the package's `/etc/profile.d/droidvm-va.sh` sets, and which `va.sh` therefore sets for
+itself on every verb:
+
+| variable | why |
+|---|---|
+| `LIBVA_DRIVER_NAME=v4l2` | libva's default lookup asks DRM for the driver name, gets `virtio_gpu`, and looks for a `virtio_gpu_drv_video.so` that does not exist (step 8's mesa has no VA state tracker). Without this, `vaInitialize` fails and **every** VA client falls back to software |
+| `GST_VAAPI_ALL_DRIVERS=1` | the old `gstreamer-vaapi` elements keep a whitelist of vendor strings. GStreamer 1.28's newer `va` plugin (`vah264dec`) does not, so this only matters to whoever reaches for `vaapidecode` |
+| `LIBVA_V4L2_VIDEO_PATH` | optional: pins one `/dev/videoN` when the udev probe picks the wrong node |
+| `LIBVA_MESSAGING_LEVEL=2` | not shipped, set by `va.sh`: without it a failed `vaInitialize` is one unexplained number instead of a driver-search trace |
+
+### Measurement traps this one can already foresee
+
+**`/etc/profile.d` reaches login shells and nothing else.** `ssh host command` is not a login
+shell, and neither is a systemd unit, a `cron` job, or anything a desktop session spawns before
+its profile is read. So the same `ffmpeg -hwaccel vaapi` works in a terminal and decodes in
+software from a service — `va.sh` exports the variables itself for exactly this reason, and a
+service that needs the backend needs its own `Environment=LIBVA_DRIVER_NAME=v4l2`.
+
+**A VA client that falls back to software still exits 0.** This is the silent pass every bar
+above is shaped against: `mpv` prints one line about hardware decoding and otherwise plays
+normally, `ffmpeg -hwaccel vaapi` drops the `-hwaccel` and keeps going. The md5 does not catch it
+either — a *correct* software decode produces the very same reference md5. The evidence that the
+hardware was used is the client's own statement (`Using hardware decoding (vaapi-copy)`) and the
+device side (the VM log's decoder session lines), never the output bytes.
+
+**`-fps_mode passthrough` is part of the reference, not a flourish.** Without it ffmpeg may
+duplicate or drop frames to hit an output rate, and the md5 changes while nothing is wrong. Every
+md5 in this project (B12 §0 onwards) was taken with it.
+
+**The GStreamer element is `vah264dec`, from the `va` plugin, not `vaapidecode`.** If
+`gst-inspect-1.0 vah264dec` prints nothing the plugin did not load, and a pipeline naming it
+fails with "no element", which reads like a missing package rather than a driver that would not
+initialise. `gst-inspect-1.0 va` shows the plugin's own load error.
+
+**A drain is a failure even when the md5 matches.** §7.6 point 5(b) restarts the codec when a
+`vaSyncSurface` waits too long, and a restart recovers — the bytes still come out right. The
+count is the measurement: on this clip the design's bar is **0**, and any non-zero number means
+the bitstream's reorder promise (the VUI of point 3) does not match what the codec holds.
+`VA_DRAIN_RE` is the marker `va.sh` greps the client log for; the wording belongs to the backend.
+
+**The first-run warm-up analogue.** The decoder learns its buffer floor on the first session of a
+boot (B16 §2 / B17, the `REQBUFS(CAPTURE,20) => 21` line), so the *first* VA decode after a fresh VM
+start can behave differently from the second. Run `decode` twice before believing a one-off
+number, exactly as the V4L2 bars do.
 
 ## A typical loop
 
