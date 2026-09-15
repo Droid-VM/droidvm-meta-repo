@@ -953,6 +953,79 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
 比對）；以假的 `V4L2M2MDevice` 介面測 stateful session 狀態機（`SOURCE_CHANGE` 後配池、timestamp 對應、逾時排空、
 ENODEV）。真解碼與 vaapi-fits 只能在 guest（B18）。
 
+### 7.7 VA3：guest 內零拷貝，讓瀏覽器吃到 VPU（2026-09-15 定案，spike 先行）
+
+**目標（使用者 2026-09-15）。** VA-API 客戶端在 guest 內零拷貝：瀏覽器（Chromium／Firefox）拿到硬體解碼。兩者的 Linux
+VA 路徑都以 `vaExportSurfaceHandle` 取得 DMA-BUF、以 `EGL_EXT_image_dma_buf_import` 匯進 GL 合成；VA1 回
+`UNIMPLEMENTED` 就退回軟解（§7.6 第 7 點）。「零拷貝」指的是 **guest 內**從解碼輸出到 GPU 貼圖那一跳；host 內 codec
+輸出 buffer → 池那一次複製（`android.rs` 檔頭第 13 行）不在此列，也避不掉（MediaCodec 只認自己的 buffer，Surface 輸出是
+UBWC 廠商格式）。host↔guest 之間本來就是共享池、零拷貝。
+
+**這台 VM 的 GPU 是什麼，決定了路怎麼走（2026-09-15 讀自 B18 的設定快照與 crosvm argv）。**
+`gpu_backend=gpu_virglrenderer`、`gpu_api=drm2kgsl`、`gpu_mode=native`、`context-types=drm`、`vulkan=false, egl=true,
+gles=true, udmabuf=true`、`display_blit_provider=TURNIP`、`gpu_guest_pool_mb=1024`、`protected_vm=protected_without_firmware`。
+即 **native context**：guest 跑真正的 freedreno（GL）／turnip（Vulkan），指令直通 host 的 kgsl；host 以 udmabuf
+解析 guest 記憶體背景的 blob。**pVM 的硬約束**：host 只碰得到 SHARE 出去的區域——所以 DroidVM 的 `virtio_gpu` DKMS
+模組把 `VIRTGPU_BLOB_MEM_GUEST` 的 blob 導進開機就 SHARE 的 gpu-guest pool（`virtgpu_ioctl.c:585-600`，
+「pages the host can resolve via attach_iov in a protected VM instead of arbitrary shmem RAM (unreachable by the host in
+pVM)」），而 crosvm 把這些「on top of `--mem`」的池註冊成 `GuestMemoryRegion`（`src/crosvm/sys/linux.rs:5878-5989`），
+媒體 device 的 `guest_buf.rs` 就是用 GuestMemory 的 SG 清單寫 guest 自有 buffer。
+
+**兩條路，選 B。**
+
+* **A 匯出（否決）**：virtio-media 配 CAPTURE、`VIDIOC_EXPBUF` 匯出 dma-buf、瀏覽器把它匯進 virtio-gpu。DroidVM 的
+  `virtio_gpu` 模組 `virtgpu_gem_prime_import_sg_table` 直接回 `-ENODEV`（`virtio_gpu/virtgpu_prime.c:347-352`）——
+  外來 dma-buf 匯入不支援，上游亦然；補它等於在 3d-accel 那條線開一個 guest blob 匯入路徑，且 pVM 下外來頁面（媒體池／
+  shmem）還得是 SHARE 過的。兩層不確定，不走。
+* **B 匯入（定案）**：libva 以 `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB`（`blob_mem=MEM_GUEST`，`USE_MAPPABLE|USE_SHAREABLE`，
+  純 size、不帶格式）在 `/dev/dri/renderD128` 配 surface → `PRIME_HANDLE_TO_FD` 得 dma-buf → 以 **`V4L2_MEMORY_DMABUF`**
+  `QBUF` 進 decoder 的 CAPTURE → device 直接把 NV12 寫進 GPU 可見的 guest 頁面 → `vaExportSurfaceHandle` 回同一個
+  fd（NV12、`DRM_FORMAT_MOD_LINEAR`、offset/pitch 取自 `G_FMT(CAPTURE)`）→ 瀏覽器用 virtio-gpu **自己的** 物件匯入
+  EGL（re-import 本來就支援）。virtio-gpu 一行不動；這是 ChromeOS 上 V4L2 解碼＋native context 零拷貝的慣用形狀。
+
+**B 路要改的三處（都小）。**
+
+1. **virtio-media guest 驅動（fork `driver/`，r23）**：CAPTURE 的 `QBUF` 收 `V4L2_MEMORY_DMABUF`：`dma_buf_get` →
+   `attach`／`map_attachment` 取 sg_table → 走 **既有的 USERPTR SG 路徑**（`scatterlist_filler`）把頁面清單送給 host；
+   `DQBUF`／`REQBUFS(0)`／close 時 unmap／detach；`REQBUFS` 回覆對 CAPTURE 不再遮掉 `V4L2_BUF_CAP_SUPPORTS_DMABUF`
+   （`virtio_media_ioctls.c:1235-1236` 的 TODO）。`EXPBUF` 暫不做（B 路用不到）。
+2. **device（fork `device/`）**：`ioctl.rs:1139` 的 `MemoryType::DmaBuf` 與 `UserPtr` 同等放行（guest 自有 SG），
+   `video_decoder.rs` 的 CAPTURE guest-owned 分支同樣對待；crosvm backend 不動（它透過 mapper 寫 GPA）。能力位元照實回報。
+3. **libva-v4l2（stateful 路徑）**：surface 改為「一個 surface = 一個 virtio-gpu MEM_GUEST blob」，大小與 plane 版面取
+   `G_FMT(CAPTURE)`（device 的 stride；若 GPU 端要求對齊不同，以 `S_FMT(CAPTURE).bytesperline` 協商，不合就退回 VA1
+   的 MMAP 路徑）；`SOURCE_CHANGE` 後才知道版面，所以 blob 在第一次宣告後配、之後尺寸變更時重配；surface↔CAPTURE 綁定
+   從此**靜態**（DQBUF 的 index 就是 surface），timestamp/sequence 對應保留為一致性檢查；`vaExportSurfaceHandle` 回
+   blob fd；`vaDeriveImage`／`vaGetImage` 改走 `VIRTGPU_MAP` + mmap（mpv/ffmpeg 的拷貝路徑不變）；render node 不是
+   `virtio_gpu` 或 blob 建立失敗 → 自動退回 VA1 的 MMAP 模式並記一行 log。
+
+**已知風險，spike 要先答。** (a) **GPU 能否匯入並取樣這種 blob**：freedreno 的 EGL 對自家 virtio-gpu 物件的
+dma-buf re-import 與 NV12 兩平面（`EGL_DMA_BUF_PLANE0/1_*`、`LINEAR` modifier）；(b) **快取一致性**：頁面由 host 的
+媒體 helper 以 CPU 寫、由 host 的 kgsl 以 GPU 讀（透過 udmabuf 映射）——`virtgpu_vram.c:948` 註明一致性仰賴匯入的
+udmabuf；guest CPU 寫→GPU 讀由 spike 的讀回測到，host CPU 寫→GPU 讀只能在驅動改完後量（若髒，修法在 host：媒體
+helper 寫完做 cache clean 或 GPU 端 `begin_cpu_access` 語意）；(c) **瀏覽器實際用的 EGL**：Chromium 預設 ANGLE
+（`--use-angle=gl-egl` 走原生 EGL）或 `--use-gl=egl`，Firefox 走原生 EGL＋WebRender；兩者的 dma-buf 匯入都是
+`EGL_EXT_image_dma_buf_import` → freedreno；(d) blob 的頁面必須落在 SHARE 過的 gpu-guest pool（`gpu_guest_pool_base`
+存在時模組必走此路，spike 以 `VGBLOB-ROUTE` trace 或 GPA 範圍證實）。
+
+**VA3-spike（guest，B19 釋放手機後；一天內）。** 一支 C 程式：`RESOURCE_CREATE_BLOB(MEM_GUEST, size=NV12 1920x1080
+linear)` → `VIRTGPU_MAP`+mmap 寫入已知 NV12 圖樣（含 `DMA_BUF_IOCTL_SYNC` 前後各試一次）→ `PRIME_HANDLE_TO_FD` →
+`eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA 或 GBM on renderD128)` → `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT,
+NV12 兩平面, LINEAR)` → `glEGLImageTargetTexture2DOES`（`GL_TEXTURE_EXTERNAL_OES` 或 `GL_TEXTURE_2D`）→ 畫到 FBO →
+`glReadPixels` 與圖樣比對。同時記錄：ICD／GL renderer 字串、`VIRTGPU_PARAM_RESOURCE_BLOB`／`VIRTGPU_PARAM_CREATE_GUEST_HANDLE`
+等 param、blob 的路由（模組 trace）、Chromium/Firefox 的 EGL 選擇（`chrome://gpu` 的文字版或 `MOZ_LOG`）。
+**判準**：讀回逐像素相符 → B 路開綠燈；匯入失敗或取樣錯位 → 記下確切錯誤，工作轉向 renderer／freedreno 端，不動驅動。
+
+**驗收（B20，rig 的 `va.sh` 新增 `export`/`browser` verbs）。** `vaExportSurfaceHandle` 成功且 descriptor 為 NV12/LINEAR、
+一物件兩平面；一支小程式把匯出的 surface 匯進 EGL 取樣、與 `vaGetImage` 的像素相同（零拷貝路徑與拷貝路徑同像素）；
+`va.sh decode/mpv/gst` 全部維持 B19 的 bar（`vaapi-copy` 不退步）；mpv `--hwdec=vaapi`（非 copy，走 dma-buf 匯入的
+`--vo=gpu`）播完；**Chromium**（`--enable-features=VaapiVideoDecodeLinuxGL,VaapiIgnoreDriverChecks` 與 `--use-gl=egl` 或
+`--use-angle=gl-egl`）與 **Firefox**（`media.ffmpeg.vaapi.enabled`、`widget.dmabuf.enabled`）播放參考片時 vm.log 出現
+`decoder session … c2.qti.avc.decoder … started` 且 `frames out` 隨播放增加、瀏覽器 log 無 export/import 失敗行；
+V4L2 客戶端不退步；strace 顯示 CAPTURE 走 `V4L2_MEMORY_DMABUF`、`EXPBUF` 0 次。
+
+**分期。** VA3-spike → VA3-driver（r23，DKMS）＋ VA3-device（fork，一行放行＋能力位元）＋ VA3-libva（blob 配置器、
+靜態綁定、export、退回）→ B20（含瀏覽器）→ 之後才是 VA1b（profile 控制項）、VA2（HEVC/VP9）、VA4（編碼）。
+
 ## 8. app / daemon（WP-A1）
 
 * `CrosvmBackendInstance.buildCommand` `:322-402`：三條 GPU 路線各自組 `--pre-alloc` 改成整台 VM 一個 `StringBuilder`；`appendMediaPoolOptions(sb, item, pvm)`：`vpu_enabled` 才加，`media-host-mb=<vpu_host_pool_mb>`，`media-guest-mb=<VpuConfig.guestPoolMbFor(..)>`（>0 才加）；**VPU-only VM（無 GPU）也要出**。`protected_vm` 讀取要提前到 `:346` 之前。
