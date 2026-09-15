@@ -87,6 +87,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # The package ships this in /etc/profile.d, which a non-login ssh command never reads.
 export LIBVA_DRIVER_NAME=v4l2
 export GST_VAAPI_ALL_DRIVERS=1
+# B18: GStreamer 1.28's `va` plugin has its OWN vendor whitelist and its OWN variable; without
+# this it registers 0 features and vah264dec does not exist (`Unsupported driver: DroidVM ...`).
+export GST_VA_ALL_DRIVERS=1
 # libva prints its driver search and the backend's own messages at level 2; without it a failed
 # vaInitialize is one unexplained number.
 export LIBVA_MESSAGING_LEVEL=2
@@ -209,7 +212,7 @@ do_gst() {
         ! fakesink silent=false > gst.log 2>&1
     rc=$?
     [ "$rc" = 0 ] || bad "gst-launch exited $rc (see $VA_DIR/gst.log)"
-    n=$(grep -c 'chain *<fakesink' gst.log)
+    n=$(grep -cE 'chain .*[<(]fakesink' gst.log)   # 1.28 prints "(fakesink0:sink)", older "<fakesink...>"
     echo "fakesink buffers: $n (want $FRAMES)"
     [ "$n" = "$FRAMES" ] || bad "fakesink saw $n buffers, expected $FRAMES"
 }
