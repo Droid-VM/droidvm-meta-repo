@@ -805,6 +805,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D88** | B19（r378）：`vaBeginPicture` 回 `VA_STATUS_ERROR_SURFACE_BUSY`(16) 接著 `invalid VASurfaceID`，run 拖到 EOF 但 md5 錯、張數短（參考片 2/30、-bf 3 片 2/13）。機制：一次 sync 失敗（或 stale-generation 的 release 不重排）讓 surface 永遠停在 Rendering | **VA1-fix2 修（libva-v4l2 `bf6b4b5`：sync 失敗的 surface 重置為 Ready＋解除綁定；`12d1126`：provisioning 遇 EBUSY 退避重試而非逐張報忙），B22 驗證通過（crash probe 3/3、0 次 surface-is-in-use）** | libva-v4l2 stateful | 同一輪也把 D83 的殘留關掉：upstream `driver_data` 的五個 id map 在熱路徑無鎖讀（`picture.cc`/`surface.cc`/`image.cc`）而 ffmpeg 的 frame thread 同時建/毀 buffer——`8761810` 改 `shared_mutex`，TSan 以 mutation 證明。**量測註記**：B18/B19 前半的排空計數全是 0，因 rig 的 `${VAR:-word}` 預設吃掉反斜線（meta `9f4f4f3` 修）；只有修後的數字算數 |
 | **D89** | B21：libva r385 每個 `vaCreateContext` 丟 `std::bad_function_call`（`GbmAllocator` 的空 logger），所有 VA 客戶端 0 幀，Epiphany 從 300 退到 0 | **VA3-fix-libva 修（libva-v4l2 `1eeaa3d`），B22 驗證通過：vaCreateContext 全模式成功、Firefox 零拷貝 3/3** | libva-v4l2 | 教訓：seam 以下的假裝置測試抓不到第一個真呼叫的崩潰，要有走 vtable 的測試 |
 | **D90** | B21：pVM 的 restricted DMA pool 讓 `dma_map_resource` 對 virtio 裝置失敗，`QBUF(CAPTURE, DMABUF)` GBM bo 回 -EIO；udmabuf 對照成功 | **VA3-fix-driver 修（fork `fa39951`，r25 `138de14`），B22 驗證通過：resolver dma-direct、驅動探針 rc 0 且 md5 bf32f00e** | virtio-media guest 驅動；根因是 §7.7 契約寫成走 DMA API | host 要 GPA 不要 DMA 映射；不可存取頁面由 host EFAULT 拒絕 |
+| **D91** | 瀏覽器（Firefox）播 **H.264 High-profile 的自適應網路串流**（MSE/HLS/DASH，含 YouTube 逼成 avc1 的 HD rendition）**軟解退回**：每個解碼 session 只餵約 3 個 access unit 就卡在第一次 `vaSyncSurface`，而 `c2.qti.avc.decoder` 對 High profile **要先解出約 6 張圖像才發 `SOURCE_CHANGE`**（Constrained Baseline 只要 1 張）；grace 到期釋放已餵輸入 → sequence-1 sync 失敗 → `vaExportSurfaceHandle failed` → 退軟解（B23/B25：裝置 3 進 0 出、grace 觸發、0 fmtΔ） | **已知限制（B23→B29，六輪把我方能改的修法全推翻）**：加大 grace（B25 750 ms）、加大 libva 逾時（B24 3 s）、設定/偏好/`-extra_hw_frames`（B28）、client 端假宣告 announce-from-SPS（B27）、餵正規 codec-config csd（B29 開旗標 13 進仍不宣告）、drain-on-grace（`android.rs` 契約：EOS 後 codec 不再收輸入、必 flush、丟參考幀，死路）——全部無效。**能過的：本地／漸進式 H.264 `<video>` 零拷貝 300/300（B22/B26）、Baseline profile 網路串流零拷貝 2/2（B28）；直通 V4L2 連續餵料客戶端 ffmpeg `h264_v4l2m2m` 能解同一支 High 串流（B26）** | 兩邊都不是我方程式碼：codec 的圖像數門檻是 Qualcomm vendor（不可設定）、Firefox VA-API 的餵料深度是它／ffmpeg 內部（≈重排深度，約 3 < 門檻 6） | 無我方可改的 WP。唯一有機會的 client 側路是 **Chromium 的 V4L2-native 解碼器**（像能過的 ffmpeg `h264_v4l2m2m` 連續餵 OUTPUT），它也可能同時載到 VP9/AV1；代價是 Chromium 打包、且對上我方 virtio-media 未驗。證據 `logs/vpu_wp/B23`–`B29`、記憶 `vpu-work-state` |
 
 ### 7.5 耐久：一小時 soak 與 30 次 stop/start（M8 的端到端證據）
 
@@ -1120,6 +1121,18 @@ V4L2 客戶端不退步；strace 顯示 CAPTURE 走 `V4L2_MEMORY_DMABUF`、`EXPB
 
 **分期。** VA3-spike → VA3-driver（r24，DKMS）＋ VA3-device（fork，一行放行＋能力位元）＋ VA3-libva（blob 配置器、
 靜態綁定、export、退回）→ B20（含瀏覽器）→ 之後才是 VA1b（profile 控制項）、VA2（HEVC/VP9）、VA4（編碼）。
+
+**已知限制（D91）：瀏覽器串流的現況（2026-09-15 定案，B23→B29 六輪）。** stock Firefox 已經對純 H.264 的
+`<video>`／漸進式播放做零拷貝硬解（B22/B26，300/300），也能對 **Baseline profile** 的網路 HLS 串流零拷貝硬解
+（B28，2/2）。**唯一走不通的是 H.264 High-profile 的自適應網路串流**（MSE/HLS/DASH，含 YouTube 逼成 avc1 的 HD
+rendition）：`c2.qti.avc.decoder` 透過 stateful 介面對 High profile **要先解出約 6 張圖像才發 `SOURCE_CHANGE`**，
+而 Firefox 的 VA-API 解碼器每個 session 只餵約 3 張就卡在第一次 `vaSyncSurface`（≈重排深度）——形成死結，
+grace 到期釋放已餵輸入、sync 失敗、退軟解。這**兩邊都不是我方可改的**：codec 的圖像數門檻是 Qualcomm vendor
+（不可設定，B29 連正規 codec-config csd 都不讓它早宣告），Firefox 的餵料深度是它／ffmpeg 內部。六輪把我方每一層
+能改的都試過並推翻（§7.4 D91 列了每一條與其反證）。**能過的直通 V4L2 客戶端**（ffmpeg `h264_v4l2m2m`，連續餵滿
+OUTPUT queue）證明 codec 與 virtio-media 橋本身沒問題（B26 解出同一支 High 串流），指向的唯一 client 側解法是換一個
+連續餵料的瀏覽器解碼路——**Chromium 的 V4L2-native 解碼器**，那也是 VA2（VP9/AV1）的可能載體，惟需先解 Chromium
+打包並驗證它對我方 virtio-media 裝置的相容性。
 
 ## 8. app / daemon（WP-A1）
 
