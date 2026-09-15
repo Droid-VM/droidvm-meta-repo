@@ -1065,6 +1065,18 @@ guest DKMS 編過、`modprobe` 真的換了模組（srcversion 變）、`REQBUFS
   在真 :0 與 Xvfb 下都以 system memory 硬解 300/300（B19 §7 的疑問解決：不是 Xvfb 假象），但**光有 export 不會讓 WebKit 零拷貝**，
   它只在 derive 成功時才要 VA memory。Chromium 仍為 snap 打包問題。
 
+**VA3-fix 落地（2026-09-15，`VA3-fix-driver.md`、`VA3-fix-libva.md`），B22 驗。** 驅動：fork `fa39951` 用一個
+只 `device_initialize`、從不 `device_add` 的 resolver 裝置（64-bit mask，永遠 direct ops）做 dma-buf 的 attach/map，
+`dma_map_resource` 因此恆等於 phys；probe 時印一行 resolver 與其 DMA 模式；host 對不可存取範圍回 EFAULT 時記一行
+exporter 與範圍（udmabuf over RAM 在 pVM 下會如此，是正確結果）；re-vendor 為 **r25**（guest-additions `138de14`，
+srcversion 預測 `0A5C7DB…`，已證明 host 上的建置與 guest DKMS 的 srcversion 一致）。libva：HEAD **r389.g2095eb7**
+——`1eeaa3d` 修 D89（建構子的 `log` 參數遮蔽了成員且已被 move 走；預設 stderr logger；context 明確傳入；新增以 context
+同簽章建構真 allocator 的測試）、`0189bc9` 執行期 DMABUF QBUF 被拒即拆掉重配 MMAP（零拷貝壞掉不少一張）、`07d3b39`
+derive 對未綁定 surface 記一次原因、`2095eb7` 容器小於 sizeimage 即拒絕。**刻意延後**：在 `vaCreateSurfaces` 就配 bo
+（allocator 綁 context 而 surface 先於 context，需要 driver 層級的 allocator 與 1:1 surface↔bo 模型；host 驗不到）——
+所以 WebKit 的 derive-at-negotiation 這輪仍失敗、Epiphany 維持 system memory 拷貝（B22 的 Epiphany bar 是 300/300 不退步，
+不是零拷貝）；**Firefox 的 export 路徑是 B22 的 VA3 主 bar**。WebKit 零拷貝另開 WP。
+
 **已知風險，spike 要先答。** (a) **GPU 能否匯入並取樣這種 blob**：freedreno 的 EGL 對自家 virtio-gpu 物件的
 dma-buf re-import 與 NV12 兩平面（`EGL_DMA_BUF_PLANE0/1_*`、`LINEAR` modifier）；(b) **快取一致性**：頁面由 host 的
 媒體 helper 以 CPU 寫、由 host 的 kgsl 以 GPU 讀（透過 udmabuf 映射）——`virtgpu_vram.c:948` 註明一致性仰賴匯入的
