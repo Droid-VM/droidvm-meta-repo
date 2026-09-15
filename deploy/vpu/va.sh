@@ -103,11 +103,17 @@ BF_FRAMES=${BF_FRAMES:-150}
 #   idle drain after <ms> ms idle on sequence <n>: DEC_CMD_STOP drain + restart
 # Anchored on the literals so a client's own "drain" chatter can never count as a recovery. If
 # the backend's final wording differs, set these two rather than editing the script.
-VA_TIMEOUT_RE=${VA_TIMEOUT_RE:-sync timeout after [0-9]+ ms.*DEC_CMD_STOP drain \+ restart}
-VA_IDLE_RE=${VA_IDLE_RE:-idle drain after [0-9]+ ms.*DEC_CMD_STOP drain \+ restart}
+# The defaults are DOUBLE-QUOTED: in a bare ${VAR:-word} the word is quote-removed, so the \+
+# that makes the literal plus of "drain + restart" a literal turns into an ERE quantifier on the
+# preceding space -- "drain" followed by one or more spaces and then " restart" -- which matches
+# nothing, and both counts silently read 0 on every run (B19 measured exactly that).
+VA_TIMEOUT_RE="${VA_TIMEOUT_RE:-sync timeout after [0-9]+ ms.*DEC_CMD_STOP drain \+ restart}"
+VA_IDLE_RE="${VA_IDLE_RE:-idle drain after [0-9]+ ms.*DEC_CMD_STOP drain \+ restart}"
 # The CAPTURE pool provisioning line (7.6 point 4), read at LIBVA_MESSAGING_LEVEL=2. D84 is a
 # number on this line, not a stack trace: `min N + share S` with S = 0 is the deadlock.
-VA_POOL_RE=${VA_POOL_RE:-CAPTURE pool: min [0-9]+ \+ share [0-9]+ = [0-9]+ \(surfaces [0-9]+\)}
+# Same quoting rule, and the tail stops at the surface count: the shipped backend prints
+# `(surfaces K, granted G)` where the design text names only `(surfaces K)`.
+VA_POOL_RE="${VA_POOL_RE:-CAPTURE pool: min [0-9]+ \+ share [0-9]+ = [0-9]+ \(surfaces [0-9]+}"
 
 VERB=${1:-}; NAME=${2:-}
 [ -n "$VERB" ] || usage
