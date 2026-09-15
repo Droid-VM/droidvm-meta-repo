@@ -797,6 +797,11 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D80** | stop/start 之後 guest 的 EUI-64 IPv6 位址**死約 5 分鐘**：`vm.sh wait-ssh` 300 s 內沒有回應（連兩次），而 serial console 上 guest 早就到 login prompt、DHCPv4 位址 ~20 s 就通。guest 自己的 `systemd-networkd` 說得很清楚：`Address 2a0e:…:4d67 with tentative flag is removed, maybe a duplicated address is assigned on another node or link?`——DAD 找到有人在防衛同一個位址（手機的 neighbour table 上該 global 位址在 `wlan0` 是 `FAILED`、guest 的 link-local 在 `br-wifi` 是 `STALE`），約五分鐘後自己回來（03:06:05 開機 → 03:11:22 可達）。`wait-ssh` 的預設 `BUDGET` **240 s**、記載的上限 300 s，兩個都比它短，於是記成一次假的「guest 沒起來」 | **開，medium**——`logs/vpu_wp/B15-soak.md` §5.2；§2 的前兩個 cycle 就是這樣掉的（B17 §2 再度佐證：EUI-64 IPv6 在 `wlan0` 顯示 `FAILED`，改走 DHCPv4 + adb-nc proxy 第一次就通） | rig／實驗室網路，**不是 VM** | 未定。緩解＝走 DHCPv4 位址、經手機轉接：`GUEST6=<v4 addr> GUEST_SSH_VIA=proxy deploy/vpu/guest.sh ssh <vm> …`，30 個 cycle 全部 **14–22 s** 就通。rig 的正解是讓 `wait-ssh` 把 DHCPv4 位址當第三條路試，至少在失敗訊息裡說一句「IPv6 可能卡在 DAD」。見 `deploy/vpu/README.md` trap 15 |
 | **D81** | 剛硬體編出來的 clip 拿去硬體解，**120 次裡有 14 次（11.7 %）短給**（87–89 張的檔只解出 42–86 張），`rc 0`、ffmpeg 除了 `All capture buffers returned to userspace…` 什麼都沒說、裝置側一條錯都沒有。**不是輸入**（同一個存下來的檔連解 12 次是 87/87）、**不是 gst**（同一個 iteration 裡 gst 解那支 300 張的樣本 120/120 全中）、**不是 D27/D41**（那是 raw elementary stream，這是 mp4）。條件是「decoder session 在同一組 helper 上緊接著一個 encoder session 之後開起來」，每 6 次重現 1 次，整個小時平均分布（不是熱、不是漂移）。`rc 0` 加一個短檔是最壞的失敗模式：只看結束碼的自動檢查全部會過 | **開，medium，B17 確認為客戶端側**——`logs/vpu_wp/B15-soak.md` §5.3、B17-acceptance.md §7。B17 的 20 對「新鮮編碼 → 立刻解碼」裡 **1 對短給（5%，run 11 clip 79，ffmpeg 只寫 70）**，而**裝置那一 run 記 79 frames out**——backend 交足了整支 clip，是 ffmpeg 少寫，**F20 沒動它也不該動**（短 clip 統計上與 B16 的 2/20 相同）。**B17-soak 另揭露短給率隨 clip 長度放大：300 張的新鮮 clip 30 次裡 21 次短給（70%），而裝置每次都記整支 `frames out`、gst 同片 300/300——所以自動檢查絕不能只信 ffmpeg 的畫格數，要以裝置的 `frames out` 或 gst 為準（rig README 量測陷阱 trap 17）。**與 **D64／D77／D78 同一族**（在時序邊緣掉排隊中的工作），但這一條落在客戶端 | 客戶端（guest driver／ffmpeg dequeue 迴圈），不是 backend | B17 證明是客戶端側：裝置交足、ffmpeg 少寫；下一步看 guest driver／ffmpeg 的 dequeue 迴圈（B16 open item 4），不是 backend WP。注意 `-num_capture_buffers 24` **沒有用**（D64 的 0/5；靜態輸入時的 12/12 是輸入靜態使然） |
 | **D82** | 一條 gst `videotestsrc` 來回管線和它自己的參考管線**畫出來的畫素不一樣**：`videotestsrc` 用**協商出來的 colorimetry** 畫圖案，`v4l2h264enc` 協商到 `bt601`，接 `filesink` 的那條卻拿到 720p 預設的 `bt709`——彩條 luma 一邊是 BT.601 的 (235,210,170,145,106,81,41)、一邊是 BT.709 的 (235,219,188,173,78,63,32)。拿它算 PSNR 會讀到 **~24 dB** 根本不存在的「codec 損失」，而且每一張都一樣（連 `smpte100` 這種 150 張只有 1 張不同的靜態圖案都是 22.8 dB，這就是破綻） | **關——量測方法，不是產品缺陷**；記進 `deploy/vpu/README.md` **trap 13** | 量測（`logs/vpu_wp/B15-soak.md` §5.4） | 兩條管線的 caps filter 都要釘 `colorimetry=`（或一次產生 source、餵同一份位元組給兩邊）。釘 `colorimetry=bt709` 之後同一條來回是 **35.96 dB**（`pattern=ball` 77.58 dB），過 35 dB 的門檻。順帶兩條沒有立案的事實：`v4l2h264enc` 直接拒絕 `colorimetry=bt601` 的 caps（協商失敗 rc 1）；`ffmpeg -f lavfi -i testsrc2 … -c:v h264_v4l2m2m` 少了 `-pix_fmt nv12` 會死在 `Could not open encoder before EOF` / `-22`，與裝置無關 |
+| **D83** | `libva-v4l2` 的 stateful 後端**間歇 abort**：`terminate called after throwing an instance of 'std::out_of_range' what(): map::at`，B18 以 `gdb -ex 'catch throw'` 第 9 次抓到、堆疊精確——`vaBeginPicture` → `StatefulH264Context::stateful_begin_picture(Surface&)` → `StatefulSession::release_frame(unsigned)` → `V4L2StatefulDevice::queue_capture(unsigned)`，該函式唯一的 `at` 是 `capture_buffers_.at(index)`（`src/stateful/v4l2_device.cc:300`），也就是**拿一個 map 已經不再持有的 CAPTURE index 去重新 QBUF**。出事的執行緒是 `av:h264:df0`，ffmpeg 的 frame-decode thread（同時跑五條），所以懷疑兩件事之一：`request_capture_buffers` 在 `SOURCE_CHANGE` 重新配池時 `unmap_buffers()` + 重 `REQBUFS` 之後留下舊 index（`VA1-impl.md` §4 記的簡化），或 session 的 map 在多條 decode thread 之間沒有互斥。實測率：coexistence 12 次中 2 次、純 gdb 迴圈 14 次中 1 次、B-frame 3 次中 1 次、安靜的連續 8 次中 0 次 | **開，high，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §6（`scratch-B18a/49_abort.txt`、`50_catch_throw.txt`）。這是決定 VA1 能不能出貨的那一條：md5 全對、速度比 V4L2 路徑快，敗在這個 abort | `libva-v4l2` `src/stateful/`（backend，**不是** device、driver 或池） | **VA1-fix**（backend 那一半由同輪的姊妹 WP 做）；修完重跑 B18 §4.2／§5 |
+| **D84** | `mpv --hwdec=vaapi-copy` **0/6 跑不完**：一定先說 `Using hardware decoding (vaapi-copy).`，然後不是 SIGSEGV 就是 `sync timeout after 500 ms on sequence 65: DEC_CMD_STOP drain + restart` → `libva: Stateful sync failed on sequence 65` → `Failed to sync surface 0x5: 23` → 退回軟解。**把預算調成 5000 ms 完全不改變結果**，所以這是死鎖不是預算太短。機制看得見：B18 的 strace 讀到 `VIDIOC_REQBUFS {CAPTURE, count=21 => 21}`＝device 宣告的**裸最小值**，而 §7.6 第 4 點說的是 `min + min(surfaces, 8)`（這裡應為 29）——客戶端扣著的 surface 於是從 codec 自己的 slot 裡出，mpv 比 ffmpeg 的 hwaccel 路徑扣更多，兩邊互等。裝置側每一個 mpv session 都是 `in == out`（38／211／93／18／70／95），**device 一張都沒少** | **開，high，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §4.3、§4.6（`scratch-B18a/41_mpv_bt.txt`、`42_mpv_run*.txt`、`53_strace.txt`）。§7.6 第 9 點的 bar，這一輪 **FAIL** | `libva-v4l2` `src/stateful/`（CAPTURE 池的配置點：宣告當下 surface 數是 0，或 share 根本沒加上去） | **VA1-fix**；rig 這一側 `va.sh mpv` 已改成一併記下 `CAPTURE pool: min N + share S = M (surfaces K)`，B19 直接讀那一行判定 |
+| **D85** | 帶 B-frame 的碼流**結尾一定吃一次排空**：`-bf 3` 的 1280x720（150 張、`has_b_frames=2`）每一 run 都在 **sequence 148** 記一次 `sync timeout after 500 ms … DEC_CMD_STOP drain + restart`，而 **md5 與軟解 bit-exact、150/150 全到**。這**不是缺陷而是 VA-API 的形狀**：VA 沒有 flush／EOS 呼叫（§7.6 第 6 點只在 `vaDestroyContext` 排空），B-frame 的尾巴被 codec 扣著等後續輸入，客戶端對尾巴那張的 sync **只可能**由一次排空滿足。原本「排空次數 0」的 bar 是**參考片的性質**（那支沒有 B-frame），不是後端的性質 | **關——改成兩層等待與兩個門檻**（§7.6 第 5、9 點已改寫）：`sync timeout` 每支片子 0、`idle drain` 參考片 0／B-frame 片正好 1。後端要把這條尾巴排空記成獨立的 `idle drain` 行（VA1-fix），B19 以新 bar 驗 | 介面語意（VA-API 無 EOS），**不是** device、driver 或池 | **VA1-fix**（後端分出 `idle drain` 行）＋ rig 的 `va.sh bframes` 動詞（已加，meta `aa96349`）；`logs/vpu_wp/B18-acceptance.md` §7.1 |
+| **D86** | **排空是一次性的**：B18 §7.2 用 `LIBVA_V4L2_SYNC_TIMEOUT_MS` 逼出恢復路徑，**第一次**排空確實保住位元組（5 ms 預算、一次恢復、仍然 300 張 `bf32f00e…`；B-frame 片每 run 一次也 bit-exact），但**同一個 session 的第二次**排空、或**第一次 `SOURCE_CHANGE` 宣告之前**的排空（1 ms 預算、sequence 1）一律以 `Stateful sync failed` 收場、session 死掉、客戶端退回軟解。順帶：50 ms 的預算在參考片上**一次都逼不出來**（一次 sync 遠快於 50 ms），所以任務原本指定的探針值太鬆，要 5 ms 才碰得到 | **開，medium，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §7.2（`scratch-B18a/52_recovery.txt`）。§7.6 第 5 點寫的「兩道保險」只有第一次成立，這是 **D84** 那條死鎖救不回來的原因 | `libva-v4l2` `src/stateful/session.cc`（排空後的狀態重建：宣告前排空、以及第二次排空的 CAPTURE 重配） | **VA1-fix**；B19 以「同一 session 連兩次強制恢復仍 300/300」當回歸 bar |
+| **D87** | **環境，不是產品**：實驗手機的 `gh_hugepage_reserve` 模組參數 `pool_want` 在 B17 那個 boot 期間被**別人**改成 **2048**（4 GiB），而 B11 起每一份報告與 `deploy/vpu/README.md` 記的都是 3072（6 GiB）；而且連 2048 都填不滿——`acquire` 停在 `cma sources exhausted`、`pool_avail` 1874–1906。後果不是表格裡一個小一點的數字：**`memory_mb=4096` 的 VM 起不來**（`GH-PIN[preboot]: refusing 1024 MB … 296/512 2MB samples (57%) cannot be long-term pinned … CmaFree 9376 kB` → `crosvm exiting with error 1: failed to create vm  Caused by: Out of memory (os error 12)`；3072 時卡在最後 192 MB 的 `media_guest`）。B18 只好把 VM 降到 `memory_mb=2048` 跑完，所以它的 `served=1632／pool_avail=272/2048` **與 B11–B17 不可比**，而 B11–B17 的每一個 hp 數字在 `pool_want` 復原之前都是**過期的** | **開——需要手機的主人**。rig 這一側只能讀不能寫（B18 想寫回 3072 被權限層擋在 `Modify Shared Resources`）。記進 `deploy/vpu/README.md` **量測陷阱 18**：量任何東西之前先看 `hp.sh status` 的 `pool_want` 對不對得上前一份報告 | 實驗室環境／手機設定，**不是** VMM、device、driver 或池 | 沒有 WP：`pool_want=3072` 由機主復原之後，下一個上手機的 WP 重新記一次基準數字。`logs/vpu_wp/B18-acceptance.md` §0 |
 
 ### 7.5 耐久：一小時 soak 與 30 次 stop/start（M8 的端到端證據）
 
@@ -862,8 +867,15 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
 **契約（stateful 後端，VA1 = H.264 解碼、拷貝路徑）：**
 
 1. **選擇與探測。** 驅動名 `v4l2`（`v4l2_drv_video.so`），guest 由 `/etc/profile.d/droidvm-va.sh` 匯出
-   `LIBVA_DRIVER_NAME=v4l2`（並 `GST_VAAPI_ALL_DRIVERS=1` 給舊的 gstreamer-vaapi）；`LIBVA_V4L2_VIDEO_PATH` 可
-   覆寫。udev 探測 M2M 節點；**模式判定**：coded 格式帶 `V4L2_FMT_FLAG_DYN_RESOLUTION` 且沒有 `_SLICE/_FRAME`
+   `LIBVA_DRIVER_NAME=v4l2`，**外加兩個白名單覆寫**：`GST_VA_ALL_DRIVERS=1` 給 GStreamer 1.28 的 `va` plugin
+   （`vah264dec`）、`GST_VAAPI_ALL_DRIVERS=1` 給舊的 gstreamer-vaapi（`vaapidecode`）。**兩個都要，因為是兩個
+   plugin、各讀各的變數**：B18 §4.4 實測只匯出舊名時，1.28 的 `va` plugin 在 `gstvadisplay.c:186` 印
+   `Unsupported driver: DroidVM libva-v4l2 (stateful virtio-media)` 並註冊 **0 個 feature**——`vah264dec` 根本
+   不存在，看起來像少裝套件而不是被拒絕；補上 `GST_VA_ALL_DRIVERS=1` 之後同一條管線 300/300（本節原本寫
+   「1.28 的 va plugin 沒有這種清單」，那是錯的）。**`LIBVA_DRIVER_NAME` 為什麼是必要而不只是方便**：guest 裡
+   `virtio_gpu_drv_video.so` **存在**（B18 §2：distro Mesa 以 symlink 指向 `libgallium`），那是 Gallium 的
+   virgl video 驅動、在這個 guest 什麼都解不了；libva 依 DRM 名稱會去開它，所以不指名就是開錯檔（結論沒變，
+   本節原本「那個檔不存在」的理由是錯的）。`LIBVA_V4L2_VIDEO_PATH` 可覆寫。udev 探測 M2M 節點；**模式判定**：coded 格式帶 `V4L2_FMT_FLAG_DYN_RESOLUTION` 且沒有 `_SLICE/_FRAME`
    → stateful（我們的 decoder，`video_decoder.rs:183`）；有 `_SLICE/_FRAME` 且有 media node → 沿用上游
    stateless 路徑（不刪，留給上游）。
 2. **Profile／entrypoint。** 只有 `VAEntrypointVLD`、`VA_RT_FORMAT_YUV420`、輸出 NV12。device 目前**沒有**
@@ -880,16 +892,33 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
    同法但 VPS 憑空合成；VP9 由 `VADecPictureParameterBufferVP9` 重建 uncompressed header；AV1 的 OBU 待議。
 4. **Surface 模型。** `VASurface` 是**邏輯圖槽**，`vaCreateSurfaces` 不預綁 CAPTURE（上游一 surface 一對
    source/destination buffer 的模型只對 stateless 成立）。CAPTURE 池由 device 在 `SOURCE_CHANGE` 後決定：驅動
-   讀 `MIN_BUFFERS_FOR_CAPTURE`，配 `min + N`（N = surface 數與 8 取小，總數上限 32），`S_FMT(CAPTURE)` 取
-   device 宣告的 coded size 與 stride。**對應規則**：送出的 OUTPUT buffer `timestamp` = 該 surface 的 64-bit
+   讀 `MIN_BUFFERS_FOR_CAPTURE`，配 `min + N`（N = surface 數與 8 取小，總數上限 32），**CAPTURE 的幾何以
+   `G_FMT` 讀回，CAPTURE 上不下 `S_FMT`**（實作即如此，B18 §4.6 的 strace 只數到 1 次 `S_FMT`、在 OUTPUT 上；
+   本節原文說的 `S_FMT(CAPTURE)` 是錯的，宣告後的 coded size 與 stride 本來就是 device 說了算，客戶端沒有可
+   協商的東西）。**對應規則**：送出的 OUTPUT buffer `timestamp` = 該 surface 的 64-bit
    序號；device 以 `TIMESTAMP_COPY` 把它帶到產出的 CAPTURE（`video_decoder.rs:244-246, 918-920`）；
    `vaSyncSurface(S)` 反覆 `DQBUF(CAPTURE)` 直到 timestamp == S，途中取到的其他畫格進「已解未取」表；
    `vaDeriveImage` 直接映射該 CAPTURE 的 NV12 mmap（stride 取 `G_FMT`，零額外複製），`vaGetImage` 複製；surface
    被下一個 `vaBeginPicture` 重用或 destroy 時，其 CAPTURE 重新 `QBUF`。
 5. **重排死鎖規則。** VA 客戶端自己重排、按顯示順序取畫格，**拿到 S 之前不會再送輸入**；stateful 解碼器若扣住
    比客戶端更多的畫格，雙方互等。兩道保險：(a) 第 3 點的 VUI，讓 codec 的延遲不超過客戶端的假設；(b)
-   `vaSyncSurface` 等待逾時（預設 500 ms，環境變數可調）→ 發 `DEC_CMD_STOP` 排空、收回所有已送畫格 →
-   `DEC_CMD_START` 續解，並記一行 log（codec 重啟有代價，出現次數是 B18 要看的數字）。
+   `vaSyncSurface` 的等待**分兩層，兩層是不同的事件、各記各的 log 行、各有各的門檻**：
+
+   * **idle drain**（B18 之後新增）——客戶端在等、而 device 一段時間**沒有任何新輸出**（沒有東西在飛），
+     就發 `DEC_CMD_STOP` 排空、`DEC_CMD_START` 續解，記
+     `idle drain after <ms> ms idle on sequence <n>: DEC_CMD_STOP drain + restart`。
+     **這是 EOS 的替代品**：VA-API **沒有 flush／EOS 呼叫**（第 6 點只在 `vaDestroyContext` 排空），所以帶
+     B-frame 的碼流結尾那幾張會被 codec 扣著等後續輸入，而客戶端對「尾巴那張」的 sync **只可能**由一次排空
+     滿足。B18 §7.1 量到的就是這個：`-bf 3` 的 720p 每一 run 都在 150 張的第 148 號吃一次排空，**md5 仍然
+     bit-exact**。所以帶 B-frame 的片子**預期正好一次**，不是缺陷（**D85**）。
+   * **sync timeout**——客戶端等超過預算（預設 500 ms，`LIBVA_V4L2_SYNC_TIMEOUT_MS` 可調）而 device **一直在
+     出畫格**，那是真的對不上，記
+     `sync timeout after <ms> ms on sequence <n>: DEC_CMD_STOP drain + restart (occurrence <k>)`。
+     **這一條的門檻是任何片子上都 0。**
+
+   **排空是一次性的（D86，B18 §7.2 實測）**：同一個 session 裡第二次排空、或第一次 `SOURCE_CHANGE` 宣告之前
+   的排空，會以 `Stateful sync failed` 收場、session 死掉、客戶端退回軟解。所以「多排幾次就好」不是可用的
+   策略，兩個計數要分開讀：一次 idle drain 是設計的一部分，兩行任何一種都是死掉的 run。
 6. **Flush／結束／錯誤。** `vaDestroyContext` → `DEC_CMD_STOP` 排空 → `STREAMOFF` 兩邊 → `REQBUFS(0)`。VA 沒有
    seek 訊號，驅動**不猜**：IDR 與 POC 回繞交給 stateful codec 自己處理。`DQBUF` 回 `ENODEV`（device 退出、相機
    搶占那類）→ 該 surface 之後的 sync 回 `VA_STATUS_ERROR_DECODING_ERROR`，session 標記死亡，客戶端重建 context。
@@ -906,8 +935,17 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
    -hwaccel_output_format vaapi -i 1080p.mp4 -fps_mode passthrough -vf hwdownload,format=nv12 -f rawvideo -pix_fmt nv12` 的 md5 =（`-fps_mode passthrough` 不可省：B16/B17 的參考值是帶著它量的，少了它 md5 會變而沒有任何東西錯）
    `bf32f00e5c4bca747bf7827ea5797b33`（B17 那支 300 張的參考，同一條軟解基準）；mpv `--hwdec=vaapi-copy` 播完
    不掉幀；GStreamer `vah264dec` 300/300；vaapi-fits `--platform V4L2` 的 H264 decode 子集；ffmpeg
-   `h264_v4l2m2m` 300/300 不退步；同一個 helper 上 VA 客戶端與 V4L2 客戶端交替使用互不影響；第 5(b) 點的
-   排空次數在 1080p 參考片上為 **0**。
+   `h264_v4l2m2m` 300/300 不退步；同一個 helper 上 VA 客戶端與 V4L2 客戶端交替使用互不影響。
+
+   **排空的門檻（B18 之後改寫）：`sync timeout` 在每一支片子上都是 0；`idle drain` 在 1080p 參考片上是 0、
+   在 `-bf 3` 的 720p 探針上正好是 1**（第 5 點的 EOS 理由）。mpv 那條 bar 另外要記下**客戶端建了幾個
+   surface、CAPTURE 池配了幾個**——後端在 `LIBVA_MESSAGING_LEVEL=2` 印
+   `CAPTURE pool: min N + share S = M (surfaces K)`，B18 的 strace 讀到 `REQBUFS(CAPTURE, 21)`＝device 宣告的
+   裸最小值（share 沒套上），這正是 **D84** 的機制而不只是症狀。**vaapi-fits 在 Ubuntu 26.04 arm64 沒有套件**
+   （B18 查證，未跑）：那是一筆**欠的建置**，不是一條可以判 pass/fail 的 bar，在它被建出來之前不列入計分。
+
+   rig 這一側：`deploy/vpu/va.sh` 的 `fixture` 改成**驗證＋必要時推檔**（參考片不可由配方重製，B18 §4.1），
+   `all` 連解 8 次並把 **abort 與 md5 不符分開計**（D83 約 9 次 1 次），新增 `bframes` 動詞。
 10. **分期。** VA1 = 本節主體（H.264、拷貝路徑，virtio-media 一行不動）→ VA1b（profile 控制項，device）→
     VA2（HEVC/VP9）→ VA3（零拷貝）→ VA4（編碼 `VAEntrypointEncSlice`，看瀏覽器是否需要）。
 
