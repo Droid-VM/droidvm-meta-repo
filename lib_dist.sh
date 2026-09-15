@@ -51,6 +51,11 @@ dist_report() {
     # One mesa package for all three routes since 2026-08-18; a guest that still has the old
     # per-route mesa-guest-<route> debs here is looking at a stale dist-guest/.
     [ -e "$DIST"/mesa-guest_*.deb ]              2>/dev/null || missing+=("8_build_guest_mesa.sh")
+    # The VA-API backend (Droid-VM/libva-v4l2). Only VA-API-only clients need it -- Chromium,
+    # mpv --hwdec=vaapi, ffmpeg -hwaccel vaapi -- so a guest without it is not broken, just
+    # limited to the V4L2 clients. Listed all the same: "still to run" is the list of steps, and
+    # a step nobody is reminded of is a step that quietly never runs.
+    [ -e "$DIST"/libva-v4l2_*.deb ]              2>/dev/null || missing+=("10_build_guest_va.sh")
     if [ ${#missing[@]} -gt 0 ]; then
         echo "    still to run: ${missing[*]}"
     else
