@@ -800,12 +800,13 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D83** | `libva-v4l2` 的 stateful 後端**間歇 abort**：`terminate called after throwing an instance of 'std::out_of_range' what(): map::at`，B18 以 `gdb -ex 'catch throw'` 第 9 次抓到、堆疊精確——`vaBeginPicture` → `StatefulH264Context::stateful_begin_picture(Surface&)` → `StatefulSession::release_frame(unsigned)` → `V4L2StatefulDevice::queue_capture(unsigned)`，該函式唯一的 `at` 是 `capture_buffers_.at(index)`（`src/stateful/v4l2_device.cc:300`），也就是**拿一個 map 已經不再持有的 CAPTURE index 去重新 QBUF**。出事的執行緒是 `av:h264:df0`，ffmpeg 的 frame-decode thread（同時跑五條），所以懷疑兩件事之一：`request_capture_buffers` 在 `SOURCE_CHANGE` 重新配池時 `unmap_buffers()` + 重 `REQBUFS` 之後留下舊 index（`VA1-impl.md` §4 記的簡化），或 session 的 map 在多條 decode thread 之間沒有互斥。實測率：coexistence 12 次中 2 次、純 gdb 迴圈 14 次中 1 次、B-frame 3 次中 1 次、安靜的連續 8 次中 0 次 | **開，high，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §6（`scratch-B18a/49_abort.txt`、`50_catch_throw.txt`）。這是決定 VA1 能不能出貨的那一條：md5 全對、速度比 V4L2 路徑快，敗在這個 abort | `libva-v4l2` `src/stateful/`（backend，**不是** device、driver 或池） | **VA1-fix**（backend 那一半由同輪的姊妹 WP 做）；修完重跑 B18 §4.2／§5 |
 | **D84** | `mpv --hwdec=vaapi-copy` **0/6 跑不完**：一定先說 `Using hardware decoding (vaapi-copy).`，然後不是 SIGSEGV 就是 `sync timeout after 500 ms on sequence 65: DEC_CMD_STOP drain + restart` → `libva: Stateful sync failed on sequence 65` → `Failed to sync surface 0x5: 23` → 退回軟解。**把預算調成 5000 ms 完全不改變結果**，所以這是死鎖不是預算太短。機制看得見：B18 的 strace 讀到 `VIDIOC_REQBUFS {CAPTURE, count=21 => 21}`＝device 宣告的**裸最小值**，而 §7.6 第 4 點說的是 `min + min(surfaces, 8)`（這裡應為 29）——客戶端扣著的 surface 於是從 codec 自己的 slot 裡出，mpv 比 ffmpeg 的 hwaccel 路徑扣更多，兩邊互等。裝置側每一個 mpv session 都是 `in == out`（38／211／93／18／70／95），**device 一張都沒少** | **開，high，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §4.3、§4.6（`scratch-B18a/41_mpv_bt.txt`、`42_mpv_run*.txt`、`53_strace.txt`）。§7.6 第 9 點的 bar，這一輪 **FAIL** | `libva-v4l2` `src/stateful/`（CAPTURE 池的配置點：宣告當下 surface 數是 0，或 share 根本沒加上去） | **VA1-fix**；rig 這一側 `va.sh mpv` 已改成一併記下 `CAPTURE pool: min N + share S = M (surfaces K)`，B19 直接讀那一行判定 |
 | **D85** | 帶 B-frame 的碼流**結尾一定吃一次排空**：`-bf 3` 的 1280x720（150 張、`has_b_frames=2`）每一 run 都在 **sequence 148** 記一次 `sync timeout after 500 ms … DEC_CMD_STOP drain + restart`，而 **md5 與軟解 bit-exact、150/150 全到**。這**不是缺陷而是 VA-API 的形狀**：VA 沒有 flush／EOS 呼叫（§7.6 第 6 點只在 `vaDestroyContext` 排空），B-frame 的尾巴被 codec 扣著等後續輸入，客戶端對尾巴那張的 sync **只可能**由一次排空滿足。原本「排空次數 0」的 bar 是**參考片的性質**（那支沒有 B-frame），不是後端的性質 | **關——改成兩層等待與兩個門檻**（§7.6 第 5、9 點已改寫）：`sync timeout` 每支片子 0、`idle drain` 參考片 0／B-frame 片正好 1。後端要把這條尾巴排空記成獨立的 `idle drain` 行（VA1-fix），B19 以新 bar 驗 | 介面語意（VA-API 無 EOS），**不是** device、driver 或池 | **VA1-fix**（後端分出 `idle drain` 行）＋ rig 的 `va.sh bframes` 動詞（已加，meta `aa96349`）；`logs/vpu_wp/B18-acceptance.md` §7.1 |
-| **D86** | **排空是一次性的**：B18 §7.2 用 `LIBVA_V4L2_SYNC_TIMEOUT_MS` 逼出恢復路徑，**第一次**排空確實保住位元組（5 ms 預算、一次恢復、仍然 300 張 `bf32f00e…`；B-frame 片每 run 一次也 bit-exact），但**同一個 session 的第二次**排空、或**第一次 `SOURCE_CHANGE` 宣告之前**的排空（1 ms 預算、sequence 1）一律以 `Stateful sync failed` 收場、session 死掉、客戶端退回軟解。順帶：50 ms 的預算在參考片上**一次都逼不出來**（一次 sync 遠快於 50 ms），所以任務原本指定的探針值太鬆，要 5 ms 才碰得到 | **開，medium，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §7.2（`scratch-B18a/52_recovery.txt`）。§7.6 第 5 點寫的「兩道保險」只有第一次成立，這是 **D84** 那條死鎖救不回來的原因 | `libva-v4l2` `src/stateful/session.cc`（排空後的狀態重建：宣告前排空、以及第二次排空的 CAPTURE 重配） | **VA1-fix**；B19 以「同一 session 連兩次強制恢復仍 300/300」當回歸 bar |
+| **D86** | **排空是一次性的**：B18 §7.2 用 `LIBVA_V4L2_SYNC_TIMEOUT_MS` 逼出恢復路徑，**第一次**排空確實保住位元組（5 ms 預算、一次恢復、仍然 300 張 `bf32f00e…`；B-frame 片每 run 一次也 bit-exact），但**同一個 session 的第二次**排空、或**第一次 `SOURCE_CHANGE` 宣告之前**的排空（1 ms 預算、sequence 1）一律以 `Stateful sync failed` 收場、session 死掉、客戶端退回軟解。順帶：50 ms 的預算在參考片上**一次都逼不出來**（一次 sync 遠快於 50 ms），所以任務原本指定的探針值太鬆，要 5 ms 才碰得到 | **開，medium，VA1-fix 進行中、B19 驗**——`logs/vpu_wp/B18-acceptance.md` §7.2（`scratch-B18a/52_recovery.txt`）。§7.6 第 5 點寫的「兩道保險」只有第一次成立，這是 **D84** 那條死鎖救不回來的原因 | `libva-v4l2` `src/stateful/session.cc`（排空後的狀態重建：宣告前排空、以及第二次排空的 CAPTURE 重配） | **VA1-fix**；B19 以「同一 session 連兩次強制恢復仍 300/300」當回歸 bar。**2026-09-17 殘留（VA3-lastmile §3.2b）**：YouTube 的 ABR 探測在同一個視窗內連開 **12 個 VP9 硬體 decoder**，在那個 churn 裡冷啟動的 AV1 decoder **1 次**在 hard cap 內收不到第一個 `SOURCE_CHANGE`，走 `WEDGE-preannounce` 分支、記一行 `Stateful sync failed on sequence 1`；**同一輪其他每一個 run 都是 0**（`a1` 5113 幀、`b2`、`c3`、`c4`）。**與位元流無關**（那個 session 連 `gbm probe -- G_FMT` 那行都沒有），屬 **D86／B24-grace-probe／B25-grace-accept** 那條「冷啟動 announce 寬限」的線，不是新缺陷 |
 | **D87** | **環境，不是產品**：實驗手機的 `gh_hugepage_reserve` 模組參數 `pool_want` 在 B17 那個 boot 期間被**別人**改成 **2048**（4 GiB），而 B11 起每一份報告與 `deploy/vpu/README.md` 記的都是 3072（6 GiB）；而且連 2048 都填不滿——`acquire` 停在 `cma sources exhausted`、`pool_avail` 1874–1906。後果不是表格裡一個小一點的數字：**`memory_mb=4096` 的 VM 起不來**（`GH-PIN[preboot]: refusing 1024 MB … 296/512 2MB samples (57%) cannot be long-term pinned … CmaFree 9376 kB` → `crosvm exiting with error 1: failed to create vm  Caused by: Out of memory (os error 12)`；3072 時卡在最後 192 MB 的 `media_guest`）。B18 只好把 VM 降到 `memory_mb=2048` 跑完，所以它的 `served=1632／pool_avail=272/2048` **與 B11–B17 不可比**，而 B11–B17 的每一個 hp 數字在 `pool_want` 復原之前都是**過期的** | **開——需要手機的主人**。rig 這一側只能讀不能寫（B18 想寫回 3072 被權限層擋在 `Modify Shared Resources`）。記進 `deploy/vpu/README.md` **量測陷阱 18**：量任何東西之前先看 `hp.sh status` 的 `pool_want` 對不對得上前一份報告 | 實驗室環境／手機設定，**不是** VMM、device、driver 或池 | 沒有 WP：`pool_want=3072` 由機主復原之後，下一個上手機的 WP 重新記一次基準數字。`logs/vpu_wp/B18-acceptance.md` §0 |
 | **D88** | B19（r378）：`vaBeginPicture` 回 `VA_STATUS_ERROR_SURFACE_BUSY`(16) 接著 `invalid VASurfaceID`，run 拖到 EOF 但 md5 錯、張數短（參考片 2/30、-bf 3 片 2/13）。機制：一次 sync 失敗（或 stale-generation 的 release 不重排）讓 surface 永遠停在 Rendering | **VA1-fix2 修（libva-v4l2 `bf6b4b5`：sync 失敗的 surface 重置為 Ready＋解除綁定；`12d1126`：provisioning 遇 EBUSY 退避重試而非逐張報忙），B22 驗證通過（crash probe 3/3、0 次 surface-is-in-use）** | libva-v4l2 stateful | 同一輪也把 D83 的殘留關掉：upstream `driver_data` 的五個 id map 在熱路徑無鎖讀（`picture.cc`/`surface.cc`/`image.cc`）而 ffmpeg 的 frame thread 同時建/毀 buffer——`8761810` 改 `shared_mutex`，TSan 以 mutation 證明。**量測註記**：B18/B19 前半的排空計數全是 0，因 rig 的 `${VAR:-word}` 預設吃掉反斜線（meta `9f4f4f3` 修）；只有修後的數字算數 |
 | **D89** | B21：libva r385 每個 `vaCreateContext` 丟 `std::bad_function_call`（`GbmAllocator` 的空 logger），所有 VA 客戶端 0 幀，Epiphany 從 300 退到 0 | **VA3-fix-libva 修（libva-v4l2 `1eeaa3d`），B22 驗證通過：vaCreateContext 全模式成功、Firefox 零拷貝 3/3** | libva-v4l2 | 教訓：seam 以下的假裝置測試抓不到第一個真呼叫的崩潰，要有走 vtable 的測試 |
 | **D90** | B21：pVM 的 restricted DMA pool 讓 `dma_map_resource` 對 virtio 裝置失敗，`QBUF(CAPTURE, DMABUF)` GBM bo 回 -EIO；udmabuf 對照成功 | **VA3-fix-driver 修（fork `fa39951`，r25 `138de14`），B22 驗證通過：resolver dma-direct、驅動探針 rc 0 且 md5 bf32f00e** | virtio-media guest 驅動；根因是 §7.7 契約寫成走 DMA API | host 要 GPA 不要 DMA 映射；不可存取頁面由 host EFAULT 拒絕 |
 | **D91** | 瀏覽器（Firefox）播 **H.264 High-profile 的自適應網路串流**（MSE/HLS/DASH，含 YouTube 逼成 avc1 的 HD rendition）**軟解退回**：每個解碼 session 只餵約 3 個 access unit 就卡在第一次 `vaSyncSurface`，而 `c2.qti.avc.decoder` 對 High profile **要先解出約 6 張圖像才發 `SOURCE_CHANGE`**（Constrained Baseline 只要 1 張）；grace 到期釋放已餵輸入 → sequence-1 sync 失敗 → `vaExportSurfaceHandle failed` → 退軟解（B23/B25：裝置 3 進 0 出、grace 觸發、0 fmtΔ） | **已知限制（B23→B29，六輪把我方能改的修法全推翻）**：加大 grace（B25 750 ms）、加大 libva 逾時（B24 3 s）、設定/偏好/`-extra_hw_frames`（B28）、client 端假宣告 announce-from-SPS（B27）、餵正規 codec-config csd（B29 開旗標 13 進仍不宣告）、drain-on-grace（`android.rs` 契約：EOS 後 codec 不再收輸入、必 flush、丟參考幀，死路）——全部無效。**能過的：本地／漸進式 H.264 `<video>` 零拷貝 300/300（B22/B26）、Baseline profile 網路串流零拷貝 2/2（B28）；直通 V4L2 連續餵料客戶端 ffmpeg `h264_v4l2m2m` 能解同一支 High 串流（B26）** | 兩邊都不是我方程式碼：codec 的圖像數門檻是 Qualcomm vendor（不可設定）、Firefox VA-API 的餵料深度是它／ffmpeg 內部（≈重排深度，約 3 < 門檻 6） | 無我方可改的 WP。唯一有機會的 client 側路是 **Chromium 的 V4L2-native 解碼器**（像能過的 ffmpeg `h264_v4l2m2m` 連續餵 OUTPUT），它也可能同時載到 VP9/AV1；代價是 Chromium 打包、且對上我方 virtio-media 未驗。證據 `logs/vpu_wp/B23`–`B29`、記憶 `vpu-work-state` |
+| **D92** | guest 的 `PATH` 上那支 `firefox` 是 **snap**（`/usr/bin/firefox` → `snap.firefox.firefox (enforce)`）：strict confinement 看不到 `/usr/local/share/vulkan/icd.d/freedreno_icd.aarch64.json`（turnip ICD），也看不到 `/usr/lib/aarch64-linux-gnu/dri/v4l2_drv_video.so`（我方的 libva 後端）。**GL 先死**（`ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)`），Firefox 於是把**整個硬體影片解碼關掉**：`about:support` 的 `IsHardwareAccelerated=false`、`VA-API FFmpeg init successful` **0** 次、AV1／H.264 一律 `Using preferred software codec`——**後端從頭到尾沒有被載入過** | **開，但不是 libva 的缺陷**——`logs/vpu_wp/VA3-lastmile.md` §6、`VA3-refreshfix.md` §7。證明它與後端無關：同一支 B22 腳本在 **DEB ESR** 上 `IsHardwareAccelerated=true`、零拷貝硬解，在 snap 上軟解 | **guest image／出貨環境**，不是 libva-v4l2、device、driver 或池 | **remedy（已用於所有 VA3 驗收）**：用 **DEB Firefox ESR**（`/usr/bin/firefox-esr`，apparmor `flags=(unconfined)`），並在**啟動環境**裡自己帶 `MESA_LOADER_DRIVER_OVERRIDE=zink` 與 `VK_DRIVER_FILES=…`——這兩個放在 `/etc/environment`，**只有 login shell（PAM）會帶進來**，非 login shell 必須明寫。出貨的正解是 guest-additions 把 `firefox` 指向 DEB ESR （或移除 snap firefox、或替 snap 開 interface）|
 
 ### 7.5 耐久：一小時 soak 與 30 次 stop/start（M8 的端到端證據）
 
@@ -893,7 +894,7 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
    `VAPictureParameterBufferH264` 的 `seq_fields/pic_fields/num_ref_frames/log2_max_*/pic_order_cnt_type/…` 與
    `VAIQMatrixBufferH264` 的 scaling list 以 `gst_h264_bit_writer_sps/pps` 寫出；**VUI 必寫
    `bitstream_restriction`，`max_num_reorder_frames = num_ref_frames`**（重排死鎖規則，第 5 點）。VA2 的 HEVC
-   同法但 VPS 憑空合成；VP9 由 `VADecPictureParameterBufferVP9` 重建 uncompressed header；AV1 的 OBU 待議。
+   同法但 VPS 憑空合成；VP9 由 `VADecPictureParameterBufferVP9` 重建 uncompressed header；**AV1 的 OBU 已經做完並在實機驗收**（sequence header + frame header + tile group，由 `VADecPictureParameterBufferAV1`／`VASliceParameterBufferAV1` 重建），細節與它帶回來的四條缺陷記在 §7.7 末的「VA3-AV1」。這裡只留一條**對所有 codec 都成立的規則**：**重新合成出來的位元流，正確性只能由一個獨立的軟體解碼器判定，不能由裝置吐幾張畫格判定**——AV1 這一條就是被「餵 N 張、出 M 張」的計數誤導了十幾個 WP（見 §7.7）。
 4. **Surface 模型。** `VASurface` 是**邏輯圖槽**，`vaCreateSurfaces` 不預綁 CAPTURE（上游一 surface 一對
    source/destination buffer 的模型只對 stateless 成立）。CAPTURE 池由 device 在 `SOURCE_CHANGE` 後決定：驅動
    讀 `MIN_BUFFERS_FOR_CAPTURE`，配 `min + N`（N = surface 數與 8 取小，總數上限 32），**CAPTURE 的幾何以
@@ -1133,6 +1134,56 @@ grace 到期釋放已餵輸入、sync 失敗、退軟解。這**兩邊都不是�
 OUTPUT queue）證明 codec 與 virtio-media 橋本身沒問題（B26 解出同一支 High 串流），指向的唯一 client 側解法是換一個
 連續餵料的瀏覽器解碼路——**Chromium 的 V4L2-native 解碼器**，那也是 VA2（VP9/AV1）的可能載體，惟需先解 Chromium
 打包並驗證它對我方 virtio-media 裝置的相容性。
+
+**VA3-AV1 定案（2026-09-17，`VA3-mcmatrix.md`／`VA3-refreshfix.md`／`VA3-lastmile.md`）：deep-B AV1 在瀏覽器裡零拷貝
+硬解——這不是架構限制，是我方 libva 後端合成 OBU 時的四個 bug。** 在此之前約十五個 WP 把它當成「stateful codec
+對 deep-B AV1 的重排硬牆」在繞（fake AU、TU 分組、餵料深度、`KEY_LOW_LATENCY`、mid-stream drain、延後交付……），
+**那整條診斷是錯的**。誤導它的是兩件事：(a) 我方重新合成出來的 AV1 elementary stream **本身無效**，codec 只是解到
+解不下去就停；(b) 用「餵進去 N 張、拿回來 M 張」當判準——`N − M` 在一個**壞掉的**串上永遠像是「codec 扣著不放」。
+決定性的對照是 `VA3-mcmatrix` 的 `orig_split.obu`：把**原生**的 frame header 一幀一個 TU 重切，同一條 VA 提交路徑、
+同一顆 codec **300/300 全解**，於是 per-frame 提交、TU 分組、PTS、codec 旗標全部被洗清，**唯一還壞著的變數是 frame
+header 的內容**。
+
+四個 bug（libva-v4l2，`fix/av1-refresh`，已 `--no-ff` merge 進 `wip/vpu`）：
+
+| commit | 修什麼 |
+|---|---|
+| **`86ee648`** | **`refresh_frame_flags` 要精確導出，並讓 DPB 追上**。VA 不帶這個欄位，舊碼在有空槽時用「填死槽／否則汰換 LRU」的啟發式，寫進 encoder 從來沒寫過的槽 → 鏡像 DPB 與 encoder 的 DPB 分岔，854 deep-B 上 **305 張 inter 有 245 張參考到錯的圖**。它其實**可以精確導出**：`refresh_frame_flags(N) = OR{ 1<<i : ref_frame_map_{N+1}[i] == current_frame_N }`（5.9.2）。代價是每一張都要先扣住一幀；對「sync 完才送下一張」的客戶端（ffmpeg／Firefox）先以 `refresh_frame_flags = 0` **暫送**，真正的 mask 由後繼者揭曉後，同一張以**不顯示的 DPB catch-up frame**（相同 tile payload ⇒ 相同像素與 CDF）補進下一個 TU |
+| **`95f7c81`** | **客戶端放掉的 surface 不算 busy**。ffmpeg／Firefox 會把 random-access 串的 not-shown 參考幀解進 surface、**不 sync 就放掉**（那些像素它永遠不要，顯示是之後由 `show_existing_frame` 拿的）。舊碼在該 surface 回到池子被 `vaBeginPicture` 重用時回 `SURFACE_BUSY`，客戶端就停在第 59 張（139 次 `surface is in use` + 139 次 `invalid VASurfaceID`）。stateful codec **從不**解進客戶端的 surface，所以這個拒絕保護不了任何東西；改成 context 可選擇性放行（預設 false，其他 context 的 VA 契約逐位元不變）|
+| **`bf6d262`** | **被 held 的那張，`tile_size_bytes` 是它自己的**。`build_frame_header` 從**當下**的 tile 累積器取 tile-size 欄寬，但正在組的那張常常不是當下那張（held／provisional／catch-up）。單 tile 時根本不寫 size 欄位所以看不出來；**YouTube 送的是兩個 tile column**，欄寬差一個 byte 就整個 tile group 解不開 |
+| **`aec13f4`** | **AV1 的 `usesChromaLr` 由任一個 chroma plane 決定**。5.9.20 是「任何 `i > 0` 的 plane 有 restoration 就設」，舊碼只看 V（`i > 1`）。一張「U 開、V 不開」的幀於是少寫 `lr_uv_shift` 那一個 bit，`tx_mode` 以後全部位移。stock YouTube **正好**會送這種組合：133 個 AU 裡出現 2 次，而且就是最後兩個 |
+
+**交付結果（實機，r405 `aec13f4`）。** stock Firefox ESR 在 YouTube 上放 AV1：**連續 166.4 秒、單一 decoder session、
+5113 bitstream buffers in / 5113 frames out、0 次退回 dav1d、全程零拷貝**（`Stateful sync failed` 0、
+`vaExportSurfaceHandle failed` 0、`surface is in use` 0、`IsHardwareAccelerated` true 18／false 0）。
+本地 deep-B clip 在 Firefox 裡同樣硬解（`c3` 2410 幀、`c4` 2347 幀）。**九條非回歸全部 bit-exact**
+（H264 1080p／854／bframes720、VP9 1080p／854、AV1 lowdelay-1080p、AV1 ra-1080p、AV1 ra-854、854_av1），
+`-bf 3` 的 idle drain 仍然恰好 1（**D85** 不變）。五條 canonical AV1 串在 r404 → r405 之間**逐位元組相同**，
+所以 `aec13f4` 是純增量。
+
+**標準驗證門（往後每一個 AV1 WP 都要過）。** 後端以 `LIBVA_V4L2_AV1_DUMP` 落下它**真正送給 codec 的**
+elementary stream，然後在**桌機**上：
+
+```
+ffmpeg -c:v libdav1d -i "$LIBVA_V4L2_AV1_DUMP" -f null -
+```
+
+**必須 0 個 decode error**，且畫格數對得上。這一條在手機之外、幾秒鐘就跑完，而且是**唯一**能把
+「串壞了」和「codec 扣著」分開的判準——上面那十五個 WP 全都是因為沒有它而走錯。
+（工具面注意：`LIBVA_V4L2_AV1_DUMP` 目前攔在所有 codec 共用的 `submit()`，混合 codec 的 run 會寫出
+VP9＋AV1 交錯的檔，dav1d 當然解不開，那不是串壞了。）
+
+**成本（誠實記一筆）。** `86ee648` 的 catch-up frame 意味著「sync 完才送下一張」的客戶端會把部分畫格**解兩次**
+（854 那支約 **+50 %** 的 decode 次數）。它**不會**多產生 CAPTURE 畫格（catch-up 是 unshown），所以
+session 的一送一出對應與零拷貝路徑都沒變；付出的是 codec 的工作量。
+
+**與 D91 的關係：D91 不變。** H.264 High-profile 的自適應網路串流仍然是已知限制（上一段），它的機制是
+codec 的「先解約 6 張才宣告」對上 Firefox 約 3 張的餵料深度，**與這裡的 OBU 合成無關**，本輪沒有動它。
+
+**這一輪的部署版本（手機上正在跑的就是這一組）。** crosvm `196ce8510` 的內容（phone `.so` md5 `6b1b8c41`；
+其上兩個 `KEY_LOW_LATENCY`／`.low_latency` 的推論已在 `wip/vpu` 上以 revert commit 退掉，內容回到這一版）、
+virtio-media fork `2986bab`、libva-v4l2 **r405 `aec13f4`**（`.so` md5 `eb1223371a8f733e1b208a1b29474f19`，
+已 merge 進 `wip/vpu`）、guest-additions **r25**。
 
 ## 8. app / daemon（WP-A1）
 
