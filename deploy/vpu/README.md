@@ -1423,9 +1423,12 @@ absolute positioning.
 decoder node; a Firefox tab that moves straight from `vp9.html` to `av1.html` starts the next
 decoder session while the previous one is still being torn down, the device opens no session, the
 journal stops at the gbm probe and the page plays through dav1d with nothing on screen to say so
-(D91-deploy issue 1, P-6b -- a real user-facing defect, not only a rig trap). Navigate to
-`about:blank`, wait a few seconds for the node to be released, then load the next page; gate every
-browser cell on the device ledger's `in == out`, never on the picture moving.
+(D91-deploy issue 1, P-6b -- a real user-facing defect, not only a rig trap). FIXED on
+2026-09-19 (libva r426: one V4L2 open per context; virtio-media fork 74a1dce: the decoder device
+no longer limits itself to one session -- P6b-deploy: direct vp9 -> av1 -> h264 -> vp9 navigation
+gets four sessions, two videos decode at once). The `about:blank` detour is no longer needed and a
+cell that needs it is a regression. What stays: gate every browser cell on the device ledger's
+`in == out`, never on the picture moving.
 
 **23. A vendor MediaCodec key that reads back "absent" may have been read on the wrong port,
 and an AV1 dump md5 is not a regression gate.** `vendor.qti-ext-dec-picture-order.enable` is not
