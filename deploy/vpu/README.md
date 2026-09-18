@@ -994,7 +994,7 @@ when the ring wrapped under it.
 
 ## Measurement traps
 
-Twenty ways a run has silently lied to a work package. Each one cost a session; none of them
+Twenty-three ways a run has silently lied to a work package. Each one cost a session; none of them
 announces itself. In short, as a checklist:
 
 > `timeout` needs `-k` for a stalled ffmpeg; `-stream_loop` does nothing on a raw elementary
@@ -1402,6 +1402,41 @@ capability line) even on the hardware path -- gate on `Using preferred hardware 
 ABSENCE of `IsHardwareAccelerated=false`, never on the word `software`. And in gbm-dmabuf mode the
 backend's pool line reads `CAPTURE pool: 21 (surfaces K, spares S, min 21)`, which `VA_POOL_RE` (the
 MMAP wording) does not match -- the bar still passes, the regex is owed an update.
+
+**21. Driving the guest through the App UI (adb `input` / `screencap`) has its own four lies.**
+(a) The greeter can be white-on-white: the appliance themes name a wallpaper the image does not
+carry and switch the fallback colour off, so the password field takes every key and shows nothing
+(E2E-vpu P-1, DIAG-P1). It is intermittent; blind-type `password01` + ENTER logs in regardless
+(guest-additions r26 paints the fallback colour). (b) The App's ▶ always does `vm_modify(<the
+App's saved config>)` before `vm_start`, so a config changed over IPC is overwritten the moment ▶
+is pressed (P-3, the other face of trap 14 / D79): to make the App's play button use a setting,
+change it in the App's editor. (c) The App's editor also writes four default keys on save
+(`vpu_codec_enabled`, `camera_keep_screen_on`, virtio_sound `buffer`/`underrun`), so
+`files/vms.json` is not byte-identical after any UI edit -- canonicalise (59 keys,
+`9a40c572e32c2d40de864044c812cee5`) before comparing (P-2). (d) A right click cannot be injected
+(the App's gesture is hold + second-finger tap); use the App keyboard's `Fn` row Shift+F10, and
+re-measure the guest-screen geometry after toggling the `Fn`/`Ex` rows, they move it (P-8). The
+mouse is relative (touchpad-style) by default; the stylus/tablet icon in the FAB's first row gives
+absolute positioning.
+
+**22. Switching video pages back-to-back falls back to software, silently.** The guest has one
+decoder node; a Firefox tab that moves straight from `vp9.html` to `av1.html` starts the next
+decoder session while the previous one is still being torn down, the device opens no session, the
+journal stops at the gbm probe and the page plays through dav1d with nothing on screen to say so
+(D91-deploy issue 1, P-6b -- a real user-facing defect, not only a rig trap). Navigate to
+`about:blank`, wait a few seconds for the node to be released, then load the next page; gate every
+browser cell on the device ledger's `in == out`, never on the picture moving.
+
+**23. A vendor MediaCodec key that reads back "absent" may have been read on the wrong port,
+and an AV1 dump md5 is not a regression gate.** `vendor.qti-ext-dec-picture-order.enable` is not
+echoed in the decoder's INPUT format; it is reflected on the OUTPUT format (`getOutputFormat`), and
+reading only the input port is how VA3-mcmatrix filed the one key that closes D91 as "not
+supported" (D91-lowlat-probe). Read both ports, and treat `configure()` returning OK as meaning
+nothing: CCodec drops unknown vendor keys without an error. Separately, the md5 of a
+`LIBVA_V4L2_AV1_DUMP` depends on the client's sync timing (whether a sync forces the builder to
+flush an access unit early), so the same `.so` gives different, individually stable, values on two
+guests (P4-verify 5.1); gate AV1 on `ffmpeg -c:v libdav1d` decoding the dump with 0 errors plus the
+decoded-pixel md5 and the ledger, never on the dump's bytes.
 
 **And one that is not a measurement trap but reads like one:** a `debug!` from a device backend
 will not appear in the log unless the helper was started at that level — see `log level` on the
