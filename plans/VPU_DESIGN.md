@@ -1177,7 +1177,7 @@ session 的一送一出對應與零拷貝路徑都沒變；付出的是 codec �
 
 **與 D91 的關係。** 同一套方法（重建的位元流先過獨立軟解 gate、codec 的行為用探針量而不是猜、readback 讀對 port）在 H.264 上一天之內把 D91 也解掉了——見上面「D91 已關」與 §7.4。AV1 這裡沒有動；但 D91 帶回一個該回頭做的事：AV1 的「picture-order」判定（`VA3-mcmatrix`）是讀 input format 得出的，**那是錯的 port**，值得用 output-port readback 重測一次。
 
-**目前的部署版本（2026-09-18，手機 App 路徑上跑的就是這一組）。** crosvm fork `wip/vpu` **`9d6fe4983`**（App 路徑 md5 `002659f6b62bc5a7fa235b11ff8f7d48`，`D91-deploy` 部署；前一版 `196ce8510` 的內容 md5 `6b1b8c41…` 留在 `/data/local/tmp/crosvm_6b1b8c41_backup_d91`）、virtio-media fork `2986bab`、libva-v4l2 **r424 `d541a97`**（`.so` md5 `b6f642e86397bbb39cc9e42afd708935`；wip/vpu `07d4215` 的樹與它相同）、mesa fork `wip/vpu` **`4b23362ebfe`**（`mesa-guest` r227673，zink 那一行）、guest-additions **r25**。未落地／未驗：guest-additions **r26 `329503a`**（P-1 的 greeter 備援底色 drop-in，§7.8）。
+**目前的部署版本（2026-09-18，手機 App 路徑上跑的就是這一組）。** crosvm fork `wip/vpu` **`9d6fe4983`**（App 路徑 md5 `002659f6b62bc5a7fa235b11ff8f7d48`，`D91-deploy` 部署；前一版 `196ce8510` 的內容 md5 `6b1b8c41…` 留在 `/data/local/tmp/crosvm_6b1b8c41_backup_d91`）、virtio-media fork `2986bab`、libva-v4l2 **r424 `d541a97`**（`.so` md5 `b6f642e86397bbb39cc9e42afd708935`；wip/vpu `07d4215` 的樹與它相同）、mesa fork `wip/vpu` **`4b23362ebfe`**（`mesa-guest` r227673，zink 那一行）、guest-additions **r25**。guest-additions **r26 `329503a`**（P-1 的 greeter 備援底色 drop-in，§7.8；`P1-verify` 在新增量碟上驗過）。
 
 ### 7.8 出貨組態驗收（E2E）：P-1～P-8，與 P-4 的三層修正（2026-09-18 定案）
 
@@ -1208,7 +1208,7 @@ libva 兩層落在 `wip/vpu` `0a39d46`（`--no-ff` merge `fix/p4-sandbox`，含�
 
 | # | 一句話 | 狀態 | 歸屬／下一步 |
 |---|---|---|---|
-| **P-1** | App 畫面登不進 SDDM：密碼欄看不到任何圓點 | **降級為外觀缺陷，間歇**（`DIAG-P1.md`）：每個按鍵都到了 evdev、greeter 的密碼欄有 focus、內容也對——但主題指定的桌布 `/usr/share/backgrounds/budgie/budgie-codename.png` 在映像裡不存在、`use-background-color=false`、密碼欄文字預設 `#FFFFFF`：**白字畫在白底上**。打開備援底色（`#2f343f`）圓點立刻出現；E2E 後續兩次開機 greeter 又是深色可讀。**盲打 `password01` ↵ 一直都能登入** | guest image：dist-guest 補桌布或 `theme.conf.user` 打開備援底色（**待做**）|
+| **P-1** | App 畫面登不進 SDDM：密碼欄看不到任何圓點 | **關（2026-09-18，`P1-verify`）**。根因（`DIAG-P1`）：主題指定的桌布 `/usr/share/backgrounds/budgie/budgie-codename.png` 不在映像裡、`use-background-color=false`、密碼欄文字預設 `#FFFFFF`——**白字畫在白底上**；每個按鍵都到了 evdev、欄位有 focus、內容也對。**它不是間歇的**：E2E §11.6 看到的深色 greeter 是 `DIAG-P1` 儀器化時改過的主題檔（`theme.conf`／`Main.qml`／`Input.qml`）沒有還原留下的；P1-verify 先以 `budgie-sddm-theme` 0.22.11 的出貨檔逐位元還原（`dpkg -V` 對得上）→ 純白必現，裝修法 → 深底必現。修法：guest-additions **r26 `329503a`** 的安裝 hook `ga_fix_greeter_background`——對每個 `background=` 指到不存在檔案的主題放 `theme.conf.user`（只把有 `use-background-color=false` 的 section 改 true），出貨 `theme.conf` 一個位元不動、已有 `.user` 的主題不碰、桌布存在的不碰、可重入、永不讓安裝失敗。實機：postinst 印 `sddm theme ubuntu-budgie-login: wallpaper missing…`（`ubuntu-theme` 是它的 symlink），greeter 底色 `#2F343F`、盲打 `password01` 掃出 10 個圓點、登入成功；DKMS r25→r26 兩個 kernel 重建＋initramfs 乾淨、h264 位元精確、再裝一次冪等（`.user` 連 mtime 都沒動） | guest-additions（已落地 wip/vpu `329503a`，deb r26）。出貨映像若日後補回桌布套件，drop-in 自然失效、不衝突
 | **P-2** | App 的 VM 編輯器存檔會多寫四個預設鍵（`vpu_codec_enabled`、`camera_keep_screen_on`、virtio_sound `buffer`/`underrun`），57 鍵變 59 鍵 | 開，low：值全等於 App 預設，**行為不變**，只是 `files/vms.json` 不逐位元往返 | App（`VMEditGraphicsTab.java:763` 附近）。rig 據此把 canonical md5 定在 59 鍵版 `9a40c572…` |
 | **P-3** | App 的 ▶ 一定先 `vm_modify(App 存的設定)` 再 `vm_start`，IPC 改的設定按下 ▶ 就被蓋掉 | 依設計（D79 的另一面），**記進 rig README**：要讓 App 的播放鍵吃新設定，就得走 App 的編輯器 | App／rig 文件 |
 | **P-4** | 出貨組態 Firefox 完全不硬解 | **關**（上表） | — |
