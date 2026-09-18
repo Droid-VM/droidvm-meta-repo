@@ -806,7 +806,7 @@ compliance 那一條也跟著消失。tap-to-focus / tap-to-meter 在出貨組�
 | **D89** | B21：libva r385 每個 `vaCreateContext` 丟 `std::bad_function_call`（`GbmAllocator` 的空 logger），所有 VA 客戶端 0 幀，Epiphany 從 300 退到 0 | **VA3-fix-libva 修（libva-v4l2 `1eeaa3d`），B22 驗證通過：vaCreateContext 全模式成功、Firefox 零拷貝 3/3** | libva-v4l2 | 教訓：seam 以下的假裝置測試抓不到第一個真呼叫的崩潰，要有走 vtable 的測試 |
 | **D90** | B21：pVM 的 restricted DMA pool 讓 `dma_map_resource` 對 virtio 裝置失敗，`QBUF(CAPTURE, DMABUF)` GBM bo 回 -EIO；udmabuf 對照成功 | **VA3-fix-driver 修（fork `fa39951`，r25 `138de14`），B22 驗證通過：resolver dma-direct、驅動探針 rc 0 且 md5 bf32f00e** | virtio-media guest 驅動；根因是 §7.7 契約寫成走 DMA API | host 要 GPA 不要 DMA 映射；不可存取頁面由 host EFAULT 拒絕 |
 | **D91** | 瀏覽器（Firefox）播 **H.264 High-profile 的自適應網路串流**（MSE/HLS/DASH，含 YouTube 逼成 avc1 的 HD rendition）**軟解退回**：每個解碼 session 只餵約 3 個 access unit 就卡在第一次 `vaSyncSurface`，而 `c2.qti.avc.decoder` 對 High profile **要先解出約 6 張圖像才發 `SOURCE_CHANGE`**（Constrained Baseline 只要 1 張）；grace 到期釋放已餵輸入 → sequence-1 sync 失敗 → `vaExportSurfaceHandle failed` → 退軟解（B23/B25：裝置 3 進 0 出、grace 觸發、0 fmtΔ） | **已知限制（B23→B29，六輪把我方能改的修法全推翻）**：加大 grace（B25 750 ms）、加大 libva 逾時（B24 3 s）、設定/偏好/`-extra_hw_frames`（B28）、client 端假宣告 announce-from-SPS（B27）、餵正規 codec-config csd（B29 開旗標 13 進仍不宣告）、drain-on-grace（`android.rs` 契約：EOS 後 codec 不再收輸入、必 flush、丟參考幀，死路）——全部無效。**能過的：本地／漸進式 H.264 `<video>` 零拷貝 300/300（B22/B26）、Baseline profile 網路串流零拷貝 2/2（B28）；直通 V4L2 連續餵料客戶端 ffmpeg `h264_v4l2m2m` 能解同一支 High 串流（B26）** | 兩邊都不是我方程式碼：codec 的圖像數門檻是 Qualcomm vendor（不可設定）、Firefox VA-API 的餵料深度是它／ffmpeg 內部（≈重排深度，約 3 < 門檻 6） | 無我方可改的 WP。唯一有機會的 client 側路是 **Chromium 的 V4L2-native 解碼器**（像能過的 ffmpeg `h264_v4l2m2m` 連續餵 OUTPUT），它也可能同時載到 VP9/AV1；代價是 Chromium 打包、且對上我方 virtio-media 未驗。證據 `logs/vpu_wp/B23`–`B29`、記憶 `vpu-work-state` |
-| **D92** | guest 的 `PATH` 上那支 `firefox` 是 **snap**（`/usr/bin/firefox` → `snap.firefox.firefox (enforce)`）：strict confinement 看不到 `/usr/local/share/vulkan/icd.d/freedreno_icd.aarch64.json`（turnip ICD），也看不到 `/usr/lib/aarch64-linux-gnu/dri/v4l2_drv_video.so`（我方的 libva 後端）。**GL 先死**（`ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)`），Firefox 於是把**整個硬體影片解碼關掉**：`about:support` 的 `IsHardwareAccelerated=false`、`VA-API FFmpeg init successful` **0** 次、AV1／H.264 一律 `Using preferred software codec`——**後端從頭到尾沒有被載入過** | **開，但不是 libva 的缺陷**——`logs/vpu_wp/VA3-lastmile.md` §6、`VA3-refreshfix.md` §7。證明它與後端無關：同一支 B22 腳本在 **DEB ESR** 上 `IsHardwareAccelerated=true`、零拷貝硬解，在 snap 上軟解 | **guest image／出貨環境**，不是 libva-v4l2、device、driver 或池 | **remedy（已用於所有 VA3 驗收）**：用 **DEB Firefox ESR**（`/usr/bin/firefox-esr`，apparmor `flags=(unconfined)`），並在**啟動環境**裡自己帶 `MESA_LOADER_DRIVER_OVERRIDE=zink` 與 `VK_DRIVER_FILES=…`——這兩個放在 `/etc/environment`，**只有 login shell（PAM）會帶進來**，非 login shell 必須明寫。出貨的正解是 guest-additions 把 `firefox` 指向 DEB ESR （或移除 snap firefox、或替 snap 開 interface）|
+| **D92** | guest 的 `PATH` 上那支 `firefox` 是 **snap**（strict confinement 看不到 turnip ICD 與我方的 `v4l2_drv_video.so`）：GL 先死（`ZINK: vkCreateInstance failed`），Firefox 把整個硬體影片解碼關掉、後端從頭到尾沒被載入；另一半是`MESA_LOADER_DRIVER_OVERRIDE=zink`／`VK_DRIVER_FILES` 只在 login shell 有 | **關——不是出貨映像的缺陷，是「被除錯過的舊 overlay」的環境污染（`E2E-vpu.md` §3.1，2026-09-18 從 base 新開增量碟實測）**：乾淨 base **完全沒有 snap**（`snap list` → *No snaps are installed yet*），裝 Mozilla 官方 apt repo 的 `firefox-esr` 之後桌面選單就是 `firefox-esr.desktop`；`mesa-guest` 套件自己把 zink／`VK_DRIVER_FILES` 寫進 `/etc/environment`，`/etc/profile.d/` 有 `50-mesa-guest.sh` 與 `droidvm-va.sh`（`LIBVA_DRIVER_NAME=v4l2`），而 SDDM 的 `wayland-session` 以 `$SHELL --login` 起，**從桌面選單開的 Firefox 拿得到這些變數，一個都不用補**。舊 overlay 上是有人裝過 snap firefox。出貨組態真正的阻斷是 **P-4**（§7.8），它在 D92 之下被遮住 | 舊 overlay 的環境，**不是** guest image、libva-v4l2、device、driver 或池 | 沒有 WP。規則：出貨驗收一律從 base 新開增量碟（`E2E-vpu.md` 的做法），不要在被除錯過的 overlay 上下結論 |
 
 ### 7.5 耐久：一小時 soak 與 30 次 stop/start（M8 的端到端證據）
 
@@ -893,7 +893,8 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
    header 與 emulation prevention bytes，`slice_data_offset` 指向 `nal_unit_type` 那個 byte），原樣搬。SPS/PPS 由
    `VAPictureParameterBufferH264` 的 `seq_fields/pic_fields/num_ref_frames/log2_max_*/pic_order_cnt_type/…` 與
    `VAIQMatrixBufferH264` 的 scaling list 以 `gst_h264_bit_writer_sps/pps` 寫出；**VUI 必寫
-   `bitstream_restriction`，`max_num_reorder_frames = num_ref_frames`**（重排死鎖規則，第 5 點）。VA2 的 HEVC
+   `bitstream_restriction`，`max_num_reorder_frames = 0`**（`max_dec_frame_buffering` 仍帶整個 DPB；重排死鎖規則，第 5 點）。
+   **它原本寫 `num_ref_frames`，那就是 D91 的「codec 要先解約 6 張才宣告」（`D91-h264.md`）**：VA 不帶重排深度，拿 `num_ref_frames` 當替身，而真實的 High 串上它是 **5**（原生 VUI 寫 2）——「允許扣 5 張」的合規解碼器當然到第 6 個 AU 才吐第一張，**6 = 5 + 1**，正好是 B26 量到的門檻，不是 Qualcomm 的門檻。改成 0 是正確的：這個後端的 CAPTURE 依 timestamp 認領、VA 客戶端拿到的永遠是它送進去的那一張，輸出順序由客戶端自己排；實測宣告 0／2／3／5 解碼 md5 完全相同、codec 出幀順序（`nonmono` 157）與 300/300 不變，只有第一張的延遲從第 6 個 AU 提前到第 1 個。**這條串本身是有效的**（獨立軟解 gate `ffmpeg -err_detect aggressive+explode` 1800 幀 0 errors、像素與原生逐位元相同）——AV1 的故事沒有重演，H.264 只錯這一個欄位。VA2 的 HEVC
    同法但 VPS 憑空合成；VP9 由 `VADecPictureParameterBufferVP9` 重建 uncompressed header；**AV1 的 OBU 已經做完並在實機驗收**（sequence header + frame header + tile group，由 `VADecPictureParameterBufferAV1`／`VASliceParameterBufferAV1` 重建），細節與它帶回來的四條缺陷記在 §7.7 末的「VA3-AV1」。這裡只留一條**對所有 codec 都成立的規則**：**重新合成出來的位元流，正確性只能由一個獨立的軟體解碼器判定，不能由裝置吐幾張畫格判定**——AV1 這一條就是被「餵 N 張、出 M 張」的計數誤導了十幾個 WP（見 §7.7）。
 4. **Surface 模型。** `VASurface` 是**邏輯圖槽**，`vaCreateSurfaces` 不預綁 CAPTURE（上游一 surface 一對
    source/destination buffer 的模型只對 stateless 成立）。CAPTURE 池由 device 在 `SOURCE_CHANGE` 後決定：驅動
@@ -1173,6 +1174,8 @@ ffmpeg -c:v libdav1d -i "$LIBVA_V4L2_AV1_DUMP" -f null -
 （工具面注意：`LIBVA_V4L2_AV1_DUMP` 目前攔在所有 codec 共用的 `submit()`，混合 codec 的 run 會寫出
 VP9＋AV1 交錯的檔，dav1d 當然解不開，那不是串壞了。）
 
+**dump 的 md5 不是回歸門（`P4-verify.md` §5.1 釘死）。** 同一顆 `.so`（r413）在兩台 guest 上吐出兩個不同的 dump md5，而且每一台上都穩定（×3 相同）；差別**逐位元等於** replay harness 的 `--sync=none` 與 `--sync=tu` 兩個模型——也就是客戶端的 `vaSyncSurface` 有沒有逼 builder 提早 flush 尚未送出的 access unit：codec 追得上時 sync 立刻返回，builder 就把 AU 併著送。那是**時序**，不是後端版本的函數。所以「canonical AV1 串逐位元相同」只在**同一台 guest、同一個 codec 節奏**下才有意義（上一段 r404 → r405 的比對就是這樣量的）；跨 guest／跨 mesa 的回歸門是 **dav1d 0 errors ＋ 解碼像素 md5（`12e420bd…` 等）＋ ledger 的 in == out**。
+
 **成本（誠實記一筆）。** `86ee648` 的 catch-up frame 意味著「sync 完才送下一張」的客戶端會把部分畫格**解兩次**
 （854 那支約 **+50 %** 的 decode 次數）。它**不會**多產生 CAPTURE 畫格（catch-up 是 unshown），所以
 session 的一送一出對應與零拷貝路徑都沒變；付出的是 codec 的工作量。
@@ -1184,6 +1187,44 @@ codec 的「先解約 6 張才宣告」對上 Firefox 約 3 張的餵料深度�
 其上兩個 `KEY_LOW_LATENCY`／`.low_latency` 的推論已在 `wip/vpu` 上以 revert commit 退掉，內容回到這一版）、
 virtio-media fork `2986bab`、libva-v4l2 **r405 `aec13f4`**（`.so` md5 `eb1223371a8f733e1b208a1b29474f19`，
 已 merge 進 `wip/vpu`）、guest-additions **r25**。
+
+### 7.8 出貨組態驗收（E2E）：P-1～P-8，與 P-4 的三層修正（2026-09-18 定案）
+
+**方法（使用者指定）。** 從 base 新開一顆增量碟（不重用被除錯過的 overlay），**只有 CLI 安裝走 ssh**（guest-additions、
+`mesa-guest`、Mozilla 官方 apt 的 `firefox-esr`），**所有有視覺效果的步驟全程走 App UI**（adb `input`／`screencap`：
+App 顯示畫面登入 SDDM、從桌面選單開 Firefox、播 YouTube 與三個本機 codec 頁、Konsole 跑 ffmpeg），不設環境變數、
+不改偏好、沙箱全開。這是**第一次**像使用者一樣走出貨路徑——`B22`／`VA3-lastmile`／`CLEAN-arc` 的瀏覽器驗收全部是
+用 ssh 把 Firefox 丟到 SDDM 的 X server（`DISPLAY=:0`、`xhost +local:`）上、而且每次都自己補 pref；出貨映像的 greeter
+**只提供 `Plasma (Wayland)`（P-7）**，那條 X11 路使用者根本選不到。報告：`logs/vpu_wp/E2E-vpu.md`、`DIAG-P1.md`、
+`P4-host.md`、`P4-verify.md`、`LAND-p4.md`。
+
+**P-4（出貨組態下 Firefox 完全不硬解）是三層，三個都要修，缺一個就還在。**
+
+| 層 | 現象 | 根因 | 修法（已落地） |
+|---|---|---|---|
+| 1 | device ledger 整段播放 **0 個 codec session**；`about:support` 卻寫 *Hardware Decoding: Supported*（它說的是平台能力，不是這次試了什麼——**會騙人**） | `media.hardware-video-decoding.force-enabled` 預設 **false**：Firefox 只對它自己白名單認得的驅動試 VA-API，我方後端不在名單上，`vaInitialize` 連叫都不叫 | libva-v4l2 `packaging/package.sh` 隨 deb 出貨 `/usr/lib/firefox-esr/defaults/pref/droidvm-vaapi.js`（`force-enabled` 與 `media.ffmpeg.vaapi.enabled` 兩個 pref 的**預設值**，distro 機制、不動沙箱、使用者仍可改） |
+| 2 | 開了 pref 之後 `libva error: No usable V4L2 M2M decode device found.`、`va_openDriver() returns 1` | **我方的 bug**：`V4L2M2MDevice::enumerate_devices()` 只走 udev（`/sys`＋`/run/udev`），Firefox 的 RDD 沙箱裡沒有 | `src/device_scan.{h,cc}`（新）：udev 一個都找不到時退回直接掃 `/dev/video0..63`，以 `VIDIOC_QUERYCAP` 的 M2M 能力位元判斷；`select_decode_nodes()` 純函式、3 個 named mutation 單元測試 |
+| 3 | 跳過第 2 層之後 `DRM_IOCTL_MODE_CREATE_DUMB failed: Permission denied` → `gbm_bo_create(R8 container) failed -- MMAP fallback` → 解 1 幀就退軟解 | **Mesa zink 拒開 screen**：Firefox 的 seccomp 對 `sysinfo(2)` 回 EPERM，glibc 不檢查，`os_get_total_physical_memory` 失敗，zink `goto fail`——但 `screen->total_mem` 從頭到尾沒有人讀；GBM 於是退成 `kms_swrast`，而它唯一的配置手段 `CREATE_DUMB` 在 render node 上**依定義**就是 EACCES | mesa fork `wip/vpu` `4b23362ebfe`（`src/gallium/drivers/zink/zink_screen.c`）：查不到系統記憶體時用 device heap 頂替、警告一行、不 fail。**必要性已證明**：舊 mesa ＋ 新 libva 是擲骰子——同一台、同一份 libva，8 跑裡 4 跑全硬解、2 跑 `CREATE_DUMB`→mmap 退軟解（`P4-verify` §3.2） |
+
+libva 兩層落在 `wip/vpu` `0a39d46`（`--no-ff` merge `fix/p4-sandbox`，含第 3 層的 GBM 診斷行）＋ `b113ac7`
+（merge `fix/h264-d91`，見 §7.6 第 3 點）＝ deb **r421**、`.so` md5 `0bed3ca7…`，樹與手機驗過的 `test/p4-d91-combined`
+是**同一個 tree 物件**。**驗證（`P4-verify.md`，出貨組態、App UI、零環境變數）**：`h264.html` 單一 session
+**300 in / 300 out**、`vp9.html` **2684 / 2684**（94 s）、`av1.html` deep-B **2860 / 2860**（97 s）、**YouTube AV1 1080p60
+253.67 s、15620 / 15620**，每一次都 `gbm-dmabuf`、四個錯誤計數全 0、一次都沒退軟解；`vainfo` 5 個 profile；換 mesa 之後
+桌面（greeter、登入、合成、捲動）無回歸；九條非回歸 bit-exact、drain 計數一格未變。
+
+**其餘七項的狀態。**
+
+| # | 一句話 | 狀態 | 歸屬／下一步 |
+|---|---|---|---|
+| **P-1** | App 畫面登不進 SDDM：密碼欄看不到任何圓點 | **降級為外觀缺陷，間歇**（`DIAG-P1.md`）：每個按鍵都到了 evdev、greeter 的密碼欄有 focus、內容也對——但主題指定的桌布 `/usr/share/backgrounds/budgie/budgie-codename.png` 在映像裡不存在、`use-background-color=false`、密碼欄文字預設 `#FFFFFF`：**白字畫在白底上**。打開備援底色（`#2f343f`）圓點立刻出現；E2E 後續兩次開機 greeter 又是深色可讀。**盲打 `password01` ↵ 一直都能登入** | guest image：dist-guest 補桌布或 `theme.conf.user` 打開備援底色（**待做**）|
+| **P-2** | App 的 VM 編輯器存檔會多寫四個預設鍵（`vpu_codec_enabled`、`camera_keep_screen_on`、virtio_sound `buffer`/`underrun`），57 鍵變 59 鍵 | 開，low：值全等於 App 預設，**行為不變**，只是 `files/vms.json` 不逐位元往返 | App（`VMEditGraphicsTab.java:763` 附近）。rig 據此把 canonical md5 定在 59 鍵版 `9a40c572…` |
+| **P-3** | App 的 ▶ 一定先 `vm_modify(App 存的設定)` 再 `vm_start`，IPC 改的設定按下 ▶ 就被蓋掉 | 依設計（D79 的另一面），**記進 rig README**：要讓 App 的播放鍵吃新設定，就得走 App 的編輯器 | App／rig 文件 |
+| **P-4** | 出貨組態 Firefox 完全不硬解 | **關**（上表） | — |
+| **P-5** | 硬體 H.264 **編碼** drain 時掉尾幀：`STREAMOFF(OUTPUT) drain could not place 9 frame(s) within 2s … dropped`，300 進 291 coded 出（ffmpeg 再少 mux 4 張 → 檔案 287） | 開，**非決定性**：E2E 重現一次，`P4-verify` §6 兩次（baseline 與 `-num_capture_buffers 32`）都是 300/300 沒重現；`B11`/`B14` 記過同型（150→137）。編碼器只有 8 個 CAPTURE slot，EOF 時 guest 停止 dequeue、device 等 2 s 就丟 | device（`android.rs` 編碼 drain 的 2 s 硬上限）：改成「等到 guest 真的不再 dequeue」或拉高 CAPTURE 下限；先要一個穩定的重現 |
+| **P-6** | guest 畫面**卡死**（時鐘不跳、影片不動，App 仍顯示已連接，guest 活著、ssh 正常、`vm.log` 無錯誤），5 分鐘後 KDE 鎖定畫面**全黑**（1280×720 全 `(0,0,0)`）；盲打解鎖成功但畫面仍黑；App「重啟」後仍黑，送一個按鍵才醒 | 開，**Blocker 等級的可用性問題**，觸發未證實（發生在 Firefox 撞 `CREATE_DUMB: Permission denied` 走 mmap 的那次重啟之後約 90 s）| 顯示路徑（virtio-gpu／App 顯示）；先要重現線索 |
+| **P-7** | 出貨映像的 greeter 只有 `Plasma (Wayland)`，沒有 X11 session | 記錄（不一定是缺陷）：意義是**先前所有 X11 上的瀏覽器驗收都不是使用者的路**；出貨驗收改以 Wayland 為準（P4-verify 已是）| guest image，待人決定要不要提供 X11 |
+| **P-8** | App 的右鍵手勢（一指按住＋第二指快點）`adb input` 做不出來 | rig 限制，不是產品缺陷：改用 App 鍵盤 `Fn` 區的 **Shift+F10**（Firefox 認）；`Fn`／`Ex` 區開關會改變 guest 畫面在手機上的位置 | rig 文件 |
 
 ## 8. app / daemon（WP-A1）
 
