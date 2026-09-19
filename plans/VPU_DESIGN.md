@@ -885,9 +885,17 @@ guest 的 libva 後端比放進 device 便宜（不必替 virtio-media 加 Reque
    stateless 路徑（不刪，留給上游）。
 2. **Profile／entrypoint。** 只有 `VAEntrypointVLD`、`VA_RT_FORMAT_YUV420`、輸出 NV12。device 目前**沒有**
    profile/level 控制項（唯一控制項是唯讀的 `MIN_BUFFERS_FOR_CAPTURE`，`video_decoder.rs:298`），所以 VA1 依
-   fourcc 給固定清單（H264 → ConstrainedBaseline/Main/High），**這是 VA1 明知的暫時硬編碼**；VA1b 讓 device 把
-   MediaCodec 的真實能力以 `V4L2_CID_MPEG_VIDEO_H264_PROFILE/LEVEL` menu 暴露（fork＋crosvm），驅動改讀控制項，
-   回到「不寫死」規則。
+   fourcc 給固定清單，**那是 VA1 明知的暫時硬編碼**。**VA1b（2026-09-19 定案，`VA1b-device`／`VA1b-libva`／`VA1b-verify`）**：
+   device 依 host codec store（`AMediaCodecInfo` 逐 profile／level `isFormatSupported`）把 decoder 真實能力以標準**唯讀**
+   menu 暴露——`H264_PROFILE`＋`H264_LEVEL`、`HEVC_PROFILE`＋`HEVC_LEVEL`、`VP9_PROFILE`、`AV1_PROFILE`（QUERYMENU 只列支援項、
+   洞回 EINVAL、`S_CTRL` 一律 EACCES、沒有 store 資料的 format 沒有控制項；fork `a4caa0d`＋crosvm `f972aa0af`，對照表與
+   encoder 共用）；libva 在 `vaInitialize` 對每個實作的 fourcc 另開探測 fd 讀 menu（`src/profile_menu.{h,cc}`，快取），
+   **宣告 = 實作集 ∩ device menu**——device 多列的（5566 上的 Baseline／ConstrainedHigh／VP9 Profile2）不外洩，直到橋實作；
+   device 沒有控制項或 menu 空 → 保留實作集並記一行；device 有講但全是未實作 → 空集合（客戶端乾淨軟解）。實機：menu 逐項
+   等於預期（H264 `{0,1,2,4,17}`＋20 level、HEVC `{0,1,2}`＋13、VP9 `{0,2}`、AV1 `{0}`），init 行
+   `VA1b profiles: /dev/video0: profile menus reported for VP90 (2 item(s)), AV01 (1 item(s)), H264 (5 item(s))`，
+   `vainfo` 與 VA1 逐字相同（交集在這台機器上正好等於實作集），六條 clip 位元精確、Firefox 不變。HEVC 的 menu 有、橋刻意不查
+   （VA2 才有 HEVC context）；level 只在 device 端公開，VA 不帶 level。
 3. **碼流合成（H.264）。** 每個 `vaEndPicture` = 一個 access unit 進一個 OUTPUT buffer：`[SPS][PPS]`（只在
    參數變動時重送，IDR 前一律送）＋每個 slice 前補 4-byte start code——VA 的 slice data 是**整個 NAL**（含 NAL
    header 與 emulation prevention bytes，`slice_data_offset` 指向 `nal_unit_type` 那個 byte），原樣搬。SPS/PPS 由
@@ -1177,7 +1185,7 @@ session 的一送一出對應與零拷貝路徑都沒變；付出的是 codec �
 
 **與 D91 的關係。** 同一套方法（重建的位元流先過獨立軟解 gate、codec 的行為用探針量而不是猜、readback 讀對 port）在 H.264 上一天之內把 D91 也解掉了——見上面「D91 已關」與 §7.4。AV1 這裡沒有動；但 D91 帶回一個該回頭做的事：AV1 的「picture-order」判定（`VA3-mcmatrix`）是讀 input format 得出的，**那是錯的 port**，值得用 output-port readback 重測一次。
 
-**目前的部署版本（2026-09-18，手機 App 路徑上跑的就是這一組）。** crosvm fork `wip/vpu` **`31182f706`** ＋ virtio-media fork `wip/vpu` **`fb7c202`**（App 路徑 md5 **`310eb7f91dd47aae08ffad2c2deacd98`** = crosvm fork **`31182f706`**（含 P-9）＋ fork `fb7c202`，`P9-smoke` 部署；前幾版 `d602850a…`／`ca29fec1…`／`002659f6…`／`6b1b8c41…` 留在 `/data/local/tmp/crosvm_*_backup_*`）、libva-v4l2 **r426 `ad0492f`**（`.so` md5 `bf9aa557f4e0a03a5ea8eab429388b19`；wip/vpu `26eb183` 的樹與它相同）、mesa fork `wip/vpu` **`4b23362ebfe`**（`mesa-guest` r227673，zink 那一行）、guest-additions **r25**。guest-additions **r26 `329503a`**（P-1 的 greeter 備援底色 drop-in，§7.8；`P1-verify` 在新增量碟上驗過）。
+**目前的部署版本（2026-09-18，手機 App 路徑上跑的就是這一組）。** crosvm fork `wip/vpu` **`f972aa0af`** ＋ virtio-media fork `wip/vpu` **`a4caa0d`**（App 路徑 md5 **`71933ab3b2f4b717690c7e94210330c6`** = crosvm fork **`f972aa0af`**（含 P-9、VA1b）＋ fork **`a4caa0d`**，`VA1b-verify` 部署；前幾版 `310eb7f9…`／`d602850a…`／`ca29fec1…`／`002659f6…`／`6b1b8c41…` 留在 `/data/local/tmp/crosvm_*_backup_*`）、libva-v4l2 **r428 `c6a62e6`**（`.so` md5 `b7c6bce638680de52e5440690d6e8e57`，分支 `fix/va1b-profiles`，待落地）、mesa fork `wip/vpu` **`4b23362ebfe`**（`mesa-guest` r227673，zink 那一行）、guest-additions **r25**。guest-additions **r26 `329503a`**（P-1 的 greeter 備援底色 drop-in，§7.8；`P1-verify` 在新增量碟上驗過）。
 
 ### 7.8 出貨組態驗收（E2E）：P-1～P-8，與 P-4 的三層修正（2026-09-18 定案）
 
