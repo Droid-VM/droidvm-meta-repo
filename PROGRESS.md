@@ -22,7 +22,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - case 40 在 guest 通過，MetalCheck 40 項全過。
   - GFXBench 標題全部乾淨，捲動後也是（`gfx18.png`、`gfx19.png`）。
   - telemetry 新增一行 `N no-copy ranges checked 262 remapped 4`，只有少數範圍需要重新 import。
-- 尚未確認：MetalCheck 壓測後的結果文字和狀態列時鐘這兩種破圖，推測是同一個原因，還沒重測。
+- 另外兩種破圖也一起好了：重跑 MetalCheck UI 5 分鐘壓測（+128 MiB），壓測後的結果文字整頁乾淨，狀態列時鐘也正常（rig `out/visual/run4/mcui-4-up.png`）。
 - MetalCheck 新增 case 36–40（device `72d4a15`）。gfxprobe 的 `surfaces` 指令沒有 commit：IOSurface family 拒絕依 id 查詢，加 entitlement 也沒用。
 - guest 的診斷開關（`/private/var/ngpu/debug/texture-log`、`dump-now`）已刪除，下次 backboardd 啟動後生效。
 
