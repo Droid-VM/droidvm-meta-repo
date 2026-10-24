@@ -1,7 +1,30 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-24。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-25 02:10，Claude）
+
+**文字破圖找到原因並修好（NativeMetal `5b9e1d6`，fork `51c16fc`，device `72d4a15`，plugin md5 `b2940b19…` 已部署）。**
+- 重現：GFXBench 的 Test selection 清單，取消勾選三列之後有 5 個標題變成亂碼，捲動後仍然是亂碼（rig `out/visual/run4/gfx16.png`）。
+- 定位過程：
+  - 用新的 render server 診斷（NativeMetal `fa62ad0`，預設關閉）把 backboardd 用到的 texture 清單和內容 dump 出來。
+  - 標題是 A8 linear texture，建在 client 共享記憶體的 no-copy buffer 上，offset 64。dump 出來的遮罩全部是乾淨文字，所以參數和 CPU 端資料都正確，是 GPU 讀到別的頁。
+- 原因：
+  - metal2vulkan 會把「和一個還活著的 no-copy buffer 完全同位址、同長度」的新 buffer 放進舊 buffer 的 import（`host_aliases.rs`），也就是當初那批實體頁。除非呼叫 `Device::host_range_remapped` 告知該範圍已重新映射。
+  - 真 Metal 每次 `newBufferWithBytesNoCopy:` 都會重新 wire 該位址當下的頁。
+  - CoreAnimation 的 render server 會把 client 新的共享記憶體（以及 IOSurface）映射到舊映射的位址，而舊映射的 no-copy buffer 還留在它的 cache 裡。結果 GPU 畫出舊頁的內容，也就是別的文字遮罩。
+- 驗證：MetalCheck case 40 在同位址 `MAP_FIXED` 換新頁、舊 buffer 保持存活的情況下，guest 上 4480 個 byte 全部讀到前一輪的內容，Mac 上通過。
+- 修正：
+  - bridge 的 no-copy 路徑在 buffer pin 住頁之後，記下該範圍每個 map entry 的 VM object id 和 offset（`mach_vm_region_recurse`）。
+  - 下次在同範圍建 buffer 時，頁的身分若變了，或有頁還沒有 object，就先呼叫 `host_range_remapped`。
+- 結果：
+  - case 40 在 guest 通過，MetalCheck 40 項全過。
+  - GFXBench 標題全部乾淨，捲動後也是（`gfx18.png`、`gfx19.png`）。
+  - telemetry 新增一行 `N no-copy ranges checked 262 remapped 4`，只有少數範圍需要重新 import。
+- 尚未確認：MetalCheck 壓測後的結果文字和狀態列時鐘這兩種破圖，推測是同一個原因，還沒重測。
+- MetalCheck 新增 case 36–40（device `72d4a15`）。gfxprobe 的 `surfaces` 指令沒有 commit：IOSurface family 拒絕依 id 查詢，加 entitlement 也沒用。
+- guest 的診斷開關（`/private/var/ngpu/debug/texture-log`、`dump-now`）已刪除，下次 backboardd 啟動後生效。
 
 ## 續報（2026-10-24 22:30，Claude）
 
