@@ -31,7 +31,7 @@
    - 差別只在「誰跟主機講話」：droidvm-gpu 是 guest kernel 一個 op 對應一個 KGSL 原語；drm2kgsl 是 userspace 送 msm ccmd，kernel 只負責轉送。
    - 實測三條路線裡 drm2kgsl 最快（ACCEPTANCE_REPORT_R5_20260817.md:12-18；8e：vkmark 8625、Minecraft 74-112 fps）。
 3. **顯示現在就能做，不必等 3D：**
-   - classic 2D 的 present 和 guest 的 `RESOURCE_FLUSH` 同步，所以不會撕裂；代價是主機上 3 次 CPU 複製。
+   - classic 2D 的 present 和 guest 的 `RESOURCE_FLUSH` 同步；仍須等待 producer GPU 完成，才能避免讀到尚在繪製的畫面。代價是主機上 3 次 CPU 複製。
    - 之後改成 blob（`CREATE_GUEST_HANDLE`）：主機 0 次 CPU 複製、1 次 GPU blit。
 4. **venus／gfxstream 的主要代價：**
    - 需要 host-visible 共享記憶體（virtio-mmio 目前沒有 SHM region）。
@@ -136,11 +136,11 @@
 - `ATTACH_BACKING` 不複製。
 - `TRANSFER_TO_HOST_2D` 是第 1 次複製（rutabaga_2d.rs:196-250）。
 - `RESOURCE_FLUSH` 用 `transfer_read` 做第 2、3 次複製：先到 staging，再到 Android 視窗並交換 R/B（virtio_gpu.rs:900-972）。
-- 全部同步完成才回覆，`ANativeWindow_lock` 會把 guest 的節奏拉到和 SurfaceFlinger 一致 → **不會撕裂**。
+- 全部同步完成才回覆，`ANativeWindow_lock` 會把 guest 的節奏拉到和 SurfaceFlinger 一致；這只涵蓋消費端，來源的 GPU 完成依賴仍須由 guest 保證。
 
 **blob scanout（`SET_SCANOUT_BLOB`）：**
 - 只接受 XR24、AR24、AB24（mod.rs:872-880）。
-- `CREATE_GUEST_HANDLE` blob 走 udmabuf import 加 `flip_to`：0 次 CPU、1 次 GPU blit（virtio_gpu.rs:1026-1095）。fence 在 blit 讀完時完成，25 ms 後會被強制完成（mod.rs:478、1002-1077）。
+- `CREATE_GUEST_HANDLE` blob 走 udmabuf import 加 `flip_to`：0 次 CPU、1 次 GPU blit（virtio_gpu.rs:1026-1095）。原實作 25 ms 後強制完成 fence（mod.rs:478、1002-1077）；2026-10-24 實測發現會破壞來源頁面重用順序，本輪已移除此假完成路徑。
 - 沒有 handle 的 guest blob 不能用（:670-674）。
 - 2D 後端（Rutabaga2D）目前沒有 `create_blob`：要在 `udmabuf=true` 時開放 `RESOURCE_BLOB`＋`CREATE_GUEST_HANDLE`，改動不大。
 
@@ -193,3 +193,12 @@
 
 **為了不白做：** 第 2 步的驅動要拆成兩層：通用 transport（virtqueue、命令＋fence、資源表），和顯示 client。第 5 步的 3D user client
 直接重用同一套 queue 和 fence。
+
+## 8. 實機更新（2026-10-24）
+
+使用者改為直接做 drm2kgsl 3D，並移除 simplefb device。無 simplefb 開機與 blob 顯示已完成基本 bring-up；
+DarwinBoot 為 BLT-only GOP 配置普通 RAM，guest 以同一 virtio-gpu 裝置接管。3D 目前仍使用原 KGSL proxy。
+
+動畫測試揭露本 survey 原本漏掉的 producer/acquire fence：framebuffer 交付並不等於 GPU 已完成這幀。
+全域 guest GPU timestamp 的等待開關 A/B，與移除 host 的 25 ms 假完成，詳見 `PROGRESS.md`「動畫閃爍調查」。
+正式條件必須是 producer 完成後才開始 blit，blit 完成後才 retire；單有 RESOURCE_FLUSH completion fence 不足。

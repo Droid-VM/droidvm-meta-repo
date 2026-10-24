@@ -3,6 +3,229 @@
 更新：2026-10-24。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 最新交接（2026-10-24 19:15，以下狀態優先於歷史段落）
+
+使用者要求修好已知問題，並在額度將盡時交接；19:09已補入新guest測試結果。隨後使用者授權commit與push：七個程式碼repo已推到Droid-VM的WIP分支並核對遠端SHA，下表與本文件由meta repo本次commit保存。未合併正式分支，未再部署或重啟VM。下一個session從下列視覺驗證繼續；不要重跑已完成的API回歸。
+
+### 已提交與推送（2026-10-24 19:15）
+
+| Repo | 遠端分支 | Commit |
+|---|---|---|
+| DroidVM meta | `wip/hackintosh` | 本次commit（含本文件與兩份survey） |
+| NativeMetal | `wip/hackintosh` | [`f6b22c7fd`](https://github.com/Droid-VM/NativeMetal/commit/f6b22c7fdd0ff4fbac795b6bd3a6a895e5ab7de2) |
+| NativeMobileDisplay | `wip/hackintosh` | [`4a78d78a0`](https://github.com/Droid-VM/NativeMobileDisplay/commit/4a78d78a049393c0069c7fdd226d9257666aa12c) |
+| DarwinBoot | `wip/droidvm-virtio-gpu` | [`af934b218`](https://github.com/Droid-VM/DarwinBoot/commit/af934b218ab0e80fa3f1493bc15efa7b222f01de) |
+| edk2-gunyah | `wip/hackintosh` | [`67b9dba4a`](https://github.com/Droid-VM/edk2-gunyah/commit/67b9dba4aaef7491e9339457131cd1367429bd33) |
+| crosvm | `wip/virtio-mmio` | [`1ef32747d`](https://github.com/Droid-VM/crosvm/commit/1ef32747d57772b6e89af41a18be9495276e9a0c) |
+| UniXNU | `wip/droidvm` | [`ee843ef3e`](https://github.com/Droid-VM/UniXNU/commit/ee843ef3ed9b61d7f0ab28f4c9b6c10d6466e079) |
+| UniXNU-droidvm | `wip/hackintosh` | [`b24054b63`](https://github.com/Droid-VM/UniXNU-droidvm/commit/b24054b63496e08f7d25c3c7679a43c0ef2c7e64) |
+
+- NativeMetal、NativeMobileDisplay、DarwinBoot已建立Droid-VM forks；UniXNU的`.gitmodules` URL與三個gitlink均指向已發布版本，可由遠端取得相依commit。
+- 程式碼repo工作目錄乾淨；meta的既有`DroidVM_20260903.zip`未納入。rig私有設定、報告、影像、binary與Python bytecode未納入。
+- GFXBench原checkout的12個tracked diff與唯一untracked testlist均完整收錄於device的`compat.patch`，不需另提交第三方checkout。patch hash與reverse-apply檢查通過。
+- 本次保存前的檢查：Python／shell／TOML／JSON語法、rig privacy scrub與diff whitespace通過；UEFI保留既有CRLF，compat.patch保留上游context空白。沒有重跑昂貴build；沿用下列已完成的實機與Mac測試證據。
+
+### 最新發現與修正
+
+- **這次卡畫面已有明確的紋理建立錯誤證據。** backboardd telemetry 累計約6039次 IOSurface texture refusal；要求 `1024×1366`，rowBytes `5632`、allocation `0x580000`，runtime 回 `BufferTexture(PastBuffer)`。GPU lost mask、host request failure、UNBIND failure計數均為0。圖像卡住不能只靠GPU loss判斷。
+- **NativeMetal bridge 確實漏傳旋轉相關 SPI。** 原 `NmbTextureDescriptor` 只傳10個公開欄位，丟掉 `rotation`、`framebufferOnly`、`isDrawable`；texture getter又硬回rotation0／framebufferOnlyNO。底層 metal2vulkan runtime 已實作旋轉IOSurface，包括按旋轉交換physical stored extent，原bridge卻走未旋轉的bounds check。
+- 已補 C/Rust descriptor、兩向轉換、Objective-C descriptor讀取與texture getters，新增 `ROT imports`／refusal的surface尺寸與rotation診斷。**不猜測旋轉值、不改pool、不新增全域fence。** 仍需看實際backboardd的ROT計數與畫面，才能把這個已證實的API缺口與所有視覺問題完整連起來；文字破圖及較早的KGSL hang尚不能宣稱都修好。
+- 新MetalCheck **第29項**使用256×64 physical IOSurface，測rotation1/2/3/4、非正方形logical extent、四象限顏色，直接逐像素核對IOSurface physical bytes；這是compositor使用的**private SPI**，非完整Metal conformance。
+
+### 測試證據與尚未完成的驗證
+
+1. **Mac：29 PASS／0 FAIL／0 SKIP，三項benchmark PASS。** `rig/out/rotation-fix/host-rotation.json`；case29約90ms。
+2. **舊guest外掛：28 PASS、case29 FAIL**，`counted:261376 > length:65536`，與現場bounds錯誤同類。`rig/out/rotation-fix/before/{app.json,report.json,progress.log}`。
+3. **熱換bundle的第一次after結果無效，實際仍載入舊外掛。** 已改名 `rig/out/rotation-fix/stale-overlay-attempt/`。Data路徑已是新md5，但System overlay仍是舊md5。bindfs會保留舊vnode，僅rename替換backing bundle不足以更新System讀到的版本。
+4. **新guest外掛已通過：29 PASS／0 FAIL／0 SKIP，三項benchmark PASS。** 19:08再次核對System與Data兩個路徑md5均為新版本 `56e436a670304ccfe7ea3d9e6922b0ba`；實測結果在 `rig/out/rotation-fix/after/{report.json,app.json,progress.log,pressure.jsonl}`。case29四種旋轉的CPU逐像素oracle全過（474.83ms），原28項也全部通過，GPU/kernel錯誤計數檢查無新增失敗。`visual_check=NOT_ASSESSED`，**尚未證明桌面閃爍／卡畫面已消失**。切勿把stale-overlay-attempt算成新版本結果。
+   - 此次offscreen端到端吞吐：render58.94M pixels/s、compute233.94M float-elements/s、blit3.293GB/s。單次短測且背景負載未控制，不能據此斷言效能回歸或改善。
+5. 前輪壓測20輪／301.76秒API輸出正確但視覺FAIL的原證據仍在 `rig/out/metalcheck-guest-stress-final/`；`report-automated.json`是API/counter結果，`report.json`是補入視覺失敗後的總驗收。沒有刪除或改寫原始失敗證據。
+
+### 當前實機／版本（原始碼已commit、push，見上表）
+
+- 活躍rig：`/root/gitrs/UniXNU/droidvm`（下文 `rig/` 均指此目錄）。device repo：`/root/gitrs/UniXNU/UniXNU-droidvm`；fork：`/root/gitrs/UniXNU/orgrepos/UniXNU`。
+- VM **pid26569**、backboardd **pid59**。`vm.sh restart` 已完成control-socket stop、10秒回收、pool2560/2560 active0後start；工具session37364已成功結束：display/input可達、無kernel panic／GPU loss／display command error，producer wait1、early retire0。不要另起VM。
+- 舊hostwatch已不在；19:08已重新啟動rig `python3 hostwatch.py`，**host PID1759287／tool session48667**，確認VM pid26569仍在、pool served2560。所有VM生命週期繼續遵守 `hugepage-harness.md`；以下次實際ps／phone owner狀態為準。
+- kernel仍 `a308bca0261049d5dbf98c69584b8d42e93471bf95a8a25646df3ef03bb14fee`；crosvm md5仍 `a340264b32b3bab69b5ff303aeedff5e`。
+- 新plugin CDHash `2f26cd759fa463deb7be5f2c93adfa4a50b4d13b`，md5 `56e436a670304ccfe7ea3d9e6922b0ba`；新daemon hash `a599f9e0cb5e839b3af49080bcbb493571a2e817`（daemon未另行部署）；Turnip hash仍 `9010aa4629ec14adf4ad3844ba47584f0d981d61`。
+- 新MetalCheck CDHash `e39e7583cc588d163820f05f1e52cea49fdbf092`。目前bootdisk trust SHA `4cfe75e276af2ca169198a161f19df4f5ba022d5fb7a3773f0a5c60415a78fd0`，保留舊hash供回退。
+- device `board.toml` 已在此次commit中更新trust pin為目前部署的 `4cfe75e…`。**Mac device checkout尚未同步此次commit，仍可能是舊pin `f7975a7b…`。** 此前只把新trust mcopy進現有FAT，沒有重建payload；下次重建前先同步已提交source與Mac，勿用舊payload整包覆蓋目前bootdisk。
+- pseudo-unprotected；guest BO pool仍512MiB（guest RAM內allocator，不是額外VRAM）；`tu_debug`仍是實驗性的 `nocb`；producer wait1、early retire預設0；Data seed12GiB未變。bootargs1004bytes，1023上限。
+- 備份：guest `/private/var/ngpu/plugin-before-rotation` 是舊plugin；rig `out/rotation-fix/old-disk.img`／`old.trustcache`；新app/plugin/trust都在 `out/rotation-fix/`。
+
+### 下一個 session 直接做
+
+- 新guest29項與三項benchmark已通過，`rig/out/rotation-fix/after/`已存在，**不需重跑或覆寫此目錄**。剛才的runner已結束，目前僅hostwatch繼續運行；沒有持續benchmark。
+- 先確認hostwatch活著與VM ready，不需重新開機。接著啟動GFXBench，觀察是否還有PastBuffer／舊畫面；讀 `native_adreno_metal_rows`（48×96 bytes）中的 `ROT imports`、`SR`與`P0`。目前telemetry table是全域、可能被其他process交錯寫入，勿把混雜字串當成可靠單一process結果。
+- 若GFXBench可操作，選單只選低階ALU2測項；不要預設勾選整套。GFXBench的runtime `newLibraryWithSource`尚未驗證，出錯須保留原始錯誤，不能預先斷定compiler壞掉。
+- 重跑5分鐘MetalCheck＋跨App／旋轉／Today View／Spotlight，**同時做視覺驗收**；原自動runner只驗API與kernel counters，明示 `visual_check=NOT_ASSESSED`。若文字破圖仍在，繼續取證，不宣稱旋轉缺口解決所有問題。
+- 本輪新增source修改：NativeMetal的 `NativeBridgeMetalFrontend.mm`、`bridge/NativeMetalObjects.{h,rs}`；device `package/metalcheck/Core.mm`（case29）、README。當前Mac **build tree**已同步並成功build；Mac根checkout的NativeMetal尚未同步本輪rotation改動，重建tree前先從本機fork同步，避免被舊root覆蓋。
+- build logs在Mac `$BUILD_OUT/plugin-rotation-fix.log`、`metalcheck-host-rotation.log`。使用rig `rigenv.sh`中的BUILD_HOST/BUILD_OUT，**不要列印rig.env或token**。
+
+### 粗篩但未證實的其他風險（先不亂改）
+
+- pooled BO release沒有scattered BO的user-pmap保留檢查，可能在舊CPU view存活時重用extent；未觀察到實際存活mapping，不可當根因。
+- `DroidVMGpu.cpp::dropPieces()`忽略UNBIND/FREE失敗；本次現場相關failure counters為0。
+- frontend `iosurfacePlane`硬回0；descriptor `swizzle`未傳，swizzled-view selector未實作。GPU plane import offset本身有傳對；先捕捉CA是否真的用非identity swizzle／plane getter再擴大修改。
+- host顯示GUEST blob路徑的udmabuf、Vulkan import與AHardwareBuffer cache生命週期粗篩未找到直接錯誤；latent rebacking/remap invalidation缺口不在當前active路徑。
+
+## 本輪進度（2026-10-24，實作中）
+
+已接回 Codex session `01a16aa5-ff19-7362-96c6-ee7dfc26131d`。使用者在該 session 同意直接以
+**virtio-gpu 顯示＋drm2kgsl 3D** 為目標，並要求**移除 simplefb device**；以下舊交接的「保留 simplefb」方案已被取代。
+
+- 上輪已完成並編譯：crosvm `--virtio-mmio-gpu`、ADT 的 GPU 節點與獨立 boot-video RAM、DarwinBoot 的 BLT-only GOP 交接。
+- 本輪新增：`DroidVMVirtioGpu.cpp/.h` 共用控制 queue／fence transport；`DroidVMVirtioGpuDisplay.cpp` 顯示 client，
+  支援 classic 2D 與 guest-handle blob，持有 IOSurface 頁面到 RESOURCE_UNREF 完成，flush fence 完成才 retire swap。
+  XNU kernel 已編譯通過；實機已能無 simplefb 開機、顯示鎖定畫面／主畫面／小工具／萬花筒桌布／設定，輸入與網路正常。
+  scanout 走主機 udmabuf GPU blit，guest 的 `native_legacy_copy_n` 與 GPU fallback 都維持 0。
+- crosvm 補上純 GUEST blob 的 iovecs；MMIO 裝置註冊補呼叫 `on_sandboxed()`，讓 GPU renderer worker 能啟動。
+- edk2-gunyah 的 GPU 驅動補 `SetQueueNum()`：實測舊版在 MMIO 上把 queue size 留為 0，卡在 UEFI。
+  `PcdVideoResolutionSource` 改為 unset，讓 GOP 採用 host 的 1366×1024。DarwinBoot 的 preferred boot-video 區域
+  若已被韌體占用，改從上限以下配置對齊的空閒 RAM，再降低 XNU reclaim limit；實際位址以 handoff.env 為準。
+- 首輪確認：實際 GPU 位址 `0x0a009000`，舊裝置位址不變；無 simplefb 時 RAM 為 `0x80600000+0x13fa00000`。
+  全部 2560 大頁由池供應，各輪正常 stop 後全數歸還。3D 仍使用既有 droidvm-gpu proxy，尚未換成 drm2kgsl。
+- rig：沒有本次開機的新 DarwinBoot handoff 就停止探測，避免拿上次 kernel 位址判斷；health 顯示 virtio-gpu 計數；
+  show-vm 從 VM 設定選擇 gpu-0／simplefb 及解析度，不再寫死 simplefb。
+- 既有映像與設定備份在 rig 的 `out/virtio-gpu-before/`；12 GiB Data seed 未變更。新韌體使用 VM 專屬
+  `edk2-virtio-gpu.fd`。此輪各 repo 修改目前尚未提交。
+
+接續順序：先驗證無 simplefb 開機與 blob 顯示 → XNU 3D context／資源／IOKit ABI → turnip `vdrm_iokit`
+及 IOSurface 匯入 → 跨 client 同步 → 主畫面／設定／桌布／Safari 與幀時間驗收。
+
+### 已知問題修正續行：旋轉紋理（2026-10-24）
+
+使用者要求修好已知問題，已恢復追查display與GFXBench。直接讀backboardd的Metal telemetry找到6000多次IOSurface texture建立失敗：要求1024×1366，但row5632／alloc0x580000對應既有橫向surface；runtime回BufferTexture(PastBuffer)。原frontend與C/Rust DTO丟掉MTLTextureDescriptor的rotation/framebufferOnly/isDrawable，texture getter也硬回rotation0與framebufferOnlyNO。底層runtime已有rotated IOSurface路徑，故本輪補傳真正SPI值，不以尺寸猜旋轉、不新增全域fence。
+
+新增MetalCheck第29項：256×64 physical IOSurface、四種rotation、四象限圖案，逐像素核對physicalstore；Mac29/29與三項benchmarkPASS。舊guest外掛明確29失敗（counted261376 >65536），其他28PASS：`out/rotation-fix/before/`。
+
+新plugin已build/sign，CDHash2f26cd759fa463deb7be5f2c93adfa4a50b4d13b，md5 56e436a670304ccfe7ea3d9e6922b0ba；newMetalCheck CDHash e39e7583cc588d163820f05f1e52cea49fdbf092；trustSHA4cfe75e276af2ca169198a161f19df4f5ba022d5fb7a3773f0a5c60415a78fd0。新plugin與old都保留trust供A/B。
+
+**部署陷阱實證：** 同一boot對`ngpu/addons/NativeAdrenoMetal.bundle` rename換目錄，Data讀到新md5，但`/System/Library/Extensions/NativeAdrenoMetal.bundle/NativeAdrenoMetal`仍是舊7aa886…（bindfs cached vnode）。所以`out/rotation-fix/stale-overlay-attempt/`不是新plugin測試結果。現正依harness正常restart，使systempath更新後再驗。未根據猜測改GPU pool、hostcache或更多fences。
+
+### 14:49 接回 GPU benchmark／壓測（進行中）
+
+使用者要求先停止不穩定的閃爍復現，回到 GPU 壓力測試。維持 pseudo-unprotected、512 MiB guest BO allocator pool、producer wait=1、early retire=0；未進行 pool=0 實驗，也未新增全域 fence。
+
+- 新版 loss status 部署後仍曾發生 context loss；它傳遞錯誤，但不會自動重啟 compositor。`out/loss-status-news/` 的最後一次不是乾淨 News-only 測試：使用者同時操作 Safari。不能據此斷定 News 單獨觸發。
+- 暫用 `/private/var/ngpu/tu_debug` 的 `nocb`（只停 concurrent binning、保留 GMEM）後，Safari→Home→News→Home 六輪沒有新增 loss；`out/mixed-apps-nocb/report.json`。仍屬實驗，尚非 hang 根因修復。
+- Metal Check 舊 guest 26/28 揭露兩個真實 bridge 缺口：indirect compute selector 未接到 runtime，以及 render-pass resolve texture 完全未傳遞。NativeMetal 現已補 indirect dispatch、resolve texture／mip／slice／depth plane、depth/stencil resolve filter，並保留資源 lifetime。
+- case 6 加強為前段 GPU blit 寫入 private indirect buffer 的非零 offset；case 19 改為 resolve 到 mip 1、array slice 1 並檢查全部像素。Mac 與 guest 都 28 PASS／0 FAIL／0 SKIP，三個 benchmark PASS；guest 報告 `out/metalcheck-guest-enhanced/report.json`，沒有新增 GPU loss。
+- 該 guest baseline：render 74.76 M pixels/s、compute 252.55 M float-elements/s、blit 3.027 GB/s。這是指定 offscreen workload 的端到端吞吐，並非面板 FPS 或峰值 GPU 規格。
+- 新 `metalcheck-run.py` 收集 app JSON、progress、GPU loss、pool／guest page counts、host memory PSI，且不修改 fence 策略。App 增加五分鐘 stress、額外記憶體 0／128／256 MiB、每輪驗證與停止控制；CLI 允許 1–86400 秒與 0–512 MiB。
+- 首次 guest 長測 `out/metalcheck-guest-stress-300s/report.json`：303.98 秒，9 輪，28 項 correctness 與全部 workload／resident buffer byte checks 通過，沒有 loss、display errors 或 timeout。含桌面操作與一次明確 SpringBoard restart（研究安裝）；不是純效能 baseline。發現 CPU byte-check 每次迭代重查 Objective-C buffer length，已移到迴圈外；新 app 待重測。
+- 兩個 App 已能以 installation dictionaries 註冊為 installed/valid，單用 `registerApplication:` URL API 不能建立完整新記錄。第一次註冊路徑 `/var/ngpu/apps` 遭 xpcproxy process-exec System Policy 與 iconservicesagent file-read-data 拒絕；正在改由 MCMAppContainer 保存 app，MCMAppDataContainer 保存 metadata，CLI 原路徑留 symlink。App 簽章的 no-container=true 保持一致，不能因此標成 IsContainerized=true。
+- 新 helper `lsdiag owner-install` 僅搬動 org.droidvm apps，同 volume rename、拒絕現存目的地；`owner-register` 使用真實 XML signed entitlements 和 container metadata；`launch` 走 LSApplicationWorkspace，須先解鎖。GFXBench 的 UI 與 runtime source compilation 尚未驗證。
+- 當前 kernel a308bca…、crosvm a340264… 沒變。Metal plugin CDHash `7929ff6731ad80117455e37c1102f4d595bebd3b`，md5 `7aa886f69f4f125ed1cf8034f222c12c`。本輪只更新 apps／plugin／trustcache，沒有重建 Data seed。最新版 MetalCheck CDHash `4c558c5375d54a7b8574c912b52a8155cc4da513`；lsdiag `9dedf86c03876da02ec908decd9a67414b1e03e6`；trust `71df10e69538231ce8733299dffbfec1d81d13cdc2aaa5b0405cf74e2d19d871`。
+
+### benchmark 安裝與實測更新
+
+- Metal Check／GFXBench 已用 MCMAppContainer 實際移至標準 bundle container；`ngpu/apps/*.app` 保留 symlink。Data seed 不變。舊位置被 System Policy 拒絕 UI exec，並非 Metal app 編譯失敗。
+- MetalCheck 實際 UI（UID501）已啟動；Correctness + Performance 28/28 與三個 workload 都通過，`out/metalcheck/ui-performance.json`。停止控制在完成3輪後回傳 CANCELLED，`ui-stress-stop.json`；目前 report 保存 `/private/var/mobile/Documents/MetalCheck/latest.json`（簽章為 no-container）。
+- 最終 app 長測 `out/metalcheck-guest-stress-final/`：301.76秒、20輪 API／resident buffer oracle PASS，active loss mask 0、歷史loss沒有增加。但畫面保留舊 MetalCheck內容及文字破圖，即使 Home 與 GFXBench foreground transition 在FBS logs已完成。結束後也未自動恢復。**整體驗收FAIL**；`report-automated.json` 保留原API/counter PASS，`report.json` 加入獨立視覺判斷並標FAIL。不是GPU hang根因定論，不能宣稱nocb解決閃爍。
+- 視覺證據：`out/benchmark-home-after-gfx.png`、`out/metalcheck-post-stress-display.png`、`out/gfxbench-startup-logs.jsonl`。Android detach/reattach未恢復內容；明確SIGTERM backboardd58後恢復，GFXBench loading畫面可見。舊trace未取得backboardd role T，不是它當時已死的證據。
+- rig `metalcheck-run.py` 現在明示 `validation_scope` 與 `visual_check=NOT_ASSESSED`，印出API/counter PASS，不自動宣稱畫面正確。
+- GFXBench 在恢復後仍停在 loading，但NSUserDefaults的LastSuccessfulSync已更新，所有worker/main idle，表示初始化完成通知未讓controller跳轉。已補 NUIAppData.serviceReady、viewDidAppear補查與一次性segue guard；Mac增量build PASS，正在部署驗證。compat patch SHA變更為`f79c92798f54212851fbcd0a88ad3e6fe7dfc964752c70991f71fad255fbb9bf`，source pin與build script同步更新。
+- 新GFXBench CDHash `a89f8f50ac8e113c9469ced0202cfe9f06e26659`，新trust SHA `f7975a7b29289ed85b83f74b83e076570e333990f61ca1542a42dd05647798bd`。標準bundle container受DataVault保護，root toybox mv仍被拒；實際以有AppBundles entitlement的lsdiag copy更新已停止的app，5檔均回done，接著checksum／sync／正常stop。沒有搬重複2.6GiBassets。`board.toml` trust hash已同步到Mac。
+
+### 本輪收尾狀態
+
+- GFXBench loading防通知遺失修正已部署；exec md5 `c412c0699ad9dc1bf8c793047c66aa43`。重開機後兩個MCM app記錄仍installed/valid，證明安裝資料已持久化。GFXBench服務LastSuccessfulSync更新，但畫面仍可能保留loading或前一個Home，與foreground logs不同；**不能認定通知競態就是此次卡畫面的根因**。該防競態修改未取得端到端UI通過證據。
+- GFXBench目前只確認build/sign/install/processlaunch，**尚未成功執行任何GFXBench workload，也沒有有效GFXBench分數**；runtime `newLibraryWithSource`仍未驗證。root直接啟動UIKit command-line分支的最小ALU smoke在90秒後timeout且無輸出，已明確TERM該root診斷程序，不能把它當成shader compiler失敗證據。
+- 使用者要求先回到壓測，故本輪不擴大修改display/fence/pool去追此卡畫面。MetalCheck UI已實測可用，壓測可透過UI或`metalcheck-run.py`啟動；當前CLI/app是含byte-loop優化的版本。GFXBench留作已安裝、未完成運行驗收的項目。
+
+最後恢復：VM pid16351，backboardd450，MetalCheck重新以UI啟動；final health沒有kernel panic／GPU loss／display error，early retire0、producer wait1。GFXBench的root與UI診斷程序已TERM，無benchmark持續運行。hostwatch仍保持監視。最終摘要在rig `out/benchmark-final-status.json`；來源修改尚未提交。
+
+### 動畫閃爍調查（同日，使用者要求優先處理）
+
+可重現操作：主畫面右滑開今天概覽（背景模糊），回主畫面後下滑開搜尋與鍵盤。靜止後內容正確，動畫中圖示消失、
+背景回到未模糊／只有桌布的中間階段。已確認同步鏈少了一段：
+
+1. `native_legacy_gpu_offer` 交付 IOSurface 後直接發出 scanout，沒有等待寫入這一幀的 guest GPU 工作。
+   Android display 的 Vulkan acquire barrier 也沒有帶 guest producer semaphore；它等待的 acquire fd 是**目標 AHB** 的 release fence。
+2. crosvm 原有的 display release fence 超過 25 ms 便 `completing anyway`。原始測試開機 log 至少記到
+   fence 5253、5263、5277、5283 四次，會讓 guest 提早重用仍被 host blit 讀取的來源。
+
+實驗：已部署移除 25 ms 假完成的 crosvm。guest 增加 `droidvm_virtio_present_wait` 可切換的診斷版：
+offer 時捕捉 droidvm-gpu 已提交的全域 timestamp；worker 在 scanout 前查 retired，開啟時等到 retired 到達目標。
+**OP_WAIT 成功只代表當時阻擋 timeline 的最舊 context 完成，所以每次醒來仍須重讀全域 retired。**
+producer wait 或 transport 失敗時保留 outstanding swap／頁面，不以 CPU fallback 假裝完成。
+
+同一開機的有效 A/B（rig `out/flicker-home-{off,on}.{mp4,json}`，兩次都先用 Home 按鈕回主畫面）：
+- off：399 次 probe 中 335 次 producer 未完成；影片可見只剩桌布、圖示消失的中間幀。
+- on：408 次 probe，319 次需要等待；等待合計約 1.99 s（約 4.9 ms/probe，非總幀時間），中間幀閃爍明顯減少。
+- 兩次 virtio command errors 都是 0；CPU copy／fallback 仍是 0。這是短時間診斷驗證，尚非全部畫面無閃爍的驗收。
+- 早期 `flicker-strict-no-producer-wait`、`flicker-producer-wait-on` 影片因 native Surface 未連好而全黑，不作視覺 A/B 證據。
+  若 activity 顯示 Connected 卻沒有 SurfaceFlinger buffer，先返回 Android 上一頁再跑 `show-vm.sh`。
+  不要在 UEFI 接管期間提前 attach：UEFI→XNU 的 GPU reset 會換掉 surface；rig 已撤回該實驗。
+
+**復現前狀態（2026-10-24）：** `droidvm_virtio_present_wait` 的編譯預設已改為 1，當時已部署並重啟驗證。kernel 為 unpatched kernel（sha256 `d1bd2fe2e018e7b0da94598a9b9e50ea9392f456771befa066a5001cf930f408`）；crosvm md5 維持 `6437f8035188c83721c9312b0b3bde15`。這只確認 producer wait 與錯誤計數器狀態，尚未證明視覺正確。
+
+**歷史 soak（復現前）：** rig `out/display-soak-20261024-070523/report.json`，`passed: true`；30 輪、365.46 秒、8746 display frames。command errors、timeouts、CPU copy、fallback 的增量皆為 0；`backboardd` PID 57 全程未變。新增 crash 僅 `SiriSearchFeedback`。這個 passed 只代表當時的計數器與程序檢查通過，沒有檢查 `early_retire`，也不代表畫面視覺正確。
+
+**歷史手勢效能對照（復現前）：** `out/display-profile-20261024-071145.json`，`passed: true`；ON/OFF/OFF/ON 各 3 輪。ON 1174 swaps、平均完成間隔 33.383 ms；OFF 1170 swaps、33.677 ms，約 29.95 vs 29.69 swaps/s。數值包含手勢間隔，代表 guest swap 完成速率，不是面板 FPS；短測不足以宣稱所有負載都沒有回歸。ON producer wait 平均 6.23 ms、P95 13.929 ms；OFF 平均 0.655 ms。當時 `sheng-early-retire` 仍為 1，這些數值保留作歷史紀錄，不能當成完整正確同步路徑的效能基線。
+
+**07:24 再次閃爍（2026-10-24，驗證中）：** 使用者回報動畫再次閃爍；`out/flicker-recurrence.mp4` 與 contact sheet 清楚顯示主畫面和純桌布交替。錄影當時 producer wait 為 1、virtio display state 為 2、errors/timeouts 為 0，`backboardd` PID 57 沒有重啟，因此先前穩定的程序與錯誤計數器未能發現視覺錯誤。
+
+漏查原因是 NativeMobileDisplay 原有 `sheng-early-retire` 預設為 1，`early_retire` 已累計約 27,800 次。保留 `IOMemoryDescriptor` 只保住 allocation，不會阻止 guest 重寫來源內容；先前 30 輪 soak 的 passed 只代表計數器檢查通過，不代表視覺正確性或完整同步路徑。
+
+07:29 已在 `board.toml` 與當前 bootdisk 設定 `sheng-early-retire=0` 並重啟；health 顯示 `early_retires=0`、producer wait 1、state 2、errors 0。當前仍是 kernel sha256 `d1bd2fe2e018e7b0da94598a9b9e50ea9392f456771befa066a5001cf930f408`，靠 bootarg 0 修正。`NativeLegacyDisplay.cpp` 的 source default 0 已編譯成功，新 unpatched kernel sha256 `6f51b31caa771fcf0396aea9f9ef2a056caf8389b724cd3d5161d9b6d8cc9460` 尚未部署。後續 8 輪手勢已跑，但因期間發生 GPU Lost 而作廢。health/soak 現在會檢查 early retire 為 0，並追蹤 `boot_frames`。
+
+NativeMobileDisplay submodule 剛初始化在 local commit `8666a9950c9699b368931d18cac92c0fdb2ce9c0`；其 `default=0` source 修改尚未提交。
+
+**07:40 進一步定位：persistent flicker 是 3D context lost 後重播舊 surface。** 使用者已確認完全沒有操作，皆由 rig 控制。
+host KGSL 在 UTC 23:23:33／23:30:22（台灣 07:23／07:30）報 GPU hang；crosvm 兩次均記錄
+`client 0 lost its GPU context 23 (WAITTIMESTAMP ... os error 35)`。guest `droidvm_gpu_lost[0]=1`，
+`gPresentSubmitted=2115` 停住，但 display counter 繼續增加，backboardd PID 57 仍活著。讀三個 udmabuf 的實際像素：
+兩張有鍵盤、另一張沒有，都是 16:30 的舊內容，與 Android 錄影交替的畫面一致。
+`out/display-soak-20261024-072955/` 的 8 輪及 `out/display-profile-20261024-073336.json` **作廢為效能／正確性證據**：
+它們未檢查 3D context loss 與新 GPU 提交，只計到舊 surface 重播。約 1 ms 的等待與約 40 swaps/s 不是效能改善。
+boot_frames 在該段沒有增加，因此該次交替也不是切回 boot framebuffer。
+
+取證：rig `out/flicker-device-lost-{dmesg.txt,crosvm.log,backboardd.log,trace.txt}`、
+`out/flicker-kgsl.snapshot`（4,863,040 bytes）、`out/surface-recurrence/{390,393,395}.png`。
+udmabuf fd 不能直接 open `/proc/PID/fd/N`；診斷 helper `/tmp/droidvm-dmabufgrab.c` 用 pidfd_getfd 後 mmap 讀出。
+07:45 對 backboardd PID57 送 SIGTERM，launchd 起新 backboardd PID439／SpringBoard PID441，
+正常回到鎖定畫面；解鎖後提交已到 2408。這是人工恢復實驗，尚非自動恢復或 hang 根因修正。
+恢復後有效的 3 輪 counter-soak `out/display-soak-20261024-074741/report.json` 通過：提交 2765→5620、context loss 1→1、1316 display frames／82.59 秒，errors／timeouts／early retires 增量為 0。這是計數器與提交前進證據，不是視覺驗收。
+health 已加歷史 context loss 警示；soak 會拒絕新增 loss 或一輪手勢期間 GPU 提交完全不前進。
+恢復後短測已完成，counter 結果見上方 3 輪報告。source retire/default 與 host 25 ms 假完成仍是應修的同步缺口，不能把它們當作此 hang 已解決。
+
+**09:02 News 重現與部署：** 使用者回報「打開 Apple News、等待新聞載入、回桌面」後復發。
+crosvm 在 01:02:56 UTC 記錄 client 0/context 23 的 GPU_COMMAND EDEADLK；本次 boot loss[0] 由 1→2，
+backboardd 439／SpringBoard 441 未重啟。`out/flicker-current-0854.mp4`（實際約 09:05 錄影）顯示 News 與桌布反覆交替。
+仍是舊 kernel／plugin；錯誤傳遞修正當時尚未部署。KGSL dmesg：ts184209，IB1=0x600a2c4000/0x44，
+IB2=0x600b15a000/0。KGSL snapshot 無法映射 active IB，dump 本輪為空。
+
+已用 cpu_ttep 與三個已知 kernel image 符號核對 4 KiB／38-bit VA page walk，讀出兩個仍存活的 BO、1612 筆 GPUVA mapping，
+並在暫停 backboardd 後保存 512 MiB BO pool；資料在 `out/flicker-current-0854-gpu/`。
+兩個 BO 的單獨讀取與 pool snapshot bytes 相同，mapping 在讀取前後一致；但這是 fault **之後**的內容，
+不能排除 fault 到凍結期間曾被改寫。cffdump 已建置，IB2 可解碼為 GMEM→UBWC color resolve；尚非 hang 根因定論。
+
+09:15 正常 stop，10秒後 pool2560/2560、active0。部署 kernel a308bca…、crosvm md5 a340264b32b3bab69b5ff303aeedff5e、
+NativeMetal plugin md5 f8b4d5c4e206b3001282a3f2e8be24a9，以及含兩個 benchmark 的 owner trust be8eff89…。
+Data seed／ADT／DarwinBoot／EFI hash 均與備份相同。首次開機因 boot args 1025 bytes 超過1023被loader拒絕，未進XNU；
+移除與新kernel預設相同的 `sheng-early-retire=0` 後1004bytes，保留source預設0；rig deploy增加長度檢查。第二次開機驗證中。
+GFXBench app與MetalCheck app已寫入Data `/private/var/ngpu/apps/`，GFXBench archive兩端SHA256 cda6c824…一致；
+尚未註冊／啟動guest app，不能視為已完成預裝驗收。
+
+目前尚無自動 GPU 恢復機制。producer／transport 逾時時保留 outstanding，不假裝完成。每個 IOSurface 精確綁定 producer 依賴是後續效能優化；接入 3D 前須隔離 renderer fence 與 display fence。
+
+完整正確性驗收仍未完成。測試期間必須確認 early retire 為 0。把「producer fence → blit → 真實 display release fence → retire swap」設為必要條件；
+先保留全域 timestamp 等待作保守實作，再把 producer fence 精確綁到 IOSurface／swap，避免等其他 client 無關的工作。
+drm2kgsl 3D 接入時要一起銜接此依賴；renderer fence 與 display fence 亦不得互相提前完成。
+逾時保留 outstanding，不假裝完成；自動 GPU 恢復尚未實作。驗收要重複兩組手勢，檢查畫面、fence、頁面生命週期與實際 FPS。
+
+**08:45 待部署更新（2026-10-24）：** NativeMetal 新錯誤路徑用 typed `NSError`；iOS 將 `DeviceLost` 映射為
+`MTLCommandBufferErrorAccessRevoked`（4），macOS 映射為 `DeviceRemoved`（11）。Rust unit、iOS syntax 與 plugin build 通過。
+host wire 保留 `INFO legacy64v3`，新增 16-byte tagged capabilities query 與 `RETIRED` lost mask；guest 在 per-connection
+`GetStatus`／`WaitFence` 前後回報錯誤。內部 cleanup 不 poison 整個 ring，也沒有新增 fence。
+Mac kernel SHA256 `a308bca0261049d5dbf98c69584b8d42e93471bf95a8a25646df3ef03bb14fee` 已建置但未部署；crosvm Android
+完整兩個 build 與三個抽取 metadata unit 通過，完整 Cargo devices build 仍被既有 dependencies 阻擋。
+GFXBench pinned source 已 build、signed，含約 2.6 GiB assets，正在搬入 guest，尚未安裝／驗證。MetalCheck 的 M4 host
+baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未執行。`plans/HOST_PERIPHERALS_SURVEY.md` 已完成；
+下一步依文件先定共同 protocol/capabilities，再做 battery provider；目前仍是方案，未實作或驗證外設。
+
 > 先讀：本 repo 的 `hugepage-harness.md`（**每次開關 VM 都要照做**），以及裝置 repo 的 `tools/rig/README.md`（所有工具）。
 
 ---
@@ -24,22 +247,22 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - **owner 工具：** 可以 ssh 進 guest；有 ownervisor 服務管理、toybox、zsh、lsdiag、gfxprobe。
 
 **已知問題（依優先順序）：**
-1. **動畫中畫面撕裂，且上限約 18 fps。**
+1. **歷史問題（已由新狀態取代）：動畫中畫面撕裂，且上限約 18 fps。**
    - 原因已查清：NativeLegacyDisplay 每一幀用 CPU 把 5.6 MB 寫進 Device 屬性的 simplefb，平均 56 ms；主機端 simplefb bridge 每 16.7 ms 盲目做一次 GPU blit。兩邊沒有同步。
-   - **決定：顯示改成 virtio-gpu，不再用 simplefb 顯示。** 設計和路線見 `plans/IOS_VIRTIO_GPU_SURVEY.md`，下一步就是它（第 7 節）。
+   - 當時決定將顯示改成 virtio-gpu、不再用 simplefb；此項已完成，現況與驗收數據見本文動畫閃爍調查及第 7 節。
 2. **偶發的文字破圖。**
    - 例：設定 app 第一次開啟後，側欄「一般」的文字變成每 3 行一個週期的錯位條紋，看起來像行距錯配，要等重繪才會恢復。
    - 無法照指令重現。
    - 常見的那種（文字被別的 label 的內容取代）已在 fork 9eb0d75 修好：render server 替它 texture 化的 IOSurface 計使用量。
-3. **render server 的 DeviceLost 只出現過一次。**
+3. **render server 的 DeviceLost 已再現，為目前優先問題。**
    - 現象：backboardd 的 client 0 收到 EDEADLK，整個畫面閃爍到重開機。
-   - 目前沒有恢復機制。
+   - 2026-10-24 已再現兩次 host KGSL hang。人工重啟 backboardd 可重新開 context；目前沒有自動恢復機制。
 4. **桌布圖庫的 Pride／Collections 預覽是黑的。**
    - 兩者都在外掛壞掉的那段時間 crash 過；已清掉 GalleryCache，Data 重設後還沒驗證。
 5. **其他：**
    - 設定 app 第一次開啟要 10 秒以上。
    - WebKit.GPU 曾在開裝置時拿到 Vulkan -5。
-   - 開機時有幾個 daemon crash，沒有細查：apsd、imagent、siriactionsd 的 ExcUserFault，還有 OTAUpdate、SiriSearchFeedback、JetsamEvent。
+   - 舊紀錄：開機時曾觀察到 apsd、imagent、siriactionsd 的 ExcUserFault，以及 OTAUpdate、SiriSearchFeedback、JetsamEvent；此項已由上方最新 soak 結果更新，目前新增 crash 僅 SiriSearchFeedback。
 6. **Maps 刻意不放進 GPU client 名單。** 它曾經讓整個 GPU 掉線；後來加了每個 client 一個 context，但還沒用實際的錯誤驗證過。
 7. **Data 剛重設（2026-10-24 改成 12 GiB）。** 桌布要在設定 app 裡重新選。
 
@@ -103,7 +326,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 | UniXNU fork | `UniXNU/orgrepos/UniXNU` | `droidvm` → `git push droidvm droidvm:wip/droidvm`（不推 origin） |
 | crosvm | 本 repo的 `crosvm/` | `wip/virtio-mmio` → Droid-VM/crosvm |
 
-2026-10-24 交接時的 head：
+2026-10-24 最初交接時的head（歷史；最新commit見文件頂端）：
 - meta：本 commit
 - 裝置 repo：`512350a`（rig 工具）
 - fork：`0fecbc8`
@@ -202,17 +425,16 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 7. 下一步
 
-1. **virtio-gpu 顯示**（`plans/IOS_VIRTIO_GPU_SURVEY.md` 第 7 節的 1-3 步）：
-   - **crosvm：** 加 `--virtio-mmio-gpu`，照 `--virtio-mmio-net` 的做法，見 `src/crosvm/sys/linux.rs` 約 1456 行。
-   - **app：** 設定 `screens.gpu-0`：NATIVE、1366×1024、`GPU_2D`。simplefb 的 exporter 設成 NONE。
-   - **guest：** `DroidVMVirtioGpu`，以 `DroidVMDataStore.c` 的輪詢 virtqueue 為範本。
-     - 透過 `LegacyDisplayProbe.cpp` 的 `native_legacy_gpu_offer` 接上 NativeLegacyDisplay，fence 完成時 retire swap。
-     - 每個 IOSurface 一個 2D 資源：寬＝stride/4，B8G8R8X8；scanout rect 1366×1024；`TRANSFER_TO_HOST_2D` 的 offset 一律 0。
-     - 開機期間把 simplefb 的頁面掛成 scanout。
-   - 驅動要拆成「通用 transport＋顯示 client」，之後的 3D 直接沿用。
-2. **文字破圖：** 下次出現時馬上截圖，並記下 backboardd 的 IOSurface 資訊。目前懷疑是某個寬度、某種格式的 IOSurface 行距錯配。
-3. **render server DeviceLost 的恢復：** 偵測 client 0 掉線後重啟 backboardd。
-4. **3D 改走 drm2kgsl**（survey 第 4-7 步），之後再評估 venus／gfxstream。
+本輪完成項：virtio-gpu 顯示已取代 simplefb 顯示，無 simplefb 開機與顯示已實測；過時的 simplefb 閃爍問題描述只作歷史背景，以上方新狀態為準。
+
+1. **GFXBench：** pinned source `89aa956f43836798d1eaaab8ec32d3dc8b02eead` 已 build、signed、安裝至MCM並可啟動程序；畫面切換仍被現有display問題阻擋，尚無workload／分數驗收。
+2. **Metal Check：** host／guest均28 PASS、0 FAIL、0 SKIP，三項benchmark PASS，UI啟動／保存／停止控制已驗證；兩次五分鐘壓測完成。最後20輪API/counters PASS但視覺FAIL（見上文），不是完整Metal或display conformance。
+3. **通用外設：** `plans/HOST_PERIPHERALS_SURVEY.md` 已完成；實作未開始。下一步先定共同 protocol/capabilities，再按 survey 驗證 battery provider；transport 支援不代表 guest OS 原生 API 已接通。
+4. **顯示效能：** 將 producer 依賴精確綁定每個 IOSurface，評估減少不必要的全域等待；接入 3D 前隔離 renderer／display fence。
+5. **GPU 恢復與文字破圖：** 尚無自動 GPU 恢復；若文字破圖重現，立即截圖並記錄 backboardd 的 IOSurface 資訊。
+6. **3D 改走 drm2kgsl**（survey 第 4-7 步），之後再評估 venus／gfxstream。
+
+使用者允許 Luna（max）承接明確、機械性的工作；Sol承接大範圍程式碼／文檔粗篩，由主agent細讀。
 
 ## 8. 文件索引
 
@@ -220,6 +442,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - `plans/IOS_VIRTIO_GPU_SURVEY.md`：iOS guest 改走 virtio-gpu 的 survey 與路線
 - `plans/NATIVE_CONTEXT_PLAN.md`、`plans/VENUS_SURVEY.md`、`plans/VENUS_BRINGUP.md`、`plans/GFX_SHIP_PLAN.md`：Linux guest 的三條 3D 路線
 - `plans/DISPLAY_PIPELINE_DECOUPLING.md`：crosvm 的 screen／frame／exporter 模型
+- `plans/HOST_PERIPHERALS_SURVEY.md`：Android host 外設來源及 iOS／Windows／Linux guest 接入方案（尚未實作）
 - 裝置 repo `tools/rig/README.md`：rig 工具與變數
 - 裝置 repo `board.toml`：開機參數；每一項都有註解說明為什麼要加
 - 各 repo 的 commit message：每個修正的根因都寫在 commit 裡，這是最完整的歷史
