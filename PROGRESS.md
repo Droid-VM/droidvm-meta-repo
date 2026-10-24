@@ -12,7 +12,9 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - **M1**：guest 的 virtio-gpu transport 改成非同步，64 個 slot 同時在途（device `584c038`）。顯示正常，0 錯誤。
 - **M2**：開機自測（`vgpu-selftest=1`）已在 iOS kernel 建出 DRM native context，`GET_PARAM(GPU_ID)` 經 drm2kgsl 讀回 6770（device `c5b8cd3`）。
   - 結果在 `peek.py droidvm_virtgpu_selftest`，第 0 格 stage=9 表示全部通過。
-- 下一步：M3 user client（鏡射 virtgpu ioctl），然後 M4 turnip-virtio 加 `vdrm_iokit`。
+- **M3**：user client 完成（device `f53dcb5`、NativeAdreno `e1272b7`）。`gfxprobe virtgpu` 從使用者行程跑完 context → shmem → ccmd（0.3 ms）→ guest BO → fenced NOP（0.2–1 ms）→ 關閉。
+- NativeAdreno 現在 fork 在 Droid-VM/NativeAdreno（`wip/hackintosh`），fork 的 `.gitmodules` 已改指過去（`c08168a`）。
+- 下一步：M4 turnip-virtio 加 `vdrm_iokit`。
 
 ## 續報（2026-10-25 04:20，Claude）：GFXBench 第一次跑出分數
 

@@ -39,7 +39,15 @@
 - **M2 完成**（device `c5b8cd3`）：開機自測（`vgpu-selftest=1`）全部通過。
   - capset 6（MSM，GPU 6770）→ CTX_CREATE → shmem blob 經 pool 對映（offset 0x200000）→ `SUBMIT_3D` 送 GET_PARAM(GPU_ID) → 在 shmem 讀回 6770。
   - 踩到的坑：host 只會複製回 guest 事先寫在 response 開頭的長度（防 TOCTOU），所以送出前要先寫 `rsp->len`，vdrm_alloc_rsp 也是這麼做的。
-- 下一步是 M3：user client。
+- **M3 完成**（device `f53dcb5`、NativeAdreno `e1272b7`、fork `c08168a`）：user client 已可用。
+  - ABI 在 `package/DroidVMVirtgpuABI.h`。method 0x7200 起，透過 tunnel 呼叫；open type 0x4149 專給 virtgpu，不占 KGSL slot、拿不到 scanout，sandbox 授權方式和 plugin 一樣。
+  - `gfxprobe virtgpu` 實測：
+    - 建 context；shmem 對映進行程；ccmd 0.3 ms 回應。
+    - guest-alloc BO（GEM_NEW 加 HOST3D_GUEST）寫入後讀回正確。
+    - fenced NOP 0.2–1 ms signal；關閉後資源都釋放。
+  - 超過 4096 bytes 的輸入走 OOL descriptor，tunnel 已支援，上限 64 KiB。
+  - NativeAdreno 改從 Droid-VM fork 取（`.gitmodules`）。
+- 下一步是 M4：turnip-virtio 加 `vdrm_iokit`。
 
 ## 1. 里程碑
 
