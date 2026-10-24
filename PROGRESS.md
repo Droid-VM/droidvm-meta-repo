@@ -3,6 +3,31 @@
 更新：2026-10-24。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-24 22:30，Claude）
+
+**swap 卡住 5 秒會讓 kernel panic，已修好（NativeMobileDisplay `e51063d`，device `86ea138`，kernel sha256 `0280870c…` 已部署）。**
+- panic 訊息：`NativeLegacyDisplay: leaf=345 … @LegacyDisplayProbe.cpp:453`。
+- 原因：
+  - backboardd 等一個 swap 等了 5 秒都沒完成時，IOMobileFramebuffer 的 `swap_wait_gated` 會印 "CommandWake didn't happen even after 5 seconds … cancelling swaps"。
+  - 接著它呼叫 vtable 第 345 格，也就是平台那層的取消。family 裡這一格是 pure virtual，之後 family 才自己取消佇列（第 346 格）。
+  - 我們的 NativeLegacyDisplay 在這一格放的是 guard，一呼叫就 panic。
+- 修正：實作成 `cancelSwapsAfterTimeout()`，清掉自己記錄的未完成 swap，family 只拿回傳值印 log。health.py 的 `present` 行新增顯示 `swaps given up after 5 s`。
+- 重現方式：打開下面的偵測器時，三次裡有兩次在開機約 126 秒、一次在 backboardd 重啟 12 秒後 panic。換上新 kernel 後，同樣情境跑了 6 分鐘都沒事。真實 GPU hang 時 producer 永遠不會完成，也會走到這條路徑，所以這個修正和 render server 自動重啟是互補的。
+
+**文字破圖：又排除兩個方向，偵測器留著備用。**
+- 新的 render server 偵測器（NativeMetal `fcdf854`，預設關閉）：
+  - 開法：在 guest 建立 `/private/var/ngpu/debug/source-race` 後重啟 backboardd。
+  - 作用：每個 command buffer 取樣的小型來源（IOSurface 或 no-copy buffer），在送出時和完成時各算一次雜湊。
+  - 結果：MetalCheck 壓測結束的結果文字在畫面上破圖了（rig `out/visual/run3/s14.png`，有一行被換成別處的 `"rounds": [`），但偵測器一筆都沒記錄。所以不是 app 在 GPU 讀取期間改寫來源。
+- MetalCheck case 32：同位址換新實體頁（`MAP_FIXED`）、同尺寸 IOSurface 重建，guest 和 Mac 都通過。所以不是位址重用造成的舊匯入。
+- 已排除的方向：row pitch 對齊（case 30）、cache 一致性（case 31）、app 改寫的競爭（偵測器）、位址重用（case 32）。
+- 下一個方向是 render server 自己的合成流程，例如 CoreAnimation 把小圖層併進 texture atlas 時，更新與取樣的先後順序。這要記錄 backboardd 對破圖區域呼叫的 Metal API 才能查。
+
+**其他**
+- MetalCheck CLI（32 項）在 guest 的 `/private/var/ngpu/bin/mc30/`，trust `d897705e…`。
+- daemon 停機時曾經再死一次，處理方式是 `daemon-recover.sh` 再 `vm.sh start`。它讀的 `unixnu-vm.config.json` 已是 virtio-gpu 版。
+- 萬花筒桌布每次開機都換圖案，`screen-check.py` 的 home 參考圖目前有 4 張（`ref-home*.png`），比對只看它們一致的約 27% 格子。
+
 ## 最新狀態（2026-10-24 20:45，Claude；優先於下方各段）
 
 接手 Codex 19:15 的交接後做了四件事。VM 正在跑，hostwatch 開著。
