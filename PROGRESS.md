@@ -3,6 +3,61 @@
 更新：2026-10-24。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 最新狀態（2026-10-24 20:45，Claude；優先於下方各段）
+
+接手 Codex 19:15 的交接後做了四件事。VM 正在跑，hostwatch 開著。
+
+**1. Mac 建置環境同步，加兩道防呆。**
+- Mac 上的 device repo 原本是很舊的 commit 加上手動複製的檔案，DarwinBoot 也不是 virtio-gpu 版。這兩個 checkout 已用 git bundle 移到已推送的 commit，舊狀態打了 tag `mac-pre-sync-20261024`，差異檔備份在 Mac 的 `~/macsync-20261024/`。
+- `package/Build/Out` 的 DarwinBoot.efi 換成正在跑的 virtio-gpu 版（`fd3404…`）。舊的 simplefb 版也備份在同一個目錄。
+- 新增 rig 工具 `mac-sync-check.sh`：比對 Mac 和本機的 device repo、UniXNU（含 submodule、未 commit 的修改），以及 build tree 裡的複製檔。`payload-redeploy.sh`、`plugin-redeploy.sh` 建置前都會先跑它。
+- `payload-redeploy.sh` 在停 VM 之前，會把新磁碟和正在跑的磁碟逐項比對：
+  - DarwinBoot、UEFI、ADT（解碼後比，忽略 random seed）、Data seed 任一項改變，都要 `ALLOW_CHANGE` 明確允許。
+  - 開機參數超過 1023 bytes 會在停機前就擋下。
+  - 舊磁碟保留在 `out/droidvm-disk.prev.img`。
+- `unixnu build payload` 原本把開機參數限制在 1000 bytes，但 board 的參數有 1004 bytes，所以 payload 根本建不出來。已改成 DarwinBoot 的實際上限 1023（fork `b08b2c4`）。
+
+**2. board 重新能產生正在跑的 ADT（device `685361e`）。**
+- 原因：已 commit 的 board.toml 和 FDT 還是 simplefb 版本，正在跑的 ADT 是手動做的。從 repo 重建的 payload 會缺 virtio-gpu 節點，記憶體也少 6 MB。這次部署時真的發生了：帶錯的 ADT 開機約 20 秒，我正常關機後換回正確的 ADT。
+- 修正：
+  - `package/crosvm-gunyah.dtb` 換成目前 VM 的 FDT。
+  - `dram_size` 改成 `0x13fa00000`。
+  - `[payload.adt]` 加上 `--virtio-gpu-mmio 0x0a009000 --boot-video-mib 8`。
+- 現在 payload 產生的 ADT 除了 random seed 以外，和正在跑的一致。`swap-adt.sh` 也改成用同一組參數。
+
+**3. 畫面驗收：Codex 記錄的「回主畫面卡在舊畫面」已不再發生。**
+- 新工具 `screen-check.py`：同時看手機實際畫面（screencap）和 guest 所有 scanout surface（crosvm 的 udmabuf，用 `dmabufgrab` 讀）。和參考圖比對，失敗時能分出是「顯示路徑」還是「guest 合成」的問題。
+- 參考圖可以存多張，比對只看各張一致的格子，所以不受萬花筒桌布每次開機換圖案影響。參考圖放在 rig `out/visual/ref-*.png`。
+- 照原情境重跑（MetalCheck UI 壓測 5 分鐘＋128 MiB → Home → GFXBench → Home），每一步都正確，結果在 rig `out/visual/run1/summary.json`。
+  - telemetry 顯示 `ROT imports 3=10`，也沒有 surface 拒絕，代表 rotation 修正有效。
+  - GFXBench 現在能進到主選單（還沒跑 workload）。
+  - 從直向 app 回主畫面後，主畫面會維持直向，因為沒有方向感測器把它轉回來。這是正確畫面，參考圖 `home-portrait` 就是它。
+- 反例也測過：MetalCheck 在前景時判定「應該是主畫面」，工具會判 FAIL（guest 合成）。
+
+**4. render server 的 GPU context 掉線後自動重啟（NativeMetal `c86107a`，fork `fe2050f`）。**
+- backboardd 的 command buffer 以 DeviceLost 完成時，等 completed handler 跑完，0.5 秒後對自己送 SIGTERM。launchd 會重啟它和 SpringBoard，畫面回到鎖定畫面。其他 client 照舊只收到錯誤。
+- 已部署：外掛 CDHash `0b64982e…`，md5 `bbe09e91…`，System 和 Data 兩個路徑都核對過。MetalCheck 31/31 通過。
+- **完整流程還沒在真實 hang 中驗證**，因為沒有辦法人為讓 backboardd 掉線。兩段分別驗證過：錯誤會傳到 Metal（Codex 在真實 hang 時看到），SIGTERM 後會恢復（Codex 手動做過）。
+
+**文字破圖（仍未解）。**
+- 可重現：MetalCheck UI 壓測時，按鈕上方那行狀態文字（rig `out/visual/run1/status-zoom.png`）；19:51 也拍到狀態列時鐘破圖。
+- 從 guest 的 scanout buffer 看，同一時間有的幀時鐘正常、有的破圖，所以是某些合成幀讀錯，不是 app 畫錯。
+- 已排除兩個原因，guest 和 Mac 上都通過：
+  - case 30：row pitch 不是 64 的倍數時的 blit 和 buffer texture 取樣。
+  - case 31：CPU 寫 no-copy buffer 後 GPU 立刻讀，沒有讀到舊的 cache line。
+- 下一步：在破圖當下讀出 app 的 backing store，確認它本身是否乾淨；並查 backing store 的「使用中」保護在 GPU 較慢時是否被突破（GPU 越忙越容易破圖）。
+- 另一個觀察：MetalCheck 在前景時，狀態列時鐘停在 5:12，實際已經 5:16。
+
+**現在部署的版本：**
+- kernel `a308bca…`，crosvm md5 `a340264…`，外掛 `0b64982e…`。
+- trust `976ff87c…`。在 Mac 的 `owner-trust-extra/metalcheck-installed-rollback.json` 裡保留了已安裝 MetalCheck app 的 CDHash（`e39e7583…`）。
+- 31 項的 MetalCheck CLI 在 guest 的 `/private/var/ngpu/bin/mc30/`，用法：`MetalCheck --cli --library …/default.metallib`。
+- 新的 heads：device `419021b`，fork `fe2050f`，NativeMetal `c86107a`。
+
+**注意：**
+- 在手機上跑任何非單一指令的東西，一律寫成腳本、`adb push` 後再執行。`adb shell su -c '…'` 會少一層引號，曾經在手機根目錄跑了 tar。
+- `fbgrab.sh`、`frame-burst.sh` 讀的是 simplefb 的記憶體，virtio-gpu 之後已經不是螢幕內容。改用 `screen-check.py`。
+
 ## 最新交接（2026-10-24 19:15，以下狀態優先於歷史段落）
 
 使用者要求修好已知問題，並在額度將盡時交接；19:09已補入新guest測試結果。隨後使用者授權commit與push：七個程式碼repo已推到Droid-VM的WIP分支並核對遠端SHA，下表與本文件由meta repo本次commit保存。未合併正式分支，未再部署或重啟VM。下一個session從下列視覺驗證繼續；不要重跑已完成的API回歸。
@@ -285,7 +340,7 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 | `--virtio-mmio-input` @0x0a003000-0x0a006000 | 觸控、平板、鍵盤、滑鼠 | `package/DroidVMVirtioInput.c` → NativeHidInput |
 | `--droidvm-gpu` @0x0a007000 | 自訂的 KGSL proxy（wire 3） | `package/DroidVMGpu.cpp` ＋ NativeAdreno |
 | `--virtio-mmio-net` @0x0a008000 | en0 | `DroidVMVirtioNet.c`／`DroidVMVirtioEthernet.cpp` ＋ IONetworkingFamily-177（從原始碼編） |
-| `--simplefb 1366x1024` | 目前的顯示（要換掉） | NativeLegacyDisplay（CPU 複製） |
+| `--virtio-mmio-gpu` @0x0a009000 | 顯示（2026-10-24 起取代 simplefb）：guest-handle blob scanout，主機 udmabuf GPU blit | `package/DroidVMVirtioGpu.cpp`＋`DroidVMVirtioGpuDisplay.cpp`，經 NativeLegacyDisplay 的 `native_legacy_gpu_offer` |
 
 **guest kernel：**
 - UniXNU fork 的 XNU，加上 `patches/xnu/*.patch`。我們加的 patch 都以 `zz*` 開頭：
