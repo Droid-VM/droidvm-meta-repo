@@ -3,6 +3,17 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-25 05:10，Claude）：drm2kgsl 遷移，M0–M2 完成
+
+計畫在 `plans/IOS_DRM2KGSL_MIGRATION.md`。主機原本就已經跑著 drm2kgsl（`--gpu virglrenderer,context-types=drm` 加 virtio-mmio GPU），所以 guest 端是從零開始做。
+- **M0**：drm-host pool 已上線（`--pre-alloc drm-host-mb=8`，位址 0x1bf800000）。
+  - `dram_size` 改為 0x13f200000（device `a65f143`）。
+  - 這個參數加在 VM 的 `extra_options` 裡（rig 的 `unixnu-vm.config.json`，透過 `vm_modify` 套用）。
+- **M1**：guest 的 virtio-gpu transport 改成非同步，64 個 slot 同時在途（device `584c038`）。顯示正常，0 錯誤。
+- **M2**：開機自測（`vgpu-selftest=1`）已在 iOS kernel 建出 DRM native context，`GET_PARAM(GPU_ID)` 經 drm2kgsl 讀回 6770（device `c5b8cd3`）。
+  - 結果在 `peek.py droidvm_virtgpu_selftest`，第 0 格 stage=9 表示全部通過。
+- 下一步：M3 user client（鏡射 virtgpu ioctl），然後 M4 turnip-virtio 加 `vdrm_iokit`。
+
 ## 續報（2026-10-25 04:20，Claude）：GFXBench 第一次跑出分數
 
 **ALU 2（metal_alu2，1024×1366）：716 和 684 frames（23.9 和 22.8 fps），status OK，載入約 8.9 秒。**

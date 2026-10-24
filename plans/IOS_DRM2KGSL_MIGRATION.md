@@ -28,6 +28,19 @@
 - MetalCheck：41 項全過。
 - 一個 4-byte fill 從 commit 到完成 2.3 ms。
 
+## 進度（2026-10-25 05:10）
+
+- **M0 完成**（device `a65f143`）：VM 的 `extra_options` 加了 `--pre-alloc drm-host-mb=8`。
+  - pool 在 0x1bf800000（8 MiB），從 `--mem` 扣除。
+  - RAM window 變成 0x80600000+0x13f200000，`dram_size` 跟著改。
+  - ADT 的 `/arm-io/virtio-gpu` 有 `drm-host-pool`。
+- **M1 完成**（device `584c038`）：transport 改成 64 個 slot 同時在途，提供 `post`/`poll`/`wait`，顯示照舊。
+  - 實測 3747 個命令，0 錯誤、0 逾時。
+- **M2 完成**（device `c5b8cd3`）：開機自測（`vgpu-selftest=1`）全部通過。
+  - capset 6（MSM，GPU 6770）→ CTX_CREATE → shmem blob 經 pool 對映（offset 0x200000）→ `SUBMIT_3D` 送 GET_PARAM(GPU_ID) → 在 shmem 讀回 6770。
+  - 踩到的坑：host 只會複製回 guest 事先寫在 response 開頭的長度（防 TOCTOU），所以送出前要先寫 `rsp->len`，vdrm_alloc_rsp 也是這麼做的。
+- 下一步是 M3：user client。
+
 ## 1. 里程碑
 
 | # | 內容 | 完成條件 |
