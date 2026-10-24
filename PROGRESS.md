@@ -3,6 +3,42 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-25 04:20，Claude）：GFXBench 第一次跑出分數
+
+**ALU 2（metal_alu2，1024×1366）：716 和 684 frames（23.9 和 22.8 fps），status OK，載入約 8.9 秒。**
+- 這是 droidvm-gpu 路線的 baseline，之後 drm2kgsl 要和這個數字比。
+- 畫面正確，曼哈頓街景加 64 個點光源（rig `out/msl/g2-all.png`）。
+- 結果 JSON 在 guest 的 `/private/var/tmp/gfx-alu2.out`。
+
+**修了兩個擋住 GFXBench 的問題：**
+1. **執行時編譯 MSL（NativeMetal `40a57be`）。**
+   - GFXBench 的 shader 全部用 `newLibraryWithSource:` 從原始碼編譯，Safari 的 WebGL（ANGLE）也是。frontend 之前沒有實作這個方法，所以 GFXBench 的結果都是 N/A。
+   - 現在改呼叫 iPadOS 內建的 MTLCompiler.framework（`MTLCodeGenServiceBuildRequest`，request 13，格式參考 tinygrad），把原始碼編成 metallib，再走 `newLibraryWithData:` 載入。
+   - 編譯錯誤回報為 `MTLLibraryErrorCompileFailure`；有 warning 時和 Metal 一樣，回傳 library 並附上 CompileWarning 錯誤。
+   - MetalCheck case 41 在 guest 通過，guest 上 41 項全過。
+   - 先用 gfxprobe 的 `msl` 指令驗證：guest 沒有 Apple GPU，也能把 MSL 編成 12 KB 的 metallib，耗時 1.7 秒。
+2. **顯示器宣告只有一層（NativeMobileDisplay `3aa4b26`，kernel `727b866f`）。**
+   - CoreAnimation 從顯示服務的 `IOMFBNumLayers` 屬性讀 `MaxNumLayers`（`AppleDisplay::update_display_limits`）。
+   - 我們沒有發佈這個屬性，CoreAnimation 就把 GFXBench 的全螢幕 Metal 圖層 detach 給顯示器，並要求 IOSurfaceAccelerator scaler 做複製。guest 沒有 scaler，backboardd 因此 abort，所有 app 跟著被殺掉。
+   - 現在發佈 `MaxNumLayers=1`，所有圖層都由 CoreAnimation 自己合成。任何全螢幕 Metal 遊戲都會受益。
+   - 判斷依據：從 21H461 的 dyld cache 抽出 QuartzCore 反組譯（Mac 上 `/Volumes/DATA/scratch/dsc21H461`）。另一個做法是設定環境變數 `CA_DISABLE_DETACHED=1`（`CADefaultsGetFloat` 會先讀 getenv），但沒有採用。
+
+**新工具（device `8310bec`、`3b08dab`、`bbf423a`）：**
+- `lsdiag -u 501 launch-args OUT BUNDLE_ID ARG...`：用 FrontBoard 的 debug 啟動選項啟動 app，可以帶參數，stdout 和 stderr 寫到 `OUT.out`、`OUT.err`，NSLog 也會複製到 stderr。
+  - 跑 GFXBench：`lsdiag -u 501 launch-args /private/var/tmp/gfx org.droidvm.gfxbench -t metal_alu2`。
+  - 先解鎖畫面；跑完 GFXBench 會自己結束。
+- MetalCheck 的 benchmark 新增單一 command buffer 的來回時間：4-byte fill 在 guest 是 2.3 ms（scheduled 1.35 ms），Mac 是 0.15 ms。
+  - render server 每個 command buffer 35–45 ms，不是這段來回造成的。
+
+**方向：使用者決定 iOS 的 3D 改走 virtio-gpu＋drm2kgsl（`plans/IOS_VIRTIO_GPU_SURVEY.md` 第 4–7 步）。**
+- 不再優化 droidvm-gpu 傳輸本身：submit 延遲、context loss 根因、timestamp 繞回都不再處理。
+- Vulkan 以上和顯示層的修正都會保留，包括 NativeMetal、metal2vulkan 修正、MetalCheck，以及這次的 IOMFBNumLayers。
+- drm2kgsl 是和 Linux guest 共用的程式碼，iOS 需要的改動（例如跨 context 的 syncpoint）都要做成 opt-in。
+
+**其他：**
+- 本輪看到一份 CalendarWidgetExtension 的 crash report，還沒看內容。
+- 上一次開機的 context loss（slot 0）原因未查，原因同上（不再追 droidvm-gpu）。
+
 ## 續報（2026-10-25 02:10，Claude）
 
 **文字破圖找到原因並修好（NativeMetal `5b9e1d6`，fork `51c16fc`，device `72d4a15`，plugin md5 `b2940b19…` 已部署）。**
