@@ -3,6 +3,25 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-25 09:00，Claude）：手機 watchdog 當機的根因與修正；M4 進度
+
+**手機當機（watchdog bite）已修好。**
+- 根因：Gunyah 會 trap guest 的 WFI（把 vCPU block 住），但 WFE 直接在 guest 裡執行（`HCR_EL2.TWE=0`，寫死在 Gunyah，host 改不了）。
+  XNU 在 `IODelay`、lock 自旋、commpage、idle、panic 都會停在 WFE，我們的驅動也在 `IODelay` 裡忙等 2–3 ms。
+  guest 的 vCPU 不再 idle 時（開機負載、SpringBoard 一次 23 個 runnable 執行緒），0.2–35 秒內就有一顆跑 vCPU 的 host 核心不再處理中斷，watchdog 重開手機。
+  今天早上約 9 次開機當了 5 次，卡住的核心有 CPU 7/2/3，不是特定核心。
+- 修正：
+  - UniXNU `ac4c602` 加入 `patches/xnu/non-apple-vcpu-park.patch`：非 Apple 平台一律不用 WFE；panic 時 CPU 用 WFI 停住。
+  - device `670f95b`：驅動等待只忙等 200 µs，之後就睡眠。
+- 驗證：四顆 vCPU 100% 滿載 35 秒（`yes`），以及四次開機各有 8–17 秒全部 vCPU 不睡的時段，host 都沒事。修正後 GFXBench ALU2 跑出 641 frames（基準 684–716）。
+- 防線：rig 的 `vmguard.sh [SPINS]`（在手機上跑）記錄 vCPU 執行緒狀態；所有 secondary vCPU 連續 SPINS 個樣本不睡時，用 SIGSTOP 凍結 crosvm。凍結後的 guest 可以用 `guestcpus.py` 分析（每顆 CPU 的 process、syscall、kernel backtrace）。
+- 細節在記憶檔 `droidvm-host-crash-2`。
+
+**M4（turnip 走 virtio-gpu DRM context）進行中。**
+- `TU_DARWIN_VIRTGPU=1` 時，turnip 已能開啟裝置（GET_CAPS 改成能容納整個 160 bytes 的 capset，device `6153420`）。
+- buffer 配置仍被 kernel 拒絕，MetalCheck 0 項通過；拒絕的 op 已有紀錄可查（`droidvm_virtgpu_last_refusal`）。
+- turnip patch 在 UniXNU `7d9c845`，ABI header 移到 NativeAdreno `0f786a4`。
+
 ## 續報（2026-10-25 05:10，Claude）：drm2kgsl 遷移，M0–M2 完成
 
 計畫在 `plans/IOS_DRM2KGSL_MIGRATION.md`。主機原本就已經跑著 drm2kgsl（`--gpu virglrenderer,context-types=drm` 加 virtio-mmio GPU），所以 guest 端是從零開始做。
