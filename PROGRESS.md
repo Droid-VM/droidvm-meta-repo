@@ -58,6 +58,18 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
     daemon（root）與 crosvm 沒有中斷，VM 沒有重開。
   - 驗證：關掉 rig 的繞過（`SHOWVM_NO_CYCLE=1`），在畫面正常時重開顯示畫面，4/4 都會跟著更新（修正前 0/3）；手機觸控照常送進 guest。
   - DroidVM App repo 不在約定的 push 清單裡，兩個分支都只在本機。
+- **使用者回報三件事，都已處理（2026-10-25 晚）：**
+  1. **DroidVM App 看不到 iOS VM**：App 的 VM 清單讀的是 `files/vms.json`，daemon 只提供狀態。iOS VM 是 rig 透過 IPC 建的，
+     從來不在這個檔案裡。已把 rig 的 VM 設定加進去（備份 `vms.json.bak-20261025`，擁有者、權限、SELinux label 照舊），
+     App 現在列出「UniXNU (DroidVM)」。daemon 也換成新版 App 的（停 VM、換 daemon、再開機），不再跳出「Outdated Daemon」。
+     rig 的 `daemon-recover.sh` 修正：daemon 正常結束時不會留下 pid 檔，原本腳本會直接中止。
+  2. **iOS 畫面轉了 90 度**：啟動 GFXBench 會讓 SpringBoard 把介面轉成直向（log：`outSwitcherOrientation: portrait`），
+     guest 沒有方向感測器，結束後就停在直向。用 iPadOS 控制中心在橫向時打開旋轉鎖定，之後開關 GFXBench，主畫面都會回到橫向。
+     `gfxprobe orient`（XCTest 用的 `BKSHIDServicesSetDeviceOrientationForAutomation`）實測沒有作用。GFXBench 本身仍是轉向顯示。
+  3. **主畫面沒有 GFXBench**：lsdiag 把 owner App 註冊成 System，SpringBoard 會把不在預設圖示清單裡的 System App 藏起來
+     （`-[SBApplicationInfo _configureTags:hasVisibilityOverride:]`），主畫面和 App 資料庫都看不到。改成 User（device `ec4bd8a`），
+     重新註冊並重啟 SpringBoard 後，GFXBench Metal 和 MetalCheck 出現在第 2 頁，點圖示可以開啟。
+- 另外記錄：MobileSafari 在背景當掉一次（StoreKit 讀檔時 `__stack_chk_fail`，`CFReadStreamRead`／`fileRead`），還沒查。
 
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
 
