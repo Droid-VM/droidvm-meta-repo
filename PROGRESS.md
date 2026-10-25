@@ -28,7 +28,18 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - 原因是 Core Image 的 GPU kernel 跑不起來。CoreImage.framework 的 `ci_stdlib`、`ci_filters` 是 Core Image 類型的 metallib，
     裡面是 stitchable function，metal2vulkan 回報 `LibraryKind(1)` 未實作；CI 執行時用 function stitching 合成 kernel 也跟著失敗。
   - IconServices 的 graphic icon 要靠 `blendWithAlphaMask` 把符號疊到底色上，所以畫壞了。快取清掉重畫後，圖示變成被白線切開的樣子。
-  - 要修得在 metal2vulkan 支援 CI 類型的 library 和 function stitching，還沒做。
+  - 後來查清楚是兩個 bug，都已修好（2026-10-25 晚）：
+    1. **function stitching**：CI 用 `ci_stdlib_stitchable.metallib`（一般 executable，載得進來）裡的函式組 DAG，
+       再交給 Metal 的 `newLibraryWithStitchedDescriptor:`。Apple 的實作只接受自己的 function 物件（「does not conform to
+       MTLFunction」），所以 CI 的每個 kernel 都失敗，圖示沒有符號。NativeMetal `3ce039a` 改成自己實作：DAG 文字沿用 base class
+       的 `newDagStringWithGraphs:`，從 metallib 取出各函式的 bitcode，照 MTLLibraryBuilder 的格式（`dag `／`numf`／`bitc`）
+       以 request 14 交給系統的 MTLCompiler，回來的 metallib 照常載入。
+    2. **virtio-gpu 路徑的 tiling 參數**：drm2kgsl 沒有回報 UBWC swizzle 和 macrotile mode，Turnip 就用了 0 和 4-channel；
+       KGSL 實際設定的是 sm8650 的 levels 2+3、8-channel（droidvm-gpu 驅動給的就是這組）。CPU 端 tile／detile（host image copy）
+       因此放錯位置：每隔一個 16 列的帶，16 像素的區塊左右對調。shim 改成 capset 沒給時用 KGSL 的值（fork `3cdf439`）。
+  - 新工具：`gfxprobe ci [SIZE [DIR]]`（device `dda8ea5`，gfxprobe 已加入 `droidvm-gpu-clients`）。iOS 會忽略 CI 的
+    software renderer 選項，兩邊其實都跑在 GPU 上，所以要看 DIR 裡的原始輸出，或檢查漸層是否正確。
+  - 修好後：漸層測試 0 個錯誤像素；「設定」的圖示完整正確；MetalCheck 41/41。
 
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
 
