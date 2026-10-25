@@ -69,6 +69,14 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   3. **主畫面沒有 GFXBench**：lsdiag 把 owner App 註冊成 System，SpringBoard 會把不在預設圖示清單裡的 System App 藏起來
      （`-[SBApplicationInfo _configureTags:hasVisibilityOverride:]`），主畫面和 App 資料庫都看不到。改成 User（device `ec4bd8a`），
      重新註冊並重啟 SpringBoard 後，GFXBench Metal 和 MetalCheck 出現在第 2 頁，點圖示可以開啟。
+- **GFXBench 畫面轉 90 度的原因與修正（device `f7ae401`）：**
+  - `gfxprobe orient` 原本沒作用，是因為 backboardd 處理這個 MIG 訊息（6000013）時要求 `com.apple.backboardd.setDeviceOrientation`
+    entitlement，沒有就直接丟掉。加上之後就能設定裝置方向。
+  - 實測發現：我們的面板對 iOS 來說本身是橫的（1366×1024），所以 iOS 的「直向」（1）就是寬的正畫面，iOS 的「橫向」（3、4）
+    反而是側躺。GFXBench 在 iPad 上只允許橫向，因此不管裝置方向怎麼設都會側躺；假的方向感測器也一樣，所以沒有做。
+  - 修正：GFXBench 的 iPad 方向加上直向（建置腳本已改）。在 Mac 上用 guest 那一版的 bundle 重新簽章（資源完全相同，只差
+    Info.plist），新增 `lsdiag owner-update` 只替換三個檔案。GFXBench 現在是正的（直向版面、兩側黑邊），ALU 2 1626 幀、54 fps。
+  - 旋轉鎖定重開後仍保留，主畫面維持正的。其他只支援橫向的 iPad App 在這套環境裡也會側躺。
 - 另外記錄：MobileSafari 在背景當掉一次（StoreKit 讀檔時 `__stack_chk_fail`，`CFReadStreamRead`／`fileRead`），還沒查。
 
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
