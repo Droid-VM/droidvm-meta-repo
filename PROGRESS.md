@@ -40,6 +40,9 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - 新工具：`gfxprobe ci [SIZE [DIR]]`（device `dda8ea5`，gfxprobe 已加入 `droidvm-gpu-clients`）。iOS 會忽略 CI 的
     software renderer 選項，兩邊其實都跑在 GPU 上，所以要看 DIR 裡的原始輸出，或檢查漸層是否正確。
   - 修好後：漸層測試 0 個錯誤像素；「設定」的圖示完整正確；MetalCheck 41/41。
+  - MetalCheck 新增 case 42（device `f297be7`）：同一張 tiled texture 由 GPU 寫、CPU 讀，再反過來，逐 texel 檢查位置。
+    原本 41 個 case 抓不到這個 bug：07、08 都是同一邊來回複製，錯的 swizzle 剛好抵消。修好後 42/42。
+    （沒有用舊的 Turnip 實際驗證 case 42 會失敗；它走的是 CI 出錯時的同一條路：GPU 寫 shared texture、`getBytes` 讀回。）
 
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
 
