@@ -18,6 +18,13 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
     `ninja -C build/mesa-tu-ios src/freedreno/vulkan/libvulkan_freedreno.dylib`。
   - system client 匯入的 IOSurface 有些是唯讀映射，要照 NativeAdreno 的方式 wire（persistent、唯讀 fallback）。
 - 手機的 `/data` 已用了 97%（剩 8.4 GB），Android 跳出空間不足的警告。
+- 後續驗證：
+  - 6 次開機都正常，guard 沒有觸發。
+  - MetalCheck 在 virtio-gpu 上跑 5 分鐘壓力測試：PASS，約 24 萬次 submission，沒有拒絕，沒有 context 遺失。
+  - Safari 能正確渲染 apnews.com。
+  - 顯示 A/B（rig `display-ab.sh`：喚醒、解鎖，再開「設定」、按 Home）：兩條路徑的手機畫面都會跟著 guest 更新。
+  - 手機上看到黑畫面或凍結畫面，原因是 guest 閒置後螢幕休眠，要先喚醒；daemon 重開 VM 也會關掉 App 的顯示畫面，要用 `show-vm.sh` 叫回來。
+- 既有問題（兩條路徑都有）：「設定」清單的圖示只剩純色方塊，缺白色符號（General、Wallpaper 正常）。
 
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
 
