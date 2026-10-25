@@ -47,7 +47,13 @@
     - fenced NOP 0.2–1 ms signal；關閉後資源都釋放。
   - 超過 4096 bytes 的輸入走 OOL descriptor，tunnel 已支援，上限 64 KiB。
   - NativeAdreno 改從 Droid-VM fork 取（`.gitmodules`）。
-- 下一步是 M4：turnip-virtio 加 `vdrm_iokit`。
+- **M4 大致完成**（UniXNU `7d9c845`、device `6153420`、`a1a729e`）：做法和原計畫不同，沒有另寫 `vdrm_iokit`。
+  - turnip 的 darwin 後端加了 `tu_knl_darwin_virtgpu`（`TU_DARWIN_VIRTGPU=1` 才啟用），把原本 KGSL 式的 NativeAdreno 呼叫轉成 virtgpu：
+    BoAlloc/BoMap → GEM_NEW 加 HOST3D_GUEST blob；Submit → GEM_SUBMIT；WaitFence → WAIT_FENCE（ring 1）。
+  - guest blob 改成每塊最多 4 MiB 的實體連續區塊，否則大於 16 MiB 的 BO 會超過 entry 上限而被拒絕。
+  - MetalCheck 在新後端 31/41。剩下的 10 項（28、29、31、32、35–40）全部是 no-copy buffer 和 IOSurface，也就是 M5。
+  - 舊後端（droidvm-gpu）同一版 41/41，GFXBench ALU 2 680、660 frames。
+- 下一步是 M5：kernel 加一個把 task 頁面包成 guest blob 的 op，turnip 的 host-memory import 走它。
 
 ## 1. 里程碑
 

@@ -3,6 +3,23 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
+
+**第二種 watchdog 當機（secondary CPU 啟動卡住）已修好。**
+- 現象：某顆 secondary vCPU 收到 CPU_ON 後，從沒走到 ArmCpu 的 `initCPU`（`smp_step` 停在 4），時間全在 guest 裡、沒有 exit，host 3–10 秒後當機。
+- 根因：新 core 在 MMU 打開前用 uncached 方式讀幾個開機時寫入的值，Gunyah 不保證這種存取和 boot core 的 cache 一致。這幾個值是
+  `ResetHandlerData`、`const_boot_args`、`sysreg_restore` 的 TCR、`cpu_ttep`。XNU 只 flush 了 cpu data，其餘若還髒在 cache 裡，新 core 就讀到舊值，在早期啟動程式碼裡空轉。
+- 定位：在 `start.s` 加的每核進度標記（`droidvm_early_trace`，rig `early-trace.py`）顯示卡在 `start_cpu` 之後、MMU 打開之前。
+- 修正：UniXNU `061d032`，`patches/xnu/non-apple-vcpu-start-flush.patch`。`cpu_start()` 先把上述資料寫回記憶體；早期例外向量改成記錄後停在 WFI。
+- 驗證：修正後連續 12 次開機都沒卡住（之前約每 4–8 次會卡 1 次），每次都有 7–18 秒的四核滿載，host 都沒事。
+- 防線：rig `vmguard2.sh`（手機上獨立執行，每 0.25 秒取樣）。任一顆 secondary 開機後 1 秒內都沒睡就凍結 VM。`boot-cycles.sh N` 可在它保護下反覆重開 VM。
+- ArmCpu 也改成失敗時停在 WFI：Droid-VM/ArmCpu `c6b72b6`（新 fork），fork `4cec990`。
+
+**GPU**
+- 預設路徑（droidvm-gpu）：MetalCheck 41/41；GFXBench ALU 2 跑出 680、660 frames（droidvm-gpu 的忙等改回 3 ms，現在不用 WFE，對 host 安全）。
+- virtgpu 路徑（`TU_DARWIN_VIRTGPU=1`）：MetalCheck 31/41（device `a1a729e`：guest blob 改成每塊最多 4 MiB 的連續區塊）。
+  剩下 10 項全是 no-copy buffer 和 IOSurface，屬於 M5 的 host-memory import。
+
 ## 續報（2026-10-25 09:00，Claude）：手機 watchdog 當機的根因與修正；M4 進度
 
 **手機當機（watchdog bite）已修好。**
