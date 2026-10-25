@@ -25,6 +25,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - 顯示 A/B（rig `display-ab.sh`：喚醒、解鎖，再開「設定」、按 Home）：兩條路徑的手機畫面都會跟著 guest 更新。
   - 手機上看到黑畫面或凍結畫面，原因是 guest 閒置後螢幕休眠，要先喚醒；daemon 重開 VM 也會關掉 App 的顯示畫面，要用 `show-vm.sh` 叫回來。
 - 既有問題（兩條路徑都有）：「設定」清單的圖示只剩純色方塊，缺白色符號（General、Wallpaper 正常）。
+  - 原因是 Core Image 的 GPU kernel 跑不起來。CoreImage.framework 的 `ci_stdlib`、`ci_filters` 是 Core Image 類型的 metallib，
+    裡面是 stitchable function，metal2vulkan 回報 `LibraryKind(1)` 未實作；CI 執行時用 function stitching 合成 kernel 也跟著失敗。
+  - IconServices 的 graphic icon 要靠 `blendWithAlphaMask` 把符號疊到底色上，所以畫壞了。快取清掉重畫後，圖示變成被白線切開的樣子。
+  - 要修得在 metal2vulkan 支援 CI 類型的 library 和 function stitching，還沒做。
 
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
 
