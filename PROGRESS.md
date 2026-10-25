@@ -81,8 +81,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   任何螢幕類型，App 就被放進 768×1024 的畫布（GFXBench 結果 JSON 裡寬度是 768）。帶有 `com.apple.UIKit.vends-view-services`
   的 App 會跳過 classic mode（`-[SBApplication _bypassesClassicMode]`）。加上後 GFXBench 拿到 1366×1024，版面跟著放大、沒有黑邊；
   ALU 2 1620 幀、54 fps。之後自己安裝的第三方 App 也需要同一個 entitlement。
-- **新發現的問題（還沒修）：** virtio-gpu 路徑上，GFXBench 跑測試時 Turnip 會 SIGSEGV（今天 3 次，啟動後 1–5 分鐘，
-  `nmb_render_encoder_new` → metal2vulkan `render_command_encoder` → `libvulkan_freedreno`）。
+- **Turnip 的 SIGSEGV（觀察中）：** 今天 17:55–18:23 GFXBench 當了 3 次，都在做方向／classic mode 實驗的時段。
+  符號化後是 `tu_cs_end`（vkQueueSubmit → autotune `get_cs_for_fence`）和 `tu_cs_get_cur_iova`（`tu_BeginCommandBuffer` → `tu_init_hw`），
+  兩者都是在 `bo_count` 為 0 時讀 `bos[bo_count - 1]`，索引溢位成 0xffffffff，位址恰好是 bos + 0x7fffffff8。
+  修好方向與全螢幕後跑了 9 次（一般、背景再回前景、測試中轉 4 次方向）都沒有重現，先記錄、繼續觀察。
 - 有一次開機（18:27）被 guard 擋下：v2 從開機起沒休息，launchd 在 `NativeVirtioBlock` 讀檔；四顆 CPU 都過了 a6，不是 MMU 關閉時的卡死。
   killvm 後重開正常。
 - 另外記錄：MobileSafari 在背景當掉一次（StoreKit 讀檔時 `__stack_chk_fail`，`CFReadStreamRead`／`fileRead`），還沒查。
