@@ -43,6 +43,16 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - MetalCheck 新增 case 42（device `f297be7`）：同一張 tiled texture 由 GPU 寫、CPU 讀，再反過來，逐 texel 檢查位置。
     原本 41 個 case 抓不到這個 bug：07、08 都是同一邊來回複製，錯的 swizzle 剛好抵消。修好後 42/42。
     （沒有用舊的 Turnip 實際驗證 case 42 會失敗；它走的是 CI 出錯時的同一條路：GPU 寫 shared texture、`getBytes` 讀回。）
+- **手機畫面停住（guest 照常 present）的原因找到了**，是 DroidVM App 的 bug，跟 GPU 無關：
+  - 重新開啟 VM 的顯示畫面時（`am start --activity-clear-task`，或進入畫面時的方向切換），新 activity 先把 Surface 交給 crosvm，
+    舊 activity 之後才 detach。舊的 `DisplayProvider.surfaceDestroyed` 會呼叫 `removeSurface`，但這個呼叫不指明是哪一個 Surface，
+    結果把新的移除了，手機就停在最後一幀。
+  - 重現：在畫面正常時再跑一次 `show-vm.sh`，3/3 卡住。恢復方法：按 Home，再 `am start --activity-reorder-to-front`
+    （讓同一個 activity 依正確順序重送 Surface）。
+  - rig 的 `show-vm.sh` 已改成每次開完都做一次這個動作，連續 2 次測試都正常。
+  - App 的修正寫在本機 DroidVM repo 的分支 `wip/display-surface-owner`（`c187677`）：依 display service 記錄目前交出 Surface 的
+    provider，只有它能 remove。**沒有編譯（這台機器沒有 Android SDK）、沒有 push、也沒有安裝**。手機上的 App 是 9 月 9 日從
+    `309ede7` 編的 debug 版，要不要更新由使用者決定。
 
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
 
