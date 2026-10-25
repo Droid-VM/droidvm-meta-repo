@@ -53,7 +53,15 @@
   - guest blob 改成每塊最多 4 MiB 的實體連續區塊，否則大於 16 MiB 的 BO 會超過 entry 上限而被拒絕。
   - MetalCheck 在新後端 31/41。剩下的 10 項（28、29、31、32、35–40）全部是 no-copy buffer 和 IOSurface，也就是 M5。
   - 舊後端（droidvm-gpu）同一版 41/41，GFXBench ALU 2 680、660 frames。
-- 下一步是 M5：kernel 加一個把 task 頁面包成 guest blob 的 op，turnip 的 host-memory import 走它。
+- **M5 完成**（NativeAdreno `6173fc8`、device `3b55fb7`／`87ed075`、UniXNU `9e7c605`）：kernel 加了 `CREATE_BLOB_USER`，把呼叫者的頁面 wire 住當成 guest blob。
+  - wire 的方式照 NativeAdreno 的 import：`kIOMemoryPersistent`、`kIOMemoryMapperNone`，不能寫入時改成唯讀。
+  - turnip 的 shim 回報 HostImport；`vkGetMemoryHostPointerPropertiesEXT` 在 GPU 是 IO-coherent 時也回報 cached-coherent 類型。
+  - MetalCheck 在 virtio-gpu 路徑 41/41，IOSurface 和 no-copy 都過。
+- **M6 完成**（UniXNU `3bf3dec`、device `87ed075`）：boot-arg `vgpu-3d=1` 讓所有 Metal client 預設走 virtio-gpu。
+  - turnip 沒設 `TU_DARWIN_VIRTGPU` 時，會用 GETPARAM 0x101 問 kernel；設 `=0` 可強制走 droidvm-gpu。
+  - A/B 結果：MetalCheck 兩邊都是 41/41；GFXBench ALU 2 在 virtio-gpu 是 1527、1499 frames（約 50 fps），droidvm-gpu 是 680、660（約 22 fps）；主畫面、widgets、桌布都正常。
+  - 原計畫的 drm2kgsl opt-in syncpoint 沒有做，目前用不到。
+- 下一步是 M7：再觀察一段時間沒有退步後，退役 droidvm-gpu。
 
 ## 1. 里程碑
 

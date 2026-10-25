@@ -3,6 +3,22 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-25 13:00，Claude）：Metal 預設改走 virtio-gpu＋drm2kgsl，GFXBench 快了 2.2 倍
+
+- **M5**：kernel 新增 `CREATE_BLOB_USER`，把 client 自己的頁面當成 guest blob，turnip 因此支援 `VK_EXT_external_memory_host`。
+  virtio-gpu 路徑的 MetalCheck 從 31/41 變成 41/41，IOSurface 和 no-copy buffer 都過。
+- **M6**：board.toml 的 `vgpu-3d=1` 讓所有 Metal client（backboardd、SpringBoard、App）預設走 virtio-gpu；某個 process 設 `TU_DARWIN_VIRTGPU=0` 可以改回 droidvm-gpu。
+  | | virtio-gpu（新預設） | droidvm-gpu |
+  |---|---|---|
+  | MetalCheck | 41/41 | 41/41 |
+  | GFXBench ALU 2 | 1527、1499 frames（約 50 fps） | 680、660 frames（約 22 fps） |
+  主畫面、widgets、桌布都正常渲染。
+- 踩到的坑：
+  - `plugin-redeploy` 只會重新打包 `build/mesa-tu-ios` 裡已經編好的 turnip。改了 shim 之後，要先在 tree 裡跑
+    `ninja -C build/mesa-tu-ios src/freedreno/vulkan/libvulkan_freedreno.dylib`。
+  - system client 匯入的 IOSurface 有些是唯讀映射，要照 NativeAdreno 的方式 wire（persistent、唯讀 fallback）。
+- 手機的 `/data` 已用了 97%（剩 8.4 GB），Android 跳出空間不足的警告。
+
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
 
 **第二種 watchdog 當機（secondary CPU 啟動卡住）已修好。**
