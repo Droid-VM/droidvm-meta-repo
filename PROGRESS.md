@@ -3,6 +3,136 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-26 03:00，Claude）：GPU 記憶體從 2 GB 降到 590 MB；手機 CPU 被限頻；記憶體破壞仍在查
+
+**越跑越慢**有兩個原因。
+
+第一個原因是 guest 記憶體被 GPU 吃光（不是 GPU 本身，也不是 GPU 過熱）：
+- 普查（rig `vgpu-clients.py --sizes`）顯示每個 Metal 行程都有 4–10 個 64 MiB 的 resource。
+  - 原因是 metal2vulkan 的子配置器每個 pool 固定用 64 MiB 的區塊，`keep_room` 還會在建立 device 時，先替每個 pool 各做一個。
+  - 在 guest-alloc 模式下，這些區塊一建立就是 wired 的 guest 記憶體。主畫面的 GPU client 加起來就佔 2 GB，一開機 free 只剩 6 MB。
+- 修正：fork `ed1f49e`（`patches/metal2vulkan/0009-growing-memory-blocks.patch`）。
+  - 區塊從 4 MiB 開始，跟著 pool 成倍成長，上限 64 MiB；超過 32 MiB 的請求照舊獨立配置。
+  - 開機時 GPU 佔用從 2 GB 降到 590 MiB，wired 從 2.4 GB 降到 1.7 GB。
+- 結果：Car Chase 14.4 fps（853 分），第二次 14.0 fps，不再變慢。修正前是 9–11 fps，第二次會掉到 4.4 fps。
+- 同一時期的 soak（前 4 項）：Aztec Normal 8.6 fps（553 分）、Manhattan 3.1 19.7 fps（1224 分）、T-Rex 28.3 fps。
+
+第二個原因是 **手機的 CPU 被限頻**（02:30 才發現）：
+- 大核 `scaling_max_freq` 是 1.71 GHz，硬體上限是 2.96–3.30 GHz。
+- 當時螢幕亮著、DroidVM 在前景、省電模式也沒開。cooling device 都沒有作用，所以是 OPLUS 的電源 daemon 設的，
+  上限會隨時間變動。
+- guest 裡的 GFXBench 很吃 CPU，在這個上限下 Aztec Normal 只有 3 fps（不限頻時 8.6 fps）。
+- 之前以「GPU 溫度正常、`thermal_pwrlevel` 0」排除過熱，但沒有看 CPU。所以這之前的效能比較，都要在相同的 CPU 上限下才成立。
+- rig 的 `phone-hostmem.sh` 現在會記錄各叢集的上限，`gfx-soak.sh` 也會帶上（device `04de512`）。
+- 我沒有去解除這個上限：那等於繞過廠商的溫控。
+
+**host 端的殘留 GPU 映射**（virglrenderer 本機 `735e6936`，不在推送清單內，沒有推送）：
+- drm2kgsl 刻意不在 free 時解除 VBO 綁定，context 結束時也不清它的 slice。
+  - 對 host 配置的頁面這是安全的；但 guest-alloc 的頁面在 guest 釋放後會被重新配置，GPU 卻還留著映射。
+  - KGSL mapped 5 GB，guest 實際活著的只有 1.15 GB。
+- 修正：context 名稱以 `xnu:` 開頭的（iOS guest 驅動會這樣命名，device `fea1b94`）會這樣處理：
+  - free guest-alloc BO 時，用 child id 解除它的範圍；
+  - context 銷毀時，用 child 0 清掉整段 slice。
+  - Linux guest 不受影響。修正後 KGSL mapped 持平。
+- **手機上的 `libvirglrenderer.so` 是手動換上去的**，原檔是 `usr/lib/libvirglrenderer.so.orig`。從桌面打開 DroidVM App 時，
+  splash 會因為 hash 不同重新解壓 runtime，把它換回原版。要長期使用，得照 `6_build_apk_prepare.sh` 的流程打包進 APK。
+
+**guest 驅動**（device `fea1b94`）：
+- `GEM_CLOSE` 原本每次都要等這個 client 的 GPU 工作全部完成，最多 5 秒，逾時就直接釋放。
+- 現在改成延後釋放：等關閉前送出的 submit 都完成才釋放頁面。
+- 加上 host 端的修正後，Aztec Normal 從 2.65 fps 提升到 7.1 fps，Driver Overhead 2 從 3 幀提升到 94 幀，Fill 2 跑出 6632 分。
+
+**記憶體破壞（仍在查，尚未找到來源）：**
+- 症狀：重負載 GPU 測試期間，行程隨機崩潰。被破壞的都是 malloc free list、`os_unfair_lock`、pthread signature、
+  objc_sync 這類資料，也出現過 stack canary 失敗（dyld `trieWalk`、Safari `fileRead`）。
+  - 受影響的不只 GPU client，askpermissiond、PerfPowerServices、Spotlight、UserEventAgent 也有。
+  - 10-25 01:37 droidvm-gpu 還是預設時，Spotlight 就出現過一次。
+- 已排除：
+  - virtqueue 的配置；
+  - 區塊裝置（NativeVirtioBlock、NativeRamBlock、DataStore 都經 bounce buffer 或 IOKit 複製，邊界都有檢查）；
+  - compressor（崩潰期間壓縮量是 0）；
+  - compressor 的 per-CPU scratch（`compressor_cpus` = 4）；
+  - droidvm-gpu（目前沒有 client）。
+- 新的 gfxprobe 診斷（device `6d08705`）全部乾淨，包括在 GFXBench 執行期間：
+  - `memcheck`：會換手頁面的 256 MiB，11 萬次換手，0 錯；
+  - `memidle`：閒置頁面，27 次檢查，0 錯；
+  - `regcheck`：v0–v31 與 TSD 跨搶佔，360 萬輪，0 錯；
+  - `atomcheck`：LSE 原子操作與 `os_unfair_lock`，2 萬輪，0 錯。
+- 加上 0009 之後的第一輪（Car Chase ×2、Aztec High）沒有崩潰。但接著的 12 項 soak 中，前 4 項正常，之後 7 項裡有 6 項當掉，
+  一旦開始就會一直出事。這些崩潰大多是 stack canary 失敗：在 `io_connect_method`（Turnip 呼叫 user client 的 MIG stub）、
+  libGPUCompilerImplLazy，以及 dyld 的 `trieWalk`。canary 是跟 `__stack_chk_guard` 比對的，所以更像是存放它的資料頁被改了，
+  不是 stack 真的溢位。
+- 試過但已退回的兩個修改：
+  - **compressor 模式**：ADT 沒有 `/defaults kern.vm_compressor`，所以 kernel 停在 CONFIG_FREEZE 的預設值 8（只給 freezer 用，
+    匿名頁面完全不能回收，vm_stat 的 throttled 最高 1.8 GB）。改成 2 之後 compressor 確實啟用，memidle 驗證壓縮與解壓都正確；
+    但那段時間剛好碰上 CPU 限頻，無法判斷效能的差異，所以先退回。ADT 的修改保存在 scratchpad 的 `vm-compressor-adt.patch`。
+  - **編譯執行緒常駐、一次一個請求**：也碰上 CPU 限頻，看不出效果，已退回（NativeMetal `git stash`）。
+- ReportCrash 每個行程每天最多寫 25 份報告，超過之後 GFXBench 的崩潰只會顯示成「no result」。把舊的報告搬走也沒有讓它歸零。
+- 下一步：關掉 guest 的 en0，在同樣的 CPU 上限下跑 soak 比較崩潰次數。如果破壞消失，就是 virtio-net RX 的 DMA；如果還在，
+  就看 guest kernel 的 pmap/VM。
+
+**踩到的坑：**
+- crosvm 的 stderr 進 daemon 的 console stream，上限約 1 MiB，超過後新的內容就被丟掉。vm.sh 的 `vm_console_clear` 少了 `stream`
+  參數，所以從來沒有清成功，導致開機後的 GPU 錯誤全部看不到。已修正（rig `aca4d3e`）。
+- logcat 的 ring buffer 只有 256 KiB，幾分鐘內就被 servicemanager 的訊息洗掉。
+- crosvm 裡本來就沒有叫 `v_gpu` 的執行緒，不能把它的「消失」當成 worker 死掉。
+- drm2kgsl 每個活著的 resource 會開 3 個 fd（crosvm 的 udmabuf、`dmabuf_fd`、export dup），所以 host dmabuf ≈ guest resource × 3
+  不是洩漏。
+- vmguard 遇到所有 secondary 連續空轉約 1 分鐘時，會停住 crosvm。純 CPU 的壓力測試要讓 vCPU 定期休息。
+- 21:33 那次開機，backboardd 的 GPU 一開始就卡住（5 個 submit、8 次 fence 逾時、沒有出圖）。log 剛好被上限吃掉，原因不明，
+  之後沒有再發生。
+
+## 續報（2026-10-25 21:00，Claude）：GFXBench 的重型測試都能跑到出分
+
+使用者回報「跑一跑就退到桌面，到不了出分的畫面」。這其實都是 App 當掉，依序修了六個原因：
+
+1. **virtio-gpu 指令槽用完**（device `f9a129e`）：
+   - 帶 fence 的 SUBMIT_3D 會占住槽位，直到 fence 觸發。64 個槽全被占住後，`post()` 等 5 秒就回 `kIOReturnNoResources`。
+   - Turnip 把它當成 DeviceLost，`newBuffer` 拿到 nil，App 就當掉。
+   - 修正：同樣 7.8 MiB 的 guest 記憶體切成 256 槽（12 個大槽）。沒有空槽時，只要還有指令陸續回來就一直等；60 秒都沒有指令回來才拒絕。
+   - 新增計數器 `droidvm_virtio_gpu_slot_waits_long` 和 `droidvm_virtio_gpu_slot_wait_max_us`。GFXBench 執行時最高同時用到 8 槽，沒有長時間等待。
+   - 使用者問過：iOS VM 的 `gpu_drm2kgsl_pool_mb`、`gpu_guest_pool_mb` 都是 0（64 MB 是 Ubuntu VM 的設定）。
+     - msm 的 ccmd 包在 EXECBUFFER 裡，經由這些槽位送出；回覆放在 msm shmem blob。
+     - BO 都是 guest 頁面（CREATE_BLOB 以 ≤4 MiB 的連續區塊，或 CREATE_BLOB_USER），以 udmabuf 匯入 KGSL。
+     - 所以卡住的是槽位數，不是記憶體。
+2. **`supportsFeatureSet:` 沒有實作**（NativeMetal `c9da401`）：
+   - 這個舊 API 一律回 NO，GFXBench 還在用它。
+   - Car Chase 因此回報 UNSUPPORTED_TC_TYPE（ASTC 屬於 iOS_GPUFamily2_v1），也看不到 tessellation（GPUFamily3_v2）。
+   - 修正：iOS 的 feature set 改成照對應的 Apple family 回答。
+3. **`llvm.bitreverse` 不支援**（fork `patches/metal2vulkan/0008-llvm-bitreverse.patch`）：
+   - MSL 的 `reverse_bits` 會編成這個 intrinsic。Aztec 和 Car Chase 的 Hammersley 取樣有用到，pipeline 因此被拒（UnknownIntrinsic）。
+   - 修正：對應到翻譯器原本就有的 ReverseBits。
+4. **Metal compiler 的 stack 不夠**（NativeMetal `67e95fc`）：
+   - 在 App 行程裡編譯時，compiler 跑在 512 KiB 的 dispatch worker 上，Aztec 在 libGPUCompilerImplLazy 裡觸發 `__stack_chk_fail`。
+   - 修正：每次編譯改在一個 16 MiB stack 的執行緒上跑。
+5. **少了帶 LOD clamp 的 sampler 綁定**（NativeMetal `45136ad`）：
+   - 缺的是 `setFragmentSamplerState:lodMinClamp:lodMaxClamp:atIndex:`。Car Chase 的 occlusion culling 暖機時呼叫它，丟出 unrecognized selector。
+   - 修正：每組 clamp 值做一個 sampler 分身並快取起來。sampler range 的各種綁定也一起補上。
+6. **tessellation 完全沒接**（NativeMetal `69ed69a`）：
+   - metal2vulkan runtime 本身已經實作 tessellation，這次把 bridge 和 frontend 接上：
+     - pipeline descriptor 帶入 tessellation 狀態；
+     - function 回報 `patchType` 和 `patchControlPointCount`；
+     - 補上 factor buffer、factor scale，以及四種 patch draw。
+
+分數（1366×1024，virtio-gpu）：
+
+| 測試 | 分數 | fps |
+|---|---|---|
+| Car Chase（metal_4） | 652 | 11.0 |
+| Aztec Ruins High（metal_5_high） | 477 | 7.4 |
+| Aztec Ruins Normal（metal_5_normal） | 170 | 2.7（比 High 還慢：越跑越慢，見上面的續報） |
+| Manhattan 3.1（metal_manhattan31） | 824 | 13.3 |
+| Manhattan（metal_manhattan） | 865 | 14.0 |
+| T-Rex（metal_trex） | 1803 | 32.2 |
+| ALU 2（metal_alu2） | 1501 | 50.0 |
+
+同一輪後面幾個測試越跑越慢（Aztec High 掉到 1.3 fps、Driver Overhead 2 只跑 3 幀），Tessellation（metal_tess）在
+`TestWrapper::init0` 讀到 null（這版 iOS 建置沒有這個測試）。
+- 找缺少的 selector：先跑 `guest-newlogs.sh`，在 app_ios 的訊息裡找「unrecognized selector」或「native-metal:」；
+  crash report 的 `lastExceptionBacktrace` 會指出 GFXBench 的呼叫點。
+- rig 新增 `gfx-suite.sh ID...`：依序跑每個測試，每個印一行結果；有新的 crash report 會標「NEW CRASH」。
+- MobileSafari 那次 `__stack_chk_fail`（CoreFoundation `fileRead`）後來歸入記憶體破壞的調查，見上面的續報。
+
 ## 續報（2026-10-25 13:00，Claude）：Metal 預設改走 virtio-gpu＋drm2kgsl，GFXBench 快了 2.2 倍
 
 - **M5**：kernel 新增 `CREATE_BLOB_USER`，把 client 自己的頁面當成 guest blob，turnip 因此支援 `VK_EXT_external_memory_host`。
@@ -701,7 +831,10 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 
 本輪完成項：virtio-gpu 顯示已取代 simplefb 顯示，無 simplefb 開機與顯示已實測；過時的 simplefb 閃爍問題描述只作歷史背景，以上方新狀態為準。
 
-1. **GFXBench：** pinned source `89aa956f43836798d1eaaab8ec32d3dc8b02eead` 已 build、signed、安裝至MCM並可啟動程序；畫面切換仍被現有display問題阻擋，尚無workload／分數驗收。
+1. **GFXBench：** 全部 Metal 測試都能跑到出分（Tessellation 測試除外：這版 iOS 建置沒有它）。待辦：
+   - 記憶體破壞的來源（見最上面的續報）；
+   - 把改過的 `libvirglrenderer.so` 正規打包進 APK；
+   - GFXBench 每次啟動都在行程內重新編譯所有 shader，需要一個跨行程的 shader 快取。
 2. **Metal Check：** host／guest均28 PASS、0 FAIL、0 SKIP，三項benchmark PASS，UI啟動／保存／停止控制已驗證；兩次五分鐘壓測完成。最後20輪API/counters PASS但視覺FAIL（見上文），不是完整Metal或display conformance。
 3. **通用外設：** `plans/HOST_PERIPHERALS_SURVEY.md` 已完成；實作未開始。下一步先定共同 protocol/capabilities，再按 survey 驗證 battery provider；transport 支援不代表 guest OS 原生 API 已接通。
 4. **顯示效能：** 將 producer 依賴精確綁定每個 IOSurface，評估減少不必要的全域等待；接入 3D 前隔離 renderer／display fence。
