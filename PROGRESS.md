@@ -51,8 +51,13 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
     （讓同一個 activity 依正確順序重送 Surface）。
   - rig 的 `show-vm.sh` 已改成每次開完都做一次這個動作，連續 2 次測試都正常。
   - App 的修正寫在本機 DroidVM repo 的分支 `wip/display-surface-owner`（`c187677`）：依 display service 記錄目前交出 Surface 的
-    provider，只有它能 remove。**沒有編譯（這台機器沒有 Android SDK）、沒有 push、也沒有安裝**。手機上的 App 是 9 月 9 日從
-    `309ede7` 編的 debug 版，要不要更新由使用者決定。
+    provider，只有它能 remove。
+  - **已安裝**（使用者指出 SDK 在 `/root/android-sdk`）：以手機上那版 `309ede7` 為基礎，只 cherry-pick 這個修正
+    （分支 `wip/display-surface-owner-309ede7` `852027a`，worktree `/root/gitrs/DroidVM/DroidVM-display-fix`）。
+    prebuilts 與 `liblbx.so` 直接取自手機上的 APK，逐 byte 相同；簽章相同，用 `adb install -r`，資料保留。
+    daemon（root）與 crosvm 沒有中斷，VM 沒有重開。
+  - 驗證：關掉 rig 的繞過（`SHOWVM_NO_CYCLE=1`），在畫面正常時重開顯示畫面，4/4 都會跟著更新（修正前 0/3）；手機觸控照常送進 guest。
+  - DroidVM App repo 不在約定的 push 清單裡，兩個分支都只在本機。
 
 ## 續報（2026-10-25 11:30，Claude）：第二種手機當機也修好了；M4 完成到 31/41
 
