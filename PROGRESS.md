@@ -65,7 +65,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 試過但已退回的兩個修改：
   - **compressor 模式**：ADT 沒有 `/defaults kern.vm_compressor`，所以 kernel 停在 CONFIG_FREEZE 的預設值 8（只給 freezer 用，
     匿名頁面完全不能回收，vm_stat 的 throttled 最高 1.8 GB）。改成 2 之後 compressor 確實啟用，memidle 驗證壓縮與解壓都正確；
-    但那段時間剛好碰上 CPU 限頻，無法判斷效能的差異，所以先退回。ADT 的修改保存在 scratchpad 的 `vm-compressor-adt.patch`。
+    但那段時間剛好碰上 CPU 限頻，無法判斷效能的差異，所以先退回。ADT 的修改保存在 rig 的 `out/msl/vm-compressor-adt.patch`（`scripts/make-droidvm-adt.py` 的 /defaults 加上 `kern.vm_compressor` = 2）。
   - **編譯執行緒常駐、一次一個請求**：也碰上 CPU 限頻，看不出效果，已退回（NativeMetal `git stash`）。
 - ReportCrash 每個行程每天最多寫 25 份報告，超過之後 GFXBench 的崩潰只會顯示成「no result」。把舊的報告搬走也沒有讓它歸零。
 - 下一步：關掉 guest 的 en0，在同樣的 CPU 上限下跑 soak 比較崩潰次數。如果破壞消失，就是 virtio-net RX 的 DMA；如果還在，
