@@ -3,6 +3,29 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-26 17:00，Claude）：GFXBench 的破圖（T-Rex 全黑、Car Chase 車身全黑加尖刺）修好了
+
+使用者回報「3d 渲染結果有破圖」。之前只看分數、沒有看畫面。逐一截圖後，各測試狀況如下：
+
+- **Manhattan 3.1**：正常。
+- **T-Rex：整個畫面全黑，但照樣出分。**
+  - 原因：它用 PVRTC 貼圖（`MTLPixelFormatPVRTC_RGBA_4BPP`）。Adreno 的 Vulkan 沒有這個格式，metal2vulkan 只保留區塊供複製，任何取樣都會被拒絕，結果 2,491 個 command buffer 裡有 1,242 個被拒。
+  - 修正：NativeMetal 4b52c78。PVRTC 貼圖改建成 RGBA8，`pixelFormat` 仍回報 PVRTC。`replaceRegion` 和 `copyFromBuffer:toTexture:` 在 CPU 上用 PVRTC1 演算法解碼。現在 0 個被拒，叢林正常顯示。
+- **Car Chase：車身全黑、頂點尖刺、大片黑色三角形、過曝。**
+  - 原因：Bézier 車身用 `[[patch(quad, 0)]]`（0 個控制點，per-patch 資料用 `patch_id` 讀取）。metal2vulkan 從 TESS tag 讀到的數量 0 被當成「沒量測過」拒絕，bridge 就把它回報成「沒有 patch」，NativeMetal 也就沒把 tessellation 狀態傳下去（繞向、partition、factor 的 step function）。
+  - 修正：fork 32a7224，`patches/metal2vulkan/0010-patch-with-no-control-points.patch`，回報 Quad 和 0。現在車子和場景都正確。
+  - 剩下的小問題：天空頂端偶爾有幾個小的深色方塊。
+
+用來找出原因的工具：
+
+- `gfxprobe tess`（device 0d2c663）：畫 tessellation 並逐像素檢查。三角形與四邊形、各種 factor 和 partition、Car Chase 的每一種用法（FractionalOdd、36-byte 控制點加 `UChar3Normalized`、UInt16 控制點索引、PerPatchAndPerInstance factor），以及 `patch(quad, 0)`。
+- `NATIVE_METAL_TIMING=1`：每 20 秒把遙測表寫到 stderr。`S c<commits>/<被拒絕>` 這一行一眼就能看出有沒有被拒的 command buffer，T-Rex 就是這樣發現的。
+- `NATIVE_METAL_DUMP_TESS=1`（NativeMetal 76641fa）：把 tessellation 的原始碼和 pipeline 狀態寫到 stderr。
+
+另外加了持久化的 shader 快取（NativeMetal 3eb5926）：Car Chase 從 232 秒降到 133 秒，快取熱時載入只剩約 40 秒。
+
+**陷阱：** 有幾次重開 VM 後，DroidVM app 的 native display 沒有啟動。手機上會出現「Failed to start native display」，或停在開機選單；dmesg 一直出現 `virtio-gpu: command 104 response 1200`，也就是每個 RESOURCE_FLUSH 都被 host 拒絕。`./vm.sh attach` 或 `vm.sh restart` 就能恢復。截圖之前先用 `health.py` 確認「display N frames presented」有在增加。
+
 ## 續報（2026-10-26 11:00，Claude）：隨機記憶體破壞的根因：8 位元 ASID＋vCPU 遷移；改 16 位元 ASID 後 GFXBench 10/10
 
 **根因。**
