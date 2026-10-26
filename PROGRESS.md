@@ -88,6 +88,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - backboardd 會記住最新值，但鎖定畫面（睡著時）和多工畫面當下不轉。實測：多工畫面中送 1，離開後主畫面直接以 1 出現。
 - 開機後若一直停在睡著的鎖定畫面，喚醒時鎖定畫面還是開機時的方向（3），解鎖回主畫面後才正確。
 - rig `vm.sh attach` 的解鎖手勢固定從面板底邊上滑，方向 3／4 時 Home 指示條在左／右側，所以解不開。喚醒用 `home.py`（memory: drm2kgsl-migration）。
+- **已改（待驗證）** 裝置 repo 0de1adc / 213f20a（gfxprobe d705622e）：orient-follow 監看 `com.apple.springboard.hasBlankedScreen`。螢幕關著（state 1）時不送方向；亮起後，若想要的方向和上次送出的不同才補送，所以一定是「真的改變」。會在 log 記「screen blanked」／「screen on」，沒有這個通知時行為和以前一樣。重開後鎖定畫面以方向 4 正確出現，但這次鎖定畫面亮了 10 分鐘都沒睡，沒機會驗證 blank 那條路；之前那次黑畫面的成因（睡著，或鎖定畫面旋轉卡住）也還沒釐清。
 
 ## 續報（2026-10-27 04:50，Claude）：iPadOS 改成直版面板，陀螺儀讓它自然旋轉
 
