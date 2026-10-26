@@ -3,6 +3,64 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-26 11:00，Claude）：隨機記憶體破壞的根因：8 位元 ASID＋vCPU 遷移；改 16 位元 ASID 後 GFXBench 10/10
+
+**根因。**
+- 這個 XNU 用 BCM2837 板子設定編譯，沒有 `HAS_16BIT_ASID`，只用 8 位元硬體 ASID（255 個）。
+- guest 有約 340 個行程，pmap 於是讓多個 address space 共用同一個硬體 ASID（virtual ASID，`pmap_asid_plru`）。
+- 切換時只對「這顆 CPU」的 TLB 清掉那個 ASID（`pmap_switch`、`cpu_sw_asids`），前提是每顆 CPU 的 TLB 永遠是自己的。
+- 在 Gunyah 底下 vCPU 執行緒沒有綁核心（`phone-vcpu-affinity.sh`：每個 vCPU 每秒遷移約 280 次）。一個實體核心會留著別的 vCPU 剛用過的 TLB 項目，行程就用到另一個共用 ASID 行程的轉換，讀寫到對方同一虛擬位址的頁。
+- 最常中的是 shared cache 的 `__DATA_DIRTY`：每個行程都在同一位址，而且大家都一直在讀。裡面有 `__stack_chk_guard`、environ、os_alloc_once 表、pthread keys、malloc 狀態。
+- 症狀正是先前看到的那一串：stack canary 失敗、pthread 簽章、os_unfair_lock、objc_sync、AutoreleasePoolPage、malloc free list。不只 GFXBench，launchd（造成 kernel panic「initproc exited」）、剛出生的 xpcproxy、symptomsd 等 daemon 也會中。
+
+**修正：** fork `patches/xnu/zzxa-16bit-asid.patch`（fork 433dbf9）。
+- BCM2837.h 定義 `HAS_16BIT_ASID`，打開 TCR_EL1.AS，每個 address space 一個硬體 ASID。
+- `pmap_bootstrap` 檢查 `ID_AA64MMFR0_EL1.ASIDBits`，不支援就 panic。所有 ARMv8.2 以上的核心都支援。
+- cpu.c 的 `cpu_sw_asids` 加上條件編譯。
+
+**A/B（CPU 固定頻率，同樣 10 項重型測試，背景跑 `cowcheck`）：**
+
+| | 8 位元 ASID | 16 位元 ASID |
+|---|---|---|
+| GFXBench 10 項 | 每輪 4–5 項失敗（今天多輪） | 10/10 出分 |
+| `cowcheck` 外來 guard | 約 1/4,000 個子行程 | 112,000 個子行程 0 次 |
+| 新 crash report | 每輪數份，含系統 daemon | 0 |
+
+效能也變好：Car Chase 11.0 fps（之前約 9.5），Manhattan 3.1 為 18.1 fps（16.7），Aztec High 4.9 fps（1.3–3.2）。
+
+最終版（拿掉診斷儀器，只留 16 位元 ASID）的確認 soak 結果：
+- GFXBench 9/10 出分。唯一的失敗是一次 Car Chase 在載入階段（`PROGRESS: 0.90`）結束，原因不明：那一輪沒開探針，而 app_ios 當天的 crash report 已經到 25 份上限。
+- `cowcheck` 11.1 萬個子行程 0 次外來頁面。
+- 修正之後沒有任何系統 daemon 的 crash report（daemon 不受 app_ios 的上限影響）。
+- kernel 沒有 panic。
+
+另外，`cowcheck` 每 spawn 一個子行程，dmesg 就印一行 `AMFI: Launch Constraint Violation (enforcing)`。子行程其實照常執行，但其他 kernel 訊息會被洗掉。
+
+**怎麼找到的（這些工具都留在 gfxprobe，見各自的 usage）：**
+- NativeMetal 的 abort 探針（NativeMetal 3ce9d65，`GFX_ENV='NATIVE_METAL_ABORT_PROBE=1' ./gfx-suite.sh ...`）抓到一次 `__stack_chk_fail`：**全域** guard 變成另一個合法格式的值（byte 1 為 00，是 kernel 產生的 guard），frame 裡存的副本沒變。也就是說，GFXBench 看到的是另一個行程的資料頁。
+- `gfxprobe cowcheck PROCS LIFE_MS SECONDS` 讓大量短命行程盯著自己的 guard 和 environ。負載下重現；**不跑 GPU、只用 CPU 記憶體壓力也重現**，GPU 路徑因此排除。其中一次讀到外來 guard 之後，同一頁幾微秒後又跟自己的副本完全一樣，表示是暫態的轉換錯誤（TLB），不是頁被換掉。
+- 之前的 `asidcheck` 沒抓到，因為它的測試頁只有自己的子行程會碰，而且是在閒置時跑。
+
+**排除過的（各有工具，結果都是 0）：**
+- GPU 晚寫入已釋放的 blob：在驅動裡隔離已釋放的頁 2 秒再檢查，17,154 個 blob、8.7 GB。
+- 誤寫進長駐唯讀頁：`textcheck`，含 `__DATA_CONST` 的逐字比對。
+- 全新頁面不乾淨：`zerocheck`，3.6 億頁。
+- reusable 頁被回收後資料遺失：`reusecheck` 加對照組，對照組被收回 1,358 萬頁，寫回的頁 0 遺失。
+- SIMD 和 TSD 暫存器：`regcheck`、`regfault`。
+- mach 收訊的大小：`machcheck`。
+- 檔案讀取：`filecheck`。
+- 匯入時的位址轉換：page stamps。
+- 編譯器並行：加鎖之後照樣失敗。原本的 `std::mutex` 已經讓編譯一次一個。另外，MTLCompiler 會用 `split_stack_call` 自己 mmap 8 MiB 的 stack。
+- GFXBench 改走 droidvm-gpu（`GFX_ENV='TU_DARWIN_VIRTGPU=0'`）：照樣破壞，launchd 也死過一次。
+
+**陷阱：**
+- 改 XNU：直接在 xnu-work 改到別的 patch 的 context，build 重新套 patch 時會失敗，而且 late patch 已經被反向。先跑一次乾淨的 `unixnu build kernel` 讓 tree 恢復，再改，再 `save-xnu-patch.py NAME FILES`，把 patch 放進 fork 和 `$BUILD_OUT/../../patches/xnu`。
+- 改 gfxprobe 必須整個 payload-redeploy（trust bundle 釘住它的 CDHash）。
+- CPU 吃滿超過一分鐘的探針會被 vmguard2 凍結；用 SIGCONT 恢復 crosvm，再殺掉探針。
+- ReportCrash 每個行程每天最多 25 份 report；之後的崩潰只會顯示「no result」。
+
+**另外看到、還沒處理的：** 今天開機時有兩次 panic「ArmCpu: IRQ drain exceeds 128 id=1b」（virtual timer 風暴）。只有 board.toml 的 `armcpu-diagnostics=1` 會把它變成 panic（ArmCpu.cpp:585）；killvm 再 `vm.sh start` 就好。另有一次 vmguard「secondary v3 never slept」，所有 CPU 都已過 stage a6，不是 MMU-off 那個問題。
+
 ## 續報（2026-10-26 03:00，Claude）：GPU 記憶體從 2 GB 降到 590 MB；手機 CPU 被限頻；記憶體破壞仍在查
 
 **越跑越慢**有兩個原因。
@@ -832,7 +890,7 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 本輪完成項：virtio-gpu 顯示已取代 simplefb 顯示，無 simplefb 開機與顯示已實測；過時的 simplefb 閃爍問題描述只作歷史背景，以上方新狀態為準。
 
 1. **GFXBench：** 全部 Metal 測試都能跑到出分（Tessellation 測試除外：這版 iOS 建置沒有它）。待辦：
-   - 記憶體破壞的來源（見最上面的續報）；
+   - ~~記憶體破壞的來源~~：已修好（8 位元 ASID＋vCPU 遷移，fork zzxa-16bit-asid.patch，見最上面的續報）；
    - 把改過的 `libvirglrenderer.so` 正規打包進 APK；
    - GFXBench 每次啟動都在行程內重新編譯所有 shader，需要一個跨行程的 shader 快取。
 2. **Metal Check：** host／guest均28 PASS、0 FAIL、0 SKIP，三項benchmark PASS，UI啟動／保存／停止控制已驗證；兩次五分鐘壓測完成。最後20輪API/counters PASS但視覺FAIL（見上文），不是完整Metal或display conformance。
