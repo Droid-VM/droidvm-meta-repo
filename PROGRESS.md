@@ -50,6 +50,34 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 續報（2026-10-27 06:55，Claude）：桌面滑動破圖（小工具面板＋模糊最明顯）→ 送出畫面前等 GPU 畫完
+
+**現象**：往左拉出「今天」小工具面板（含高斯模糊）時最容易出現。用 screenrecord 錄影抓到的壞格有兩種：
+- 小工具欄那塊變成沒模糊的桌布，或整條消失。
+- 桌面某一頁只剩桌布、沒有圖示。
+
+共同點是只畫了前面幾道（桌布先畫），後面的模糊和小工具沒畫到。
+
+**原因**：3D 改走 virtio-gpu + drm2kgsl、droidvm-gpu 裝置移除後，顯示驅動的 producer wait 變成空轉。
+- `droidvm_gpu_scanout_fence()` 讀的是舊 droidvm-gpu 的進度，已經沒有人更新，每次送出畫面的 fence 都是 0。最近 64 筆紀錄：fence 0、等待 0 µs。
+- host 是在另一個 context 讀 IOSurface 去顯示，不會等 guest 的繪製，所以 GPU 還在畫就被拿去顯示。
+
+**修正**（裝置 repo 555d1ea，需要 `./unixnu build kernel` 再 payload-redeploy）
+- `DroidVMVirtioGpu3D.cpp`：所有 client 帶 fence 的送出共用一個序號（`Pending::order`）。
+  - `droidvm_virtgpu_submitted()`：目前最新的序號。
+  - `droidvm_virtgpu_finished(n)`：序號 ≤ n 的工作是否都已完成。client 正在執行方法時用 try-lock 跳過、稍後再看，不會卡住 client 清單。
+- `DroidVMVirtioGpuDisplay.cpp`：swap 時記下序號，等到 finished 才 flush，每次檢查間睡 1 ms。超過 2 秒仍照樣顯示，並計入 `droidvm_virtio_present_late`。
+- rig 的 `health.py` 在 present 那行多印 "shown before their GPU work finished"。
+
+**結果**
+- 2460 次 swap 裡有 2442 次送出當下 GPU 還沒畫完（99%），平均等 19.9 ms，沒有任何超時。
+- 同樣的小工具面板滑動錄了 225 格，一格破圖都沒有。
+- 離群格掃描（scratchpad `tearscan.py`：與前後兩格都差很多、而前後兩格彼此相似）在修正前的 61 格錄影裡抓到 4 格。
+
+**工具備註**
+- 錄影要用 `su -c screenrecord ... /data/local/tmp/x.mp4`，用 shell 身分寫不進去。
+- rig 的 `input.py` 不會把 app 的 Display 旋轉算進去：D=1 時，input.py 的 x 方向才是 UI 的左右。
+
 ## 續報（2026-10-27 06:25，Claude）：GFXBench IPA 在 iOS 27 實機閃退 → 採用 UIScene；方向不再限制
 
 **原因**：用 Xcode 27.1（iOS 27.1 SDK）建置的 app 必須採用 UIScene 生命週期，否則 UIKit 拒絕啟動。log 是 "Application failed to launch: UIScene life cycle is required for apps built with this SDK"（`_UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption`）。GFXBench 是舊式 AppDelegate 寫法，所以使用者用 SideStore 裝到 iPad（iOS 27.0.1）一開就閃退；VM 的 iPadOS 17 沒有這條規定。
