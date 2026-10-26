@@ -37,7 +37,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 驗證：
   - UniXNU 不變；
   - Ubuntu（有 guest pool）跑 vkmark headless 得 1913 分，再加壓 3 分鐘，host 和 guest 都沒有 GPU fault。
-- **未驗證**：Ubuntu 改成 pseudo-unprotected（沒有池，BO 來自一般 RAM）時開機成功，但拿不到網路，沒辦法進去測。這是另一個待查的問題。Ubuntu 的設定已還原成 `protected_without_firmware`。
+- Ubuntu 改成 pseudo-unprotected（沒有池，guest 顯示 `guest-alloc: no pool in DT, backing blobs from shmem`）：vkmark headless 1890 分，再加壓 3 分鐘，沒有 GPU fault。
+  - 第一次這樣開機時拿不到網路；第二次開機網路正常，原因不明，沒有再重現。
+  - 網卡由 networkd 的 `Type=ether` 比對，與 PCI 位置無關。
+  - Ubuntu 的設定已還原成 `protected_without_firmware`。
 
 **crosvm flip fence（不再 25 ms 強制完成）在 Linux 上的驗證。** Ubuntu（有 guest pool）停掉 sddm，用 `vkmark --winsys kms` 直接做 KMS page flip：
 - mailbox 模式：約 470 fps，跑完不卡；
