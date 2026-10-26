@@ -50,6 +50,28 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 待辦（2026-10-27，Claude）：guest 內的 IPA 自助安裝器 —— 調查結論，實作延後
+
+使用者想要：一個跑在 guest 裡的 GUI app，可選 IPA 安裝，安裝時可選「系統權限 or 普通權限」，不要像現在 lsdiag 跑在主機外面。決定先記錄、晚點再做。
+
+**架構現況（已查證，xnu refer + fork + device repo）**
+- AMFI 強制中。guest 沒開 `amfi_get_out_of_my_way`；只 patch 掉 launch constraints（`owner-skip-launch-constraints=1`，`patches/xnu/zzy-union-staged-apps.patch`）。cdhash/trust-cache 檢查照跑。board.toml 註明「This VM is not a security boundary」。
+- 信任快取只在開機時由 DarwinBoot 從 `kernel.macho.trustcache` 載入一次（`DarwinBoot.c:695`）。`make-owner-trust-bundle.py` 在 Mac 上組 version-2 raw 模組（cdhash + category），board.toml pin 其 SHA-256。沒有 runtime 加 cdhash 的路徑。
+- guest 內的 runtime「安裝」面（ownervisor `add`/`run`、lsdiag `register`、可寫的 `/private/var/ngpu`）只能放檔案、登記 app、定義服務；被 execve 的 binary cdhash 必須已在開機信任快取裡，否則 AMFI `_exit(127)`。ownervisor.m 標頭明言「A brand-new binary cannot be trusted at runtime」。
+- entitlements 純靠 ad-hoc 簽章內嵌 + cdhash 被信任而生效（無 amfid/描述檔）。換 entitlements 會換 cdhash。
+- **兩檔權限都撞同一面牆**：連不帶 entitlement 的普通 app，cdhash 也要被信任才能啟動。權限切換只改模組的 entitlements/category，不改「要不要一個加信任的步驟」。category：0=一般 app（SpringBoard 啟動，如 GFXBench），3=接管 launchd 服務槽的 owner daemon（ownervisor、lsdiag）。
+
+**XNU 有 runtime 載入信任快取的 KPI（kernel-only，非 syscall）**
+- `load_legacy_trust_cache(module, size)`（`kern_trustcache.c:884`）：吃的 raw 模組格式和現在 owner 模組一樣，但被 `XNU_HAS_LEGACY_TRUST_CACHE_LOADING` 擋著，只有 bridgeOS=1、其餘平台=0 直接 `panic`。要用得改 gate，還要賭 AMFI 在 iPadOS 平台接受 `kTCTypeLegacy`。
+- `load_trust_cache_with_type(type, img4_object, …)`（`:745`）：正式支援路，但吃 img4 簽章的信任快取，並對呼叫者做 entitlement 檢查。做一份 kernel 肯收又不需 Apple 簽章的 loadable img4 是最難的一塊。
+- 兩者都要一個 kext user client 包住，gate 給帶 owner entitlement 的 daemon。
+
+**兩條路（擇一，實作時決定）**
+- **A. Kernel runtime 載入**：加 XNU 驅動把 KPI 包成 user client → guest 內 GUI 選 IPA→拆包→算 cdhash→做信任模組→daemon runtime 載入→owner-install。真自助、不重開機、不用主機。成本最高、有 panic 風險（先在實機確認 AMFI 接受 runtime 模組）。符合使用者原意。
+- **B. 主機輔助 + 重開機**：guest 內 GUI 選 IPA/權限/拆包→寫 pending 請求到 Data；主機 watcher 重建信任 bundle+payload 並重開機；開機後 app 完成安裝。風險低，但每次安裝要重開機、且仍要主機那支程式在跑（正是使用者想擺脫的）。
+
+共用的前段（不管 A/B 都要做）：guest 內的安裝器 app —— 選 IPA（Files/分享表單）、顯示 bundle id/cdhash/權限選項、拆包到 Data、呼叫 owner-install/register。
+
 ## 續報（2026-10-26 22:10，Claude）：host 端只剩通用裝置：droidvm-gpu 退役，drm2kgsl 不再辨識 guest
 
 使用者的目標：最後推送的 host 端（crosvm、virglrenderer、app）相對 DroidVM 原本只多出通用裝置（virtio-mmio 可以）。盤點結果：
