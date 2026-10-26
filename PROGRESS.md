@@ -50,6 +50,27 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 續報（2026-10-27 06:25，Claude）：GFXBench IPA 在 iOS 27 實機閃退 → 採用 UIScene；方向不再限制
+
+**原因**：用 Xcode 27.1（iOS 27.1 SDK）建置的 app 必須採用 UIScene 生命週期，否則 UIKit 拒絕啟動。log 是 "Application failed to launch: UIScene life cycle is required for apps built with this SDK"（`_UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption`）。GFXBench 是舊式 AppDelegate 寫法，所以使用者用 SideStore 裝到 iPad（iOS 27.0.1）一開就閃退；VM 的 iPadOS 17 沒有這條規定。
+
+**重現方法（Mac 上，iPad 不用連線）**
+- iOS 27.0 模擬器（iPad Pro 11" M4）。
+- 把 IPA 的 `app_ios` 用 `vtool -set-build-version iossim 15.4 27.1` 改成模擬器平台，ad-hoc 簽章後 `simctl install/launch`。
+- 腳本：Mac `/Volumes/DATA/scratch/gfxsim/simrun.sh`。
+- 把 SDK 版本改標成 26.2 後，同一個執行檔就能啟動，證明這是唯一的阻礙。
+
+**修正**（Droid-VM/gfxbench wip/hackintosh）
+- 942c56cd：`NUISceneDelegate`；Info.plist 加 `UIApplicationSceneManifest`；視窗改在場景連上時建立（`showInWindowScene:`）；前景／背景的處理搬到場景。
+- 019c95f8：四個方向全開，拿掉 `supportedInterfaceOrientationsForWindow:`。VM 已是直版面板加重力旋轉，而 iPadOS 26 起視窗形狀任意；只允許橫向的 app 在直拿的 iPad 上會被側躺著畫。
+- device 70df240 更新 pin（`FORK_REVISION`、`compat.patch`、`source-pin.json`）。
+
+**產物**
+- `ipa-build/ipa2/GFXBench-Metal-5.0.0-droidvm.2.ipa`（sha256 1b060958…，CDHash 0cbc80e6），已放在 Mac 的 http.server :8099。
+- 建置時 TREE 用 `ipa-build/tree-scratch`，VM 的 owner-trust 沒動。VM 裡裝的仍是舊版（0e0088ea）。
+
+**模擬器的限制**：跑分（`-t metal_alu2_off`）在模擬器上 abort，原因是 "Depth, Stencil, DepthStencil textures cannot be allocated with MTLStorageModeShared on this device"（MTLSimDevice）。這是模擬器 Metal 轉譯層的限制，實機和 VM 都沒有。所以模擬器只能驗證到「啟動、介面、進入測試模式」。
+
 ## 續報（2026-10-27 05:45，Claude）：Screen 三選一、Display 與 Screen 解耦、陀螺儀依兩者自動矯正
 
 **app 792e45c**（DroidVM-display-fix，wip/hackintosh）
