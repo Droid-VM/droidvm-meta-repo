@@ -36,6 +36,22 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 另外，`cowcheck` 每 spawn 一個子行程，dmesg 就印一行 `AMFI: Launch Constraint Violation (enforcing)`。子行程其實照常執行，但其他 kernel 訊息會被洗掉。
 
+之後兩輪都是 10/10：
+- 一輪開探針、不跑 `cowcheck`，CPU 固定頻率。
+- 一輪**解除固定頻率**（`phone-cpu-pin.sh free`，big core 上限約 2.57 GHz），加 `cowcheck` 8 萬個子行程，0 次外來頁面，沒有任何 crash。
+
+修正後合計 **39/40**。修正前「頻率上限越高、崩潰越多」的現象，正是 ASID 撞車的特性：同時在跑的行程越多，vCPU 遷移越頻繁，就越容易撞上。
+
+自然頻率下的成績（fps，括號內為固定 1.4 GHz 時）：
+- Aztec Normal 10.3（2.4–4.7）
+- Manhattan 3.1 為 22.0（16–18.7）
+- T-Rex 42.7（28–34）
+- Car Chase 13.7（9.3–11.1）
+- ALU2 44.5（32–39）
+- Aztec High 2.6–3.8（GPU 到 66°C，受溫度限制）
+
+陷阱：`phone-cpu-pin.sh unpin` 寫回的是 pin 當下存的值，如果那時 OPLUS 正在限頻，就會寫回被限制的上限。要回到自然狀態請用新的 `free`（恢復硬體範圍）。
+
 **怎麼找到的（這些工具都留在 gfxprobe，見各自的 usage）：**
 - NativeMetal 的 abort 探針（NativeMetal 3ce9d65，`GFX_ENV='NATIVE_METAL_ABORT_PROBE=1' ./gfx-suite.sh ...`）抓到一次 `__stack_chk_fail`：**全域** guard 變成另一個合法格式的值（byte 1 為 00，是 kernel 產生的 guard），frame 裡存的副本沒變。也就是說，GFXBench 看到的是另一個行程的資料頁。
 - `gfxprobe cowcheck PROCS LIFE_MS SECONDS` 讓大量短命行程盯著自己的 guard 和 environ。負載下重現；**不跑 GPU、只用 CPU 記憶體壓力也重現**，GPU 路徑因此排除。其中一次讀到外來 guard 之後，同一頁幾微秒後又跟自己的副本完全一樣，表示是暫態的轉換錯誤（TLB），不是頁被換掉。
