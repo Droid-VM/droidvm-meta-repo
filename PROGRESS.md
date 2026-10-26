@@ -50,6 +50,42 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 續報（2026-10-27 04:05，Claude）：畫面旋轉與動作感測器（陀螺儀），host 端全部通用
+
+使用者的設計：直版面板＋陀螺儀旋轉，像真機；host 只加通用裝置。iOS guest 端（直版面板、把感測器轉成 backboardd 方向）尚未做。
+
+**Display／Screen 旋轉（app 1a42104，Virtualization edcf182）**
+- 顯示選單的 header 加一列（樣式同輸入模式、鍵盤兩列）：Display 左轉、右轉；Screen 旋轉。
+- Display 轉向 = guest 畫面在 app 視窗裡轉 90°×N。由 `ICrosvmAndroidDisplayService.setSurfaceTransform`（新 AIDL 方法，附加在最後）設 `ANativeWindow_setBuffersTransform`，SurfaceFlinger 零複製旋轉，guest 不知道。SurfaceView 的 fixed size、視窗縮放、觸控／平板／滑鼠／hover、游標熱點都跟著轉。轉 Display 會把 Screen 鎖住（`SCREEN_ORIENTATION_LOCKED`，旋轉交給 guest）。
+- Screen 旋轉 = activity 直橫互換（`USER_PORTRAIT/USER_LANDSCAPE`，尊重系統旋轉鎖），並解鎖。
+- iOS VM 實測：右轉後比例正確、點轉過的設定圖示會開設定。
+
+**crosvm：動作感測器裝置（a845b0fc2、176980de0；`wip/virtio-mmio` 和 `wip/hackintosh`）**
+- virtio_input_absinfo 補上規範的 `res`；custom 裝置 JSON 可寫負數範圍和 `res`；附通用範例設定。
+- `--input motion[path=SOCK,host-sensors=BOOL,name=N]`：內建 evdev 動作感測器（`INPUT_PROP_ACCELEROMETER`，ABS_X/Y/Z 256/g，ABS_RX/RY/RZ 16 per °/s，`MSC_TIMESTAMP`）。
+- `host-sensors=true`：crosvm 自己用 NDK ASensorManager（dlopen libandroid.so）讀手機感測器 50 Hz。crosvm 以 root 跑，sensorservice 只限制 app uid 的背景存取，所以 app 關著也有數據（使用者指示：root 讀得到就走 root）。
+- socket 上寫入的 frame 會覆寫宿主數據，停送 1 秒或斷線後交還。
+- **正負號**：裝置回報重力向量（直立 Y = −1 g），這是 Linux iio-sensor-proxy 的慣例（y<0 normal、x>0 left-up、1 g≈256）。Android 回報反作用力（直立 +9.81），所以取負。Ubuntu 實測：手機原生右緣朝上（Android `ROTATION_90`），monitor-sensor 判 right-up；取負前判 left-up（錯）。
+
+**app：外設設定與覆寫（0669bc0、5c9ecc0）**
+- 外設分頁新增「Virtio 裝置」：Virtio 傳輸 PCI／MMIO（`virtio_transport`），動作感測器 關閉／物理／虛擬／自動（`motion_sensor`）。缺欄位＝PCI、關閉。QEMU 不允許。
+- MMIO：磁碟改 `--virtio-mmio-block`，加 `--virtio-mmio-input/-net/-gpu`（extra_options 已有的不重複）。
+- daemon 在各螢幕輸入裝置之後加 `--input motion[...]`；新的 SENSOR 輸入通道（`dvmin_<vm>_sen.sock`，有裝置才綁）。
+- 顯示畫面在前景時覆寫：物理＝手機數據依宿主旋轉 R＋Display 轉向 D 換到 guest 座標；虛擬＝沿視窗往下的重力依 D 換算、每 200 ms 重送；自動＝Screen 鎖定用物理、解鎖用虛擬。
+- Ubuntu 實測（motion_sensor=auto）：無畫面 right-up（宿主）→ 開畫面 normal/vertical（虛擬）→ Display 右轉 left-up（物理，R=1＋D=1）→ 轉回 normal → Screen 解鎖 vertical → 關畫面 1 秒後 right-up。單元測試 515 個全過。
+- Ubuntu VM 的設定測完已還原。它的 SSH 請用固定的 IPv6 `2a0e:b107:1953:cc:82:19ff:fe1d:10de`（IPv4 會變）。
+
+**意外發現：app 的 `vms.json` 裡 iOS VM 還留著 M7 前的 `--droidvm-gpu`**
+- 之前只用 `vm_modify` 改了 daemon 記憶體中那份。這次 daemon 重啟後從 `vms.json` 載入舊設定，crosvm 回報 `Unrecognized argument: --droidvm-gpu`，開機失敗。
+- 已從 `vms.json`（原檔備份在手機 `/data/local/tmp/vms.json.bak-20261027`）和 daemon 兩邊拿掉；iOS VM 已正常開機、觸控正常。
+- 以後用 `vm_modify` 改 iOS VM 時，`vms.json` 也要一起改。
+
+**iOS 端待辦**
+- 面板改直版 1024×1366（只改 host gpu-0 寬高；DarwinBoot 的 8 MiB boot video 夠用；清 MobileGestalt 快取；觸控邊緣常數和底部 snap 要配合）。
+- guest 驅動新增動作感測器類型，轉成 backboardd 方向（`BKSHIDServicesSetDeviceOrientationForAutomation`，gfxprobe orient 已驗證可用），日後可做 IOHID 感測器給 CoreMotion。
+- 關掉 guest 的旋轉鎖。
+- 在 MMIO 的 iOS VM 上開動作感測器會讓網路和 GPU 的 mmio 位址後移，ADT 要重建。
+
 ## 待辦（2026-10-27，Claude）：guest 內的 IPA 自助安裝器 —— 調查結論，實作延後
 
 使用者想要：一個跑在 guest 裡的 GUI app，可選 IPA 安裝，安裝時可選「系統權限 or 普通權限」，不要像現在 lsdiag 跑在主機外面。決定先記錄、晚點再做。
