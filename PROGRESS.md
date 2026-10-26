@@ -50,6 +50,45 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 續報（2026-10-27 05:45，Claude）：Screen 三選一、Display 與 Screen 解耦、陀螺儀依兩者自動矯正
+
+**app 792e45c**（DroidVM-display-fix，wip/hackintosh）
+
+**選單**
+- **Display 列：** 左轉／目前角度（點一下歸零）／右轉。轉 Display 不再鎖 Screen。
+- **Screen 列（三選一）：**
+  - 強制水平：`USER_LANDSCAPE`
+  - 強制垂直：`USER_PORTRAIT`
+  - 跟隨系統：`FULL_USER`。系統自動旋轉開著就轉，系統鎖定就不轉。
+
+**陀螺儀矯正**（外設頁：動作感測器開／關 ＋「依畫面自動矯正」，兩個都是布林值，舊的 off/physical/virtual/auto 已移除）
+- guest 收到的重力 ＝ 真實重力 → 轉 R（螢幕真實旋轉角，`Display.getRotation`）→ 轉 D（Display 角度）。即 guest 看到的是「畫面裡」的重力。
+- 誰負責轉：Android 會隨裝置轉視窗時（`ScreenMode.windowFollowsDevice`），重力限制在視窗正下方 ±30°（guest 門檻 35°），guest 不轉，避免「guest 先轉、Android 再轉、guest 轉回」。Android 不轉視窗時，guest 跟隨重力。
+- 不矯正時，guest 收到 crosvm 讀到的原始數據（平板本體座標）。
+
+**強制方向在大螢幕上的實測（OnePlus Pad 2，Android 16，`ignoreOrientationRequest=true`）**
+- 橫拿時按「強制垂直」：螢幕不轉（mRotation 仍為 1），視窗變成中間 751–2249 × 2120 的直式區域，兩側留黑。也就是「左右留白」，不是真的轉。
+- app 用 WindowMetrics 區分三種結果：
+  - `ROTATED`：螢幕本身是要求的形狀。
+  - `LETTERBOXED`：螢幕不變，但視窗是要求的形狀。
+  - `IGNORED`：兩者都不是。
+- 後兩種會跳提示，並記住「這台螢幕不為 app 轉向」（device-wide pref）。
+- 留白時 `Display.getRotation()` 仍回報真實的 1（沒被相容模式改寫），所以矯正正確：guest 方向 1、重力 (0, −205)。
+- 要讓 guest 在橫拿的平板上直立，用 Display 旋轉，不靠強制垂直。
+
+**實測（iOS VM）**
+- 跟隨＋0°：guest 直向 1，在橫向視窗中央。
+- 強制垂直：左右留白，仍是 1。
+- 跟隨＋90°：方向 4，iPadOS 橫式鋪滿視窗。
+
+**設定**：`vms.json`、rig 的 `unixnu-vm.config.json`、daemon 都改成 `"motion_sensor": true, "motion_sensor_correct": true`（字串值會讀成 false）。
+
+**已知問題（guest 端）**
+- orientd 只在方向「改變」時送一次 `BKSHIDServicesSetDeviceOrientationForAutomation`。
+- backboardd 會記住最新值，但鎖定畫面（睡著時）和多工畫面當下不轉。實測：多工畫面中送 1，離開後主畫面直接以 1 出現。
+- 開機後若一直停在睡著的鎖定畫面，喚醒時鎖定畫面還是開機時的方向（3），解鎖回主畫面後才正確。
+- rig `vm.sh attach` 的解鎖手勢固定從面板底邊上滑，方向 3／4 時 Home 指示條在左／右側，所以解不開。喚醒用 `home.py`（memory: drm2kgsl-migration）。
+
 ## 續報（2026-10-27 04:50，Claude）：iPadOS 改成直版面板，陀螺儀讓它自然旋轉
 
 **結果**：guest 面板是直版 1024×1366（等於真 iPad7,1 的 points）。平板橫拿時，在 app 按一次 Display 右轉（Screen 隨之鎖定，交給 guest 旋轉），iPadOS 就以正立的橫式主畫面鋪滿橫向視窗；觸控也正確（點「設定」以橫式打開）。轉動實體平板，iPadOS 會跟著轉。
