@@ -51,7 +51,12 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 **還沒做：**
 - guest 端的完整清理：只服務 0x4149 的小 user client，移除 KGSL proxy 原始碼。
 - vgpu-3d 下 scanout 不等 3D 完成（`droidvm_gpu_scanout_wait` 在這條路徑沒作用）。
-- Aztec 牆面暗塊的根因：來自 pass 1 第 275–288 個光照 draw（envprobe irradiance 盒子等）；跳過這些 draw 暗塊就消失。
+- Aztec 牆面暗塊：查到這一步（NativeMetal b69ca28 的工具）。
+  - 暗塊來自 G-buffer pass 後段的光照 draw（envprobe irradiance 盒子）；跳過這些 draw，暗塊就消失。
+  - 每個盒子讀自己探針的 SH 係數。GPU 寫出的 SH 和 CPU 照 `m_envprobe_generate_sh_compute` 用同一幀的探針圖集重算的結果一致（每個被畫到的探針誤差 ≤ 0.2%），所以 SH 的計算沒錯。
+  - 暗的探針（例：12、17、19 號）是因為它們的環境圖本身就暗。環境圖來自直接光照 lightmap（太陽加火炬，1024x1024），而 lightmap 約 98% 是黑的，只有陽光和火炬附近有亮區。
+  - 陰影取樣用 shader 裡寫死的 constexpr sampler（`compare_func::less_equal`），和綁定的 sampler 無關。
+  - 這可能就是演算法在室內的正確結果，也可能是 lightmap 的打光或陰影有誤。需要真機或 Android 原生 GFXBench 同一時間點的畫面當參考才能判斷。
 
 ## 續報（2026-10-26 19:50，Claude）：Aztec Ruins 全黑修好了：pipeline reflection
 
