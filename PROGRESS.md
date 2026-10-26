@@ -1,7 +1,54 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-27。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-27 01:00，Claude）：整套 iOS hackintosh 都推上 GitHub 了
+
+從 meta repo 的 `wip/hackintosh` 重建時，各元件依 `lib_branch.sh` 的分支鏈（`wip/hackintosh` → `droidvm`，app 是 → `master`）拿到的版本，都已核對等於目前部署的版本。
+
+**沿分支鏈拿到的元件**
+
+| Repo（Droid-VM/） | 分支 | Commit |
+|---|---|---|
+| droidvm-meta-repo | `wip/hackintosh` | 本 commit |
+| crosvm | `wip/hackintosh`（新建，和 `wip/virtio-mmio` 同一個 commit） | `89c3f9725` |
+| virglrenderer（drm2kgsl） | `wip/hackintosh` | `b743904fc` |
+| edk2-gunyah | `wip/hackintosh` | `67b9dba4a` |
+| DroidVM app | `wip/hackintosh` | `852027a56` |
+| gfxstream、Virtualization、libvncserver、zstd、crosvm-minimal-manifest、droidvm-guest-additions、mesa、mesa-cross、gunyah_host_mod | `droidvm`（這次沒改，本機沒有未推的 commit） | — |
+
+- 之前 crosvm 只推 `wip/virtio-mmio`。分支鏈找不到 `wip/hackintosh` 時，會退回沒有 virtio-mmio 的 `droidvm`，iOS VM 就開不了機。現在兩個分支都要推。
+
+**UniXNU 這邊（建在 build Mac 上）**
+
+| Repo | 分支 | Commit |
+|---|---|---|
+| UniXNU-droidvm（裝置 repo） | `wip/hackintosh` | `d520caf7b`（rig 工具已補齊、scrub 過） |
+| UniXNU fork | `wip/droidvm` | `16f58b47d` |
+| fork 的 Droid-VM submodules | NativeMetal、NativeAdreno、NativeMobileDisplay、ArmCpu 在 `wip/hackintosh`；DarwinBoot 在 `wip/droidvm-virtio-gpu` | `b69ca28f4`、`77088961d`、`3aa4b2680`、`52454a292`、`af934b218` |
+| fork 的 UniXNU/ submodules | 上游各自的 `main` | 每個 pin 都確認可由遠端分支取得 |
+
+**不在 repo 裡的東西**
+- Apple 的二進位：iPadOS IPSW、kernelcache。
+- 測試用的 GFXBench 本體。它的改動收在裝置 repo 的 `compat.patch`。
+- rig 的私人設定：`rigenv.sh`、VM config 等。
+- `DroidVM_20260903.zip`（舊 app 包）。
+
+**GFXBench（Metal，onscreen；目前的堆疊：virtio-gpu＋drm2kgsl，droidvm-gpu 已退役）**
+
+| 測試 | fps | 量測 |
+|---|---|---|
+| Aztec Ruins Normal | 17.7–17.9 | 10-26 21:41／21:51，大核限頻 1.36 GHz |
+| Aztec Ruins High | 8.6 | 10-26 19:47，限頻 1.71–1.92 GHz |
+| Car Chase | 10.8 | 10-26 21:41，1.36 GHz |
+| T-Rex | 33.2 | 10-26 21:41，1.36 GHz |
+| ALU 2 | 56.3–57.7 | 10-26 21:41／21:51 |
+| Manhattan 3.1 | 22.0 | 10-26 13:00，M7 之前，頻率沒記錄 |
+
+- 舊的 droidvm-gpu 路徑上，ALU 2 是 22 fps。
+- 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
+- 診斷用的 dump 跑分偏低，不算在內。
 
 ## 續報（2026-10-26 22:10，Claude）：host 端只剩通用裝置：droidvm-gpu 退役，drm2kgsl 不再辨識 guest
 
@@ -919,7 +966,7 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 | DroidVM meta repo（本 repo） | `DroidVM_wip_gpu` | `wip/hackintosh` → `git push https://github.com/Droid-VM/droidvm-meta-repo.git wip/hackintosh:wip/hackintosh`（origin 是 SSH，不能用；**絕不推 `droidvm`**） |
 | UniXNU 裝置 repo | `UniXNU/UniXNU-droidvm` | `main` → `git push droidvm main:wip/hackintosh`；推之前先跑 rig 的 `scrub_rig.py` |
 | UniXNU fork | `UniXNU/orgrepos/UniXNU` | `droidvm` → `git push droidvm droidvm:wip/droidvm`（不推 origin） |
-| crosvm | 本 repo的 `crosvm/` | `wip/virtio-mmio` → Droid-VM/crosvm |
+| crosvm | 本 repo的 `crosvm/` | `wip/virtio-mmio` → Droid-VM/crosvm 的 `wip/virtio-mmio` **和** `wip/hackintosh`（後者是 build 腳本的分支鏈會拿的） |
 
 2026-10-24 最初交接時的head（歷史；最新commit見文件頂端）：
 - meta：本 commit
