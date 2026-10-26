@@ -50,6 +50,28 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 續報（2026-10-27 04:50，Claude）：iPadOS 改成直版面板，陀螺儀讓它自然旋轉
+
+**結果**：guest 面板是直版 1024×1366（等於真 iPad7,1 的 points）。平板橫拿時，在 app 按一次 Display 右轉（Screen 隨之鎖定，交給 guest 旋轉），iPadOS 就以正立的橫式主畫面鋪滿橫向視窗；觸控也正確（點「設定」以橫式打開）。轉動實體平板，iPadOS 會跟著轉。
+
+**鏈路**：平板感測器 → crosvm `--input motion`（root 讀 ASensorManager；app 開著時由 app 覆寫，依 R＋D 換算）→ guest `DroidVMVirtioInput.c` 新增 KIND_MOTION，算出 UIDeviceOrientation → `kern.droidvm_motion`（`DroidVMMotion.c`，執行時 `sysctl_register_oid`）→ owner 服務 orientd（`gfxprobe orient-follow`，10 Hz）→ `BKSHIDServicesSetDeviceOrientationForAutomation` → backboardd／SpringBoard 轉向。裝置 repo 3047031、0b17f9a。
+
+**做法與數值**
+- 方向判斷照 iio-sensor-proxy：某軸偏離另兩軸平面超過 35° 才算（整數：100·x² > 49·(y²+z²)，kernel 不能用浮點）；平放或介於兩者之間維持原值。
+- Home 手勢的底部吸附改成吸附到重力指向的那一邊；沒有感測器時維持原本的面板底邊。
+- 實測紀錄（orientd log）：無畫面時宿主數據 (−205, −1, −155) → 3；開畫面虛擬 → 1；Display 右轉後物理 (204, 0, −155) → 4。
+
+**設定變更（三處要一致）**：iOS VM 的 gpu-0 改 1024×1366、`motion_sensor=auto`，同時改 daemon（`vm_modify`）、app 的 `vms.json`、rig 的 `unixnu-vm.config.json`。多一個輸入裝置 → mmio：input 0x0a003000–0x0a007000、net 0x0a008000、gpu 0x0a009000（board.toml、`package/crosvm-gunyah.dtb`，`ALLOW_CHANGE=adt payload-redeploy.sh gfxprobe`）。
+
+**踩到的坑**
+- 手動建 `sysctl_oid` 要加 `CTLFLAG_OID2`，否則 arm64 直接 panic（「Old style sysctl without a version number」）。
+- 換面板尺寸後必須刪 MobileGestalt 快取（`…mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist`，已備份到 `/private/var/ngpu/backup/`）再重開，否則觸控照舊尺寸換算、點不到東西。
+- payload-redeploy 在 kernel panic 時會在「放 ssh key、stage 工具」之前結束，要自己補 `export.py put` gfxprobe。
+- 控制中心要用夠長、夠慢的下滑才會完整展開；拉一半會停在半展開（模組下半部是鋸齒狀）。旋轉鎖已在控制中心關閉。
+- orientd 的服務定義現在在 Data 裡（ownerctl 加的）；`add-ownervisor-data.py` 之後新建的 seed 也會帶上。
+
+**備註**：D=1 時 guest 面板相對實體面板轉了 180°（R+D=2），直拿平板時 iPadOS 會用倒直向，看起來仍是正的。若要 guest 面板和實體面板完全對齊，用 D=3（從 0 左轉一次）；app 關閉時 crosvm 送的宿主數據就是這個對齊方式。
+
 ## 續報（2026-10-27 04:05，Claude）：畫面旋轉與動作感測器（陀螺儀），host 端全部通用
 
 使用者的設計：直版面板＋陀螺儀旋轉，像真機；host 只加通用裝置。iOS guest 端（直版面板、把感測器轉成 backboardd 方向）尚未做。
