@@ -50,6 +50,41 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 續報（2026-10-27 07:45，Claude）：等 GPU 之後的 fps；交出畫面時就完成交換
+
+**現象**：修正破圖之後，每張畫面都依序經過兩段，worker 一次只處理一張：
+
+- 等 GPU：約 20 ms。
+- flush 給 host：約 20 ms。
+
+翻頁拖曳約 22～28 fps，小工具面板約 15～21 fps。修正前不等 GPU，每格約 25 ms，但會讀到半成品。
+
+**改法**：交出畫面時就完成交換，讓 backboardd 可以先畫下一張。
+- **NativeMobileDisplay**（Droid-VM fork `wip/hackintosh` 3a60fb7，fork ed6295f）：新增弱定義的平台掛勾 `native_legacy_gpu_retires_on_offer()`，預設 false。`sheng-early-retire=1` 仍是無條件的診斷開關。
+- **device 6eb701e**：`LegacyDisplayProbe` 在畫面交給 virtio 顯示時回答 true。
+- **為什麼安全**：
+  - crosvm 的 flip flush 要等 Android 端的 blit 讀完 guest 緩衝區才回應，其他 sink 則是在返回前就讀完。
+  - 下一張要等這張回報之後才會交出。
+  - 所以提早完成交換只會釋放「上一張」，而上一張早就被複製走了。
+- **A/B 開關**：`droidvm_virtio_retire_on_offer`，用 rig 新增的 `poke.py` 寫入。rig 的 `health.py` 不再把 early retires ≠ 0 判為不健康，改看 `native_legacy_early_failures`。
+
+**A/B**（同一次開機，大核上限 1.40／1.36 GHz，各 3 輪、每輪 3 秒拖曳；腳本 scratchpad `dragfps.sh`）
+
+| 情境 | 開 | 關 |
+|---|---|---|
+| 翻頁 | 28.3／29.4／27.6 fps | 26.6／25.6／24.6 fps |
+| 小工具面板 | 約 21 fps | 約 21 fps，無差別 |
+
+- 小工具面板錄影 219 格，沒有半成品畫面。
+- 第一次在別次開機量到的 43.5 fps 不可信：拖曳時的桌面狀態不同。
+
+**下一個瓶頸**：每張仍要等約 20 ms 才收到 GPU 完成，再 flush 約 20 ms，兩段依序進行。而 host GPU 跑在 903 MHz，只有約 40% 忙，所以這是延遲，不是運算量。
+- 候選一：查 crosvm／virglrenderer 的 fence 回報延遲。
+- 候選二：查 flush 的 20 ms，可能是 Android BufferQueue 的 dequeue 或 vsync 等待。
+- 候選三：讓 worker 同時處理兩張（等第 N+1 張的 GPU 和第 N 張的 flush 重疊），但這要求「第 N+1 張的交換在第 N 張 flush 完成後才完成」，得改 NativeLegacyDisplay 的單張 latch。
+
+**其他**：VM 重開後，app 的顯示畫面有時沒有回來，這時送出畫面會全部失敗（IOError，command errors 增加），`vm.sh attach` 就恢復了。
+
 ## 續報（2026-10-27 06:55，Claude）：桌面滑動破圖（小工具面板＋模糊最明顯）→ 送出畫面前等 GPU 畫完
 
 **現象**：往左拉出「今天」小工具面板（含高斯模糊）時最容易出現。用 screenrecord 錄影抓到的壞格有兩種：
