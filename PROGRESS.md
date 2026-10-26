@@ -916,7 +916,12 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 1. **GFXBench：** 全部 Metal 測試都能跑到出分（Tessellation 測試除外：這版 iOS 建置沒有它）。待辦：
    - ~~記憶體破壞的來源~~：已修好（8 位元 ASID＋vCPU 遷移，fork zzxa-16bit-asid.patch，見最上面的續報）；
    - 把改過的 `libvirglrenderer.so` 正規打包進 APK；
-   - GFXBench 每次啟動都在行程內重新編譯所有 shader，需要一個跨行程的 shader 快取。
+   - ~~GFXBench 每次啟動都在行程內重新編譯所有 shader~~：已加入持久化 shader 快取（NativeMetal 3eb5926，fork 4675e62）。
+     - 快取放在每個行程自己的 `Library/Caches/native-metal-shaders/`，key 是 MTLCompiler 的 UUID 加上請求內容的 SHA-256。
+     - Car Chase 總時間從 232 秒降到 133 秒，fps 不變。
+     - 第一次啟動仍會完整編譯。
+     - `NATIVE_METAL_NO_SHADER_CACHE=1` 可以關閉。
+     - 注意：GFXBench 的 container 在 `/private/var/mobile/Containers/Data/` 底下，guest 的 root ssh 沒有權限列出（Operation not permitted），所以看不到它的快取檔。gfxprobe 的快取在 `/var/root/Library/Caches/native-metal-shaders/`。
 2. **Metal Check：** host／guest均28 PASS、0 FAIL、0 SKIP，三項benchmark PASS，UI啟動／保存／停止控制已驗證；兩次五分鐘壓測完成。最後20輪API/counters PASS但視覺FAIL（見上文），不是完整Metal或display conformance。
 3. **通用外設：** `plans/HOST_PERIPHERALS_SURVEY.md` 已完成；實作未開始。下一步先定共同 protocol/capabilities，再按 survey 驗證 battery provider；transport 支援不代表 guest OS 原生 API 已接通。
 4. **顯示效能：** 將 producer 依賴精確綁定每個 IOSurface，評估減少不必要的全域等待；接入 3D 前隔離 renderer／display fence。
