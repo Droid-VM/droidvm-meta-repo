@@ -12,7 +12,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 | crosvm：virtio-mmio 的 block/input/net/gpu、Gunyah ioeventfd datamatch 修正 | 通用 | 保留 |
 | crosvm：`--droidvm-gpu`（KGSL proxy，自訂 virtio ID 59） | iOS 專用 | **已移除**（crosvm 89c3f9725） |
 | drm2kgsl：依 context 名稱 `xnu:` 決定釋放時解除綁定 | 辨識 guest | **改成所有 guest 適用**（virglrenderer b743904f） |
-| crosvm virtio-gpu：flip fence 不再強制完成、guest blob iovec | 通用，但改了 Linux 的行為 | 待在 Ubuntu 上驗證 |
+| crosvm virtio-gpu：flip fence 不再強制完成、guest blob iovec | 通用，但改了 Linux 的行為 | **Ubuntu 驗證通過**（見下） |
 | `--simplefb`、`--pre-alloc`、`--android-display-service` | 9 月就在 `droidvm` 分支 | 原本的功能 |
 
 **droidvm-gpu 退役（M7）。**
@@ -39,10 +39,15 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - Ubuntu（有 guest pool）跑 vkmark headless 得 1913 分，再加壓 3 分鐘，host 和 guest 都沒有 GPU fault。
 - **未驗證**：Ubuntu 改成 pseudo-unprotected（沒有池，BO 來自一般 RAM）時開機成功，但拿不到網路，沒辦法進去測。這是另一個待查的問題。Ubuntu 的設定已還原成 `protected_without_firmware`。
 
+**crosvm flip fence（不再 25 ms 強制完成）在 Linux 上的驗證。** Ubuntu（有 guest pool）停掉 sddm，用 `vkmark --winsys kms` 直接做 KMS page flip：
+- mailbox 模式：約 470 fps，跑完不卡；
+- fifo 模式：穩定 120 fps（每幀都等 flip）；
+- fifo 跑的同時，把 app 的顯示畫面叫到前景再按 Home，反覆拆裝 Surface 四次：只有拆的瞬間掉到 97 fps 一次，馬上恢復，guest 從沒卡住；
+- crosvm 沒有任何 flip fence 警告。
+
 **還沒做：**
 - guest 端的完整清理：只服務 0x4149 的小 user client，移除 KGSL proxy 原始碼。
 - vgpu-3d 下 scanout 不等 3D 完成（`droidvm_gpu_scanout_wait` 在這條路徑沒作用）。
-- 在 Ubuntu 上驗證 crosvm virtio-gpu 的 flip fence 改動。
 - Aztec 牆面暗塊的根因：來自 pass 1 第 275–288 個光照 draw（envprobe irradiance 盒子等）；跳過這些 draw 暗塊就消失。
 
 ## 續報（2026-10-26 19:50，Claude）：Aztec Ruins 全黑修好了：pipeline reflection
