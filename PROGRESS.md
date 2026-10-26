@@ -3,6 +3,37 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-26 19:50，Claude）：Aztec Ruins 全黑修好了：pipeline reflection
+
+**先處理 hugepage pool。** 17:00 那次之後 pool 卡在 2498/2560，acquire 補不回來。使用者同意重開手機，重開後 pool 回到 2560/2560。重開手機後的步驟：
+- `load-modules.sh`：載入 Host Share 等模組；
+- `guard-start.sh`：啟動 vmguard；
+- 掛上 hostwatch 與 guard 的監視器；
+- `vm.sh start`。
+
+之後每次關機仍會掉約 115 頁（例：2445/2560），但在剛重開的手機上，`vm.sh` 的 acquire 補得回來。
+
+**Aztec Ruins 全黑。**
+- 原因：NativeMetal 建立 pipeline 時，`reflection:` 一律回 `nil`。GFXBench 的 NGL 引擎（只有 Aztec 用它；T-Rex、Manhattan、Car Chase 用舊引擎）完全靠 reflection 找 uniform：
+  - uniform struct buffer 的成員給出每個 uniform 在 `setVertexBytes`/`setFragmentBytes` 資料裡的 offset；
+  - 各 argument 給出每張貼圖和 buffer 的 index。
+- 沒有 reflection，它就什麼都不綁。shader 讀到的全是 0，所有幾何都被裁掉，深度維持在清除值 1.0，整個畫面全黑（但照樣出分，8.7 fps）。
+- 修正：NativeMetal 582edf5（fork 8659a7b）。
+  - bridge 新增 `nmb_render_pipeline_reflection` / `nmb_compute_pipeline_reflection`，把 metal2vulkan descriptor 的 reflection 輸出成 JSON。
+  - frontend 用 Metal 自己的 `MTLArgument`、`MTLStructType`、`MTLStructMember`、`MTLArrayType`、`MTLPointerType`、`MTLTextureReferenceType` 和 pipeline reflection 類別的子類別回應，所以呼叫端的類別檢查會通過。completion handler 版本也一併回傳。
+- 結果：神殿、陰影、景深、bloom 都正確。Aztec Normal 在大核 2.11 GHz 時 20 fps，1.71 GHz 時 13.5 fps；High 8.6 fps。同一版下 Car Chase 和 T-Rex 都正常，沒有 crash。
+
+**找出原因的工具（NativeMetal 582edf5）：**
+- `NATIVE_METAL_WARNINGS=1`：metal2vulkan 的訊息（降級、精度說明），每種印一次。
+- `NATIVE_METAL_DUMP_CB=起:數量`：在 app 的第「起」個 command buffer 之後讀回結果。
+  - 每個 pass 的 attachment：load/store/clear。
+  - 每個 pass 前 6 個 draw：pipeline（函式、格式、vertex layout）、depth state、viewport，以及每個綁定的 buffer/bytes 的前幾個 word。
+  - 每個 target：各通道的 min/max/mean、NaN、inf、黑色比例，以及 32x8 的亮度格。
+  - Aztec 的線索就是這樣看出來的：每個 draw 都只綁了 vertex buffer 0，完全沒有 uniform。
+- GFXBench 原始碼（BSD，含 NGL）在 Mac 的 `$BUILD_OUT/benchmarks/gfxbench`。
+
+**還沒解決：** Aztec 牆面上偶爾有幾塊柔邊、和螢幕對齊的暗色矩形。前面的藤蔓不受影響，所以問題出在光照（可能是 SSAO 或間接光）；Car Chase 天空頂端的小暗塊可能是同一類問題。32x8 的亮度格太粗，找不到這些暗塊，下一步要做全解析度擷取。
+
 ## 續報（2026-10-26 17:00，Claude）：GFXBench 的破圖（T-Rex 全黑、Car Chase 車身全黑加尖刺）修好了
 
 使用者回報「3d 渲染結果有破圖」。之前只看分數、沒有看畫面。逐一截圖後，各測試狀況如下：
