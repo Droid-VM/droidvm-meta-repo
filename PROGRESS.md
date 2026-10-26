@@ -75,7 +75,15 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - CPU 吃滿超過一分鐘的探針會被 vmguard2 凍結；用 SIGCONT 恢復 crosvm，再殺掉探針。
 - ReportCrash 每個行程每天最多 25 份 report；之後的崩潰只會顯示「no result」。
 
-**另外看到、還沒處理的：** 今天開機時有兩次 panic「ArmCpu: IRQ drain exceeds 128 id=1b」（virtual timer 風暴）。只有 board.toml 的 `armcpu-diagnostics=1` 會把它變成 panic（ArmCpu.cpp:585）；killvm 再 `vm.sh start` 就好。另有一次 vmguard「secondary v3 never slept」，所有 CPU 都已過 stage a6，不是 MMU-off 那個問題。
+**開機 panic「ArmCpu: IRQ drain exceeds 128 id=1b」已處理**（ArmCpu 52454a2，fork 9ebd783）。
+- 今天約 15 次開機中出現 2 次。
+- 原因：virtual timer 在開機時本來就會突發。vCPU 被 host 搶占後，`rtclock_intr` 剛設的 deadline 到 EOI 時已經過了，timer 就再觸發一次。這是正常的突發，不是卡住的中斷線。
+- 只有 `armcpu-diagnostics=1` 會把超過 128 次變成 panic。
+- 現在改成計數：`armcpu_irq_long_drains` 記錄超過 128 次的次數，`armcpu_irq_drain_most` 記錄單次最大值。只有單次超過 100 萬次（真的停不下來）才會 panic。計數在沒開診斷時也有效。
+- 驗證：連續重開 5 次都沒有 panic，單次最多 drain 102、56、64、20、86 次，常常逼近舊的門檻。
+- 開機期間 timer 中斷約每秒 2.3 萬次，閒置時約每秒 1,500 次（4 核）。
+
+**還沒處理的：** 一次 vmguard「secondary v3 never slept」，所有 CPU 都已過 stage a6，不是 MMU-off 那個問題；killvm 再 `vm.sh start` 就好。
 
 ## 續報（2026-10-26 03:00，Claude）：GPU 記憶體從 2 GB 降到 590 MB；手機 CPU 被限頻；記憶體破壞仍在查
 
