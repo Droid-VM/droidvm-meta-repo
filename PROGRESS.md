@@ -50,6 +50,32 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 續報（2026-10-27 07:55，Claude）：guest 的 droidvm-gpu 驅動拆除；wip/vpu 已 rebase 並強制推送
+
+**guest 拆除**（裝置 4284c6c）
+- `DroidVMGpu.cpp` 從 1054 行減到 270 行。只留 virtio 路徑需要的部分：
+  - 發布 NativeAdreno，註冊 Metal accelerator（Metal 外掛的 user client 0x4149 就是 accelerator 的，由 `DroidVMVirtioGpu3D.cpp` 服務）。
+  - `droidvm-gpu-clients` 的沙盒授權。
+  - NativeAdreno 硬體類別的「從未 attach」版本：行為和原本未 attach 時完全相同，所以 0x4147 仍然被拒絕。
+- 一併刪除：
+  - `DroidVMGpuWire.h`。
+  - ADT 的 `--gpu-mmio`、`/arm-io/gpu`。
+  - `droidvm-gpu=1`。
+  - 顯示驅動的舊 producer fence。
+- rig 工具（health、display-soak、display-profile、metalcheck-run）：
+  - 改讀 `droidvm_virtgpu_stats`。
+  - 改檢查 `native_legacy_early_failures`。
+- 新的狀態變數 `droidvm_metal_publish` 依序是：發布狀態、accelerator 階段、狀態。
+- 驗證：開機時 `{0, 5, 0}`，virtio GPU 有 6 個 3D client。MetalCheck CLI 29/29 通過，裝置是 Turnip Adreno 750。小工具面板正常。
+
+**wip/vpu 分支**
+- 分身在 worktree 裡合併，再 rebase 到主線；Leehe-byte 的「Reapply VA2j」（AV1 `KEY_LOW_LATENCY`）照使用者決定丟掉。
+- 強制推送（`--force-with-lease`）：
+  - crosvm wip/vpu：f972aa0 → 806372101。內容是主線加 76 個 commit：HuJK 70 個、wingpu 6 個。
+  - DroidVM app wip/vpu：a6d8386 → 19d8e99。內容是 master 加 25 個 commit。衝突在 `CrosvmBackendInstance.java`，用 master 的 `ProtectedVM.resolveFor` 放在 wip/vpu 提前計算的位置。575 個測試通過。
+- 舊版本留在本機分支 `backup/wip-vpu-*`。
+- 相機／編解碼的計畫見本日對話：virtio-media 已有設計（meta `plans/VPU_DESIGN.md`）。Linux 先用 rebase 後的 crosvm 重建驗收；iPadOS 需要 `--virtio-mmio-media`、XNU virtio-media 驅動和 VideoToolbox 外掛。
+
 ## 續報（2026-10-27 07:45，Claude）：等 GPU 之後的 fps；交出畫面時就完成交換
 
 **現象**：修正破圖之後，每張畫面都依序經過兩段，worker 一次只處理一張：
