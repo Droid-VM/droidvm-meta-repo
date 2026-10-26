@@ -3,6 +3,48 @@
 更新：2026-10-25。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-26 22:10，Claude）：host 端只剩通用裝置：droidvm-gpu 退役，drm2kgsl 不再辨識 guest
+
+使用者的目標：最後推送的 host 端（crosvm、virglrenderer、app）相對 DroidVM 原本只多出通用裝置（virtio-mmio 可以）。盤點結果：
+
+| 項目 | 性質 | 處理 |
+|---|---|---|
+| crosvm：virtio-mmio 的 block/input/net/gpu、Gunyah ioeventfd datamatch 修正 | 通用 | 保留 |
+| crosvm：`--droidvm-gpu`（KGSL proxy，自訂 virtio ID 59） | iOS 專用 | **已移除**（crosvm 89c3f9725） |
+| drm2kgsl：依 context 名稱 `xnu:` 決定釋放時解除綁定 | 辨識 guest | **改成所有 guest 適用**（virglrenderer b743904f） |
+| crosvm virtio-gpu：flip fence 不再強制完成、guest blob iovec | 通用，但改了 Linux 的行為 | 待在 Ubuntu 上驗證 |
+| `--simplefb`、`--pre-alloc`、`--android-display-service` | 9 月就在 `droidvm` 分支 | 原本的功能 |
+
+**droidvm-gpu 退役（M7）。**
+- 3D 其實早就全走 virtio-gpu＋drm2kgsl。這次開機的 crosvm log 裡，所有 client（backboardd、WidgetRenderer、各 Poster、GFXBench）都是 drm2kgsl context，droidvm-gpu 0 個。
+- 拔不掉的原因：virtio-gpu 3D 的使用者入口（open type 0x4149）掛在 NativeAdreno 的 user client 上，而它和 Metal 的 accelerator 註冊都排在 droidvm-gpu 裝置 attach 之後。
+- guest 改動（device 04d9f0d）：沒有 `droidvm-gpu=1` 時，`DroidVMGpu.cpp` 用不接後端的 KGSL 物件發佈 user client，再註冊 accelerator。KGSL 路徑（0x4147）會被拒絕。
+- board.toml：拿掉 `droidvm-gpu=1` 和 `--gpu-mmio`。net 與 virtio-gpu 的 MMIO 往前一頁（0x0a007000、0x0a008000），並換上新的 crosvm FDT。
+- VM 的 crosvm 參數用 daemon 的 `vm_get`／`vm_modify` 修改。
+- 驗證（沒有 droidvm-gpu 的 VM）：
+  - accelerator 註冊完成（stage 5）；
+  - GFXBench Aztec 17.9 fps、Car Chase 10.8、T-Rex 33.2、ALU2 56.3（大核 1.36 GHz）；
+  - Metal Check 29 項正確性測試全過；
+  - 小工具、桌布、圖示正常，沒有新的 crash。
+
+**drm2kgsl 的解除綁定。**
+- 釋放 guest 配置的 BO 時，所有 context 都解除它的 VA 綁定。舊規則只對 `xnu:` 開頭的 context 這樣做。
+- 這樣是安全的，因為兩種 guest 都保證 unref 時已經沒有在途使用：
+  - Linux Turnip 的 zombie VMA 等 queue fence 過了才關 handle；
+  - freedreno 把 BO handle 交給 EXECBUFFER，kernel 會持有到 fence；
+  - XNU 驅動等關閉前的 submit 完成才 unref。
+- host 配置的 BO 維持不解除。`NCTX_KEEP_FREED_RANGES=1` 可退回舊行為。
+- 驗證：
+  - UniXNU 不變；
+  - Ubuntu（有 guest pool）跑 vkmark headless 得 1913 分，再加壓 3 分鐘，host 和 guest 都沒有 GPU fault。
+- **未驗證**：Ubuntu 改成 pseudo-unprotected（沒有池，BO 來自一般 RAM）時開機成功，但拿不到網路，沒辦法進去測。這是另一個待查的問題。Ubuntu 的設定已還原成 `protected_without_firmware`。
+
+**還沒做：**
+- guest 端的完整清理：只服務 0x4149 的小 user client，移除 KGSL proxy 原始碼。
+- vgpu-3d 下 scanout 不等 3D 完成（`droidvm_gpu_scanout_wait` 在這條路徑沒作用）。
+- 在 Ubuntu 上驗證 crosvm virtio-gpu 的 flip fence 改動。
+- Aztec 牆面暗塊的根因：來自 pass 1 第 275–288 個光照 draw（envprobe irradiance 盒子等）；跳過這些 draw 暗塊就消失。
+
 ## 續報（2026-10-26 19:50，Claude）：Aztec Ruins 全黑修好了：pipeline reflection
 
 **先處理 hugepage pool。** 17:00 那次之後 pool 卡在 2498/2560，acquire 補不回來。使用者同意重開手機，重開後 pool 回到 2560/2560。重開手機後的步驟：
