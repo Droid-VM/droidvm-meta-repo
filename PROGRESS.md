@@ -1,7 +1,101 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-27。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-28。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-28 04:30，Claude）：介面滑動 22 → 64～92 fps；GFXBench 畫面被拉伸的根因；全部推上 GitHub
+
+### GFXBench 畫面被拉伸（10-28 修好）
+
+**現象：**手機橫拿，app 的 Display 轉了 3 個四分之一圈（VM 的框是橫的），GFXBench 卻是直式 buffer 被硬塞進橫框：水平 ×2.16、垂直 ×1.21。
+
+**不是重力感應的問題。**orientd 收到 `device orientation 3`，iPadOS 也轉了；guest 的 buffer 是對的（橫向畫面轉 90° 放在直式面板裡）。
+錯在手機端：SurfaceFlinger 上那一層的 `geomBufferTransform=0`。
+
+**根因鏈：**
+1. guest 開機 framebuffer 的 blob 剛好是 stride×height（5595136 bytes）。host Turnip 把 LINEAR 影像的最後一層補到 4 的倍數列
+   （`fd6_layout.c`；1366 → 1368 列，5603328 bytes），crosvm 拒絕匯入（logcat：`display source image requirements exceed DMA-BUF allocation`）。
+   合成器的 surface 在 10-27 已經補過（`0ee54d2`、`cd6ed5e`），開機 framebuffer 當時刻意保持原尺寸。
+2. 合成器送出 blank swap（全部 layer 關閉，例如 GFXBench 換測項之間）時，guest 會再顯示開機 framebuffer。那一幀走 CPU 複製，
+   crosvm 的 ANativeWindow 就從 blit（EGL）producer 切到 CPU 再切回來，上一次開機大約每 1.5 分鐘一次。
+3. `Surface::disconnect` 會清掉 buffer transform。display client 切換時重設了 geometry，卻以為 transform 還在，
+   所以第一次切換之後旋轉就不見了。
+
+**修正：**
+
+| Repo | Commit | 內容 |
+|---|---|---|
+| Virtualization | `ee980ecd8` | 切換 producer API 時重新套用 transform |
+| 裝置 repo | `56a5a9b` | 開機 framebuffer 的 blob 也接上補白頁（它最後一頁不一定是自己的，所以不延伸） |
+| 裝置 repo | `2277809` | blob 長度改成 `stride × align(height, 4)` 再對齊 4 KiB，不再靠「16 KiB 頁剛好是 4 列」的巧合；補白頁 16 → 64 KiB（寬 5120 px 以內的 3 列）。1024×1366 面板的大小不變 |
+
+**驗證：**兩個 kernel 各開機一次（`56a5a9b` 跑 ALU 2、ALU 2 offscreen、Aztec Normal；`2277809` 跑 ALU 2）。
+開機 framebuffer（res=1）開機時就直接匯入成功；匯入失敗 0 次，也沒有切到 CPU producer，transform 維持 7。
+blank swap 本身沒能自然觸發（閒置 11 分鐘沒熄螢幕），但它顯示的就是 res=1。
+
+**順帶：**用 `lsdiag launch-args` 啟動 GFXBench，有一次停在 dyld 不動（suspended、1 個 thread、CPU 0%，畫面上黑下白）。
+unified log 顯示 RunningBoard 在啟動中途暫停過它一次，FrontBoard 之後標成 Running，但行程沒有真的恢復。kill 後重新啟動就好。
+`gfx-suite.sh` 會乾等 20 分鐘，要早點看 app_ios 的 CPU。
+
+### 介面流暢度（10-27 下午到 10-28）
+
+主畫面翻頁從 22～35 fps（10-27 早上）到手勢中 64～73 fps（放手後 72～86）；App Library 82～92；Today／小工具 66～81。
+10-27 10:45 那段的「原因 1：旋轉合成」已經修好（下表第一列）。
+
+量法：600 ms 的 `input swipe` 期間連續讀 LegacyDisplayProbe 的 swap ring（只有 64 格），扣掉閒置時本來就在畫的幀：
+時鐘小工具約 20 fps，時鐘 app 圖示約 10 fps。只在同一次開機內做 A/B。
+
+| 改動 | Commit | 效果 |
+|---|---|---|
+| 旋轉的 framebuffer：metal2vulkan 每個 pass 用 staging＋compute 轉進轉出（8.8 ms），改用 Adreno 2D 引擎轉（Turnip 私有 pNext） | fork `daa080e`（`turnip-rotated-copy.patch`、metal2vulkan 0011） | Today 22 → 33～43、翻頁 41 → 44～56；backboardd 每批 16 → 4 ms |
+| 觸控不再被 Android 以 60 Hz 合併 | app `5a40943`（`requestUnbufferedDispatch`） | guest 每秒約收到 140 個觸控幀 |
+| VM 的更新率經 virtio-gpu EDID 傳給 guest（120 Hz） | 裝置 `389d05c`、NativeMobileDisplay `4f32f0f` | 輕的畫面 swap 間隔 9～13 ms |
+| `supportsFamily:` 每次呼叫重跑整個 family 檢查（佔 CA 顯示執行緒 21%）→ 快取答案 | NativeMetal `bb1f118`（fork `8b33736`） | Today 28～29 → 36～40、翻頁 33 → 46～48 |
+| host 顯示 blit 和所有 guest context 擠在 KGSL 同一個 ringbuffer → host Turnip 照 Vulkan global priority 設 KGSL 優先權，display client 要求 HIGH | Banners-Turnip `6f1209a`、Virtualization `c5b992ec1` | blit 排隊 5.5 → 0.5 ms；ALU 2 onscreen 82 → 85 |
+| frontend 每次呼叫都組 dump 文字 | NativeMetal `7bc5c06`（fork `4b3c888`） | Driver Overhead 2：1.35 → 3.4 fps/GHz |
+| bridge 改 fat LTO、`codegen-units=1` | fork `a74483a` | 每 GHz 約 +22% |
+| 編碼執行緒：encoder 的 runtime 部分（翻譯成 Vulkan）移到 `native-metal-encode`，只在 backboardd 開 | NativeMetal `70964f4..79fcbca` | drag 61 → 67 fps；CA 顯示執行緒 90% → 34% |
+| bridge 的 Rust 全域配置器改 mimalloc | NativeMetal `6f76d41`、fork `9f7596f` | Driver Overhead 2 每 GHz +19%；drag 74～80 fps |
+| 編碼執行緒的呼叫改成 C++ closure，放在重複使用的 16 KiB 區塊 | NativeMetal `67bd7ef` | 編碼執行緒每幀 cycles −11%；App Library 82～92 fps |
+| 停用 accessoryupdaterd（害 trustd 每秒約 9 次 OCSP，閒置吃 30% CPU） | 裝置 `9b62553` | trustd 閒置時不再出現 |
+
+**試過、關掉的：**
+- guest 合成器的 GPU 優先權（virglrenderer `77f5d95e..3e4bff79` 的 `DRM2KGSL_PRIORITIES`、guest Turnip `turnip-darwin-queue-priority.patch`、
+  metal2vulkan 0012、NativeMetal `0e3a072`）。開了以後 GPU governor 停在 231 MHz，ALU 2 從 95～98 掉到 43～48 fps，原因未明。
+  這些都是 opt-in，預設不生效。
+- 100 µs 輪詢 GPU（保留，但沒有差）、不 flush surface 的 dcache、vCPU0 綁 X4 大核、Turnip concurrent binning：都沒有差別。
+
+**現在的瓶頸是翻譯（metal2vulkan）每個 draw 的成本。**
+- backboardd 每幀約 280 個 draw，每個在 runtime 約 27 µs（原生約 1～2 µs）：一般的 draw 路徑每次都檢查所有 Metal 功能。
+- draw 狀態統計（NativeMetal `4fbdd5a`、`2872c22`；開關 `/private/var/ngpu/debug/draw-stats`，結果在
+  `/private/var/mobile/tmp/com.apple.backboardd/`）：0% 的 draw 和上一個完全相同，99% 換了 vertex buffer offset，68% 換了 pipeline。
+  所以「跳過重複綁定」的快取沒有用。
+- 卡頓：App Library 是 SpringBoard 自己的一次性工作（45～70 ms）；翻頁是 CA 等編碼執行緒（約 36 ms）；少數是 GPU 重的幀。
+- 閒置成本：主畫面第 1 頁靜止時 backboardd 21%＋WidgetRenderer 5% 的 CPU（時鐘小工具每幀約 10 ms CPU）；
+  外掛裡有一個未命名執行緒閒置時吃 19%（usleep 迴圈加遞迴的檔案 syscall），還沒查。
+
+**GFXBench（10-28，大核上限 2.57 GHz）：**Aztec Ruins Normal 34.7、37.5 fps（10-26 在 1.36 GHz 是 17.7～17.9）；
+ALU 2 95.0、106.8；ALU 2 offscreen 296。
+
+### 全部推上 GitHub（10-28）
+
+每個元件都用 `git ls-remote` 核對過，fork 的 submodule pin 都能從遠端分支取得。
+
+| Repo（Droid-VM/） | 分支 | Commit |
+|---|---|---|
+| droidvm-meta-repo | `wip/hackintosh` | 本 commit |
+| UniXNU-droidvm（裝置 repo） | `wip/hackintosh` | `2277809` |
+| UniXNU fork | `wip/droidvm` | `8977151` |
+| NativeMetal | `wip/hackintosh` | `2872c22` |
+| crosvm | `wip/hackintosh`＋`wip/virtio-mmio` | `78f31540e` |
+| Virtualization | `wip/hackintosh` | `ee980ecd8` |
+| virglrenderer（drm2kgsl） | `wip/hackintosh` | `3e4bff79` |
+| Banners-Turnip | `wip/hackintosh`（新建） | `6f1209a` |
+| DroidVM app | `wip/hackintosh` | `5a40943` |
+
+- Banners-Turnip 的本機 checkout 是 detached HEAD：`git push origin <commit>:refs/heads/wip/hackintosh`。
+  meta 的建置腳本會先找 `wip/hackintosh`，所以乾淨重建也會帶到 KGSL 優先權。
+- 手機上跑的 crosvm 是 crosvm `78f31540e`＋Virtualization `ee980ecd8` 建的。
 
 ## 續報（2026-10-27 10:45，Claude）：GPU 利用率的兩個根本原因：旋轉合成、顯示走 CPU 複製（後者已修）
 
@@ -1178,7 +1272,8 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 - **Safari：** 網頁正常顯示、可以打字、搜尋建議會出來。
 - **輸入：** 觸控，加上實體鍵盤（app 的 virtio 鍵盤）和螢幕鍵盤。
 - **網路：** en0，DHCP IPv4／IPv6，走 app 的 br-wifi。
-- **Metal：** 經 droidvm-gpu 到主機 KGSL，最多 32 個 GPU client，每個 client 一個 KGSL context，跨 context 依序執行。
+- **Metal：** 經 virtio-gpu＋drm2kgsl 到主機 KGSL（droidvm-gpu 已在 2026-10-26 退役）。GFXBench 的 Metal 測試都能跑到出分。
+- **旋轉：** 面板是直式 1024×1366；陀螺儀（crosvm `--input motion`）讓 iPadOS 自然旋轉，app 可以轉 Display、鎖 Screen。
 - **Data volume：** 12 GiB，會持續保存。
 - **owner 工具：** 可以 ssh 進 guest；有 ownervisor 服務管理、toybox、zsh、lsdiag、gfxprobe。
 
@@ -1261,6 +1356,11 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 | UniXNU 裝置 repo | `UniXNU/UniXNU-droidvm` | `main` → `git push droidvm main:wip/hackintosh`；推之前先跑 rig 的 `scrub_rig.py` |
 | UniXNU fork | `UniXNU/orgrepos/UniXNU` | `droidvm` → `git push droidvm droidvm:wip/droidvm`（不推 origin） |
 | crosvm | 本 repo的 `crosvm/` | `wip/virtio-mmio` → Droid-VM/crosvm 的 `wip/virtio-mmio` **和** `wip/hackintosh`（後者是 build 腳本的分支鏈會拿的） |
+| Virtualization（display client，連結進 crosvm） | 本 repo 的 `Virtualization/` | `droidvm` → `git push droidvm HEAD:wip/hackintosh`；改完要重建 crosvm |
+| virglrenderer（drm2kgsl） | 本 repo 的 `virglrenderer/` | `droidvm` → `git push droidvm droidvm:wip/hackintosh` |
+| Banners-Turnip（host Turnip） | 本 repo 的 `turnip/banners-turnip`（detached HEAD） | `git push origin <commit>:refs/heads/wip/hackintosh` |
+| fork 的 Droid-VM submodule（NativeMetal、NativeAdreno、NativeMobileDisplay） | fork 的 `drivers/` | `git push droidvm HEAD:wip/hackintosh`；先推 submodule 再推 fork |
+| DroidVM app | `DroidVM-display-fix` worktree | `git push origin HEAD:wip/hackintosh` |
 
 2026-10-24 最初交接時的head（歷史；最新commit見文件頂端）：
 - meta：本 commit
@@ -1348,6 +1448,13 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 **顯示與快取：**
 - **MobileGestalt 會快取 ArtworkDisplayGamut。** 舊的 Data 要刪一次 `systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist`，`--display-gamut sRGB` 才會生效。
 - **ReportCrash 每個行程每天最多 25 份報告**，換 seed 會重置這個上限。
+- **guest 給 host 顯示的 blob 至少要 `stride × align(height, 4)`。**少一點點，host Turnip 就拒絕匯入，那一幀改走 CPU 複製（7～10 ms），
+  crosvm 也會切換 ANativeWindow 的 producer。匯入點只有 `DroidVMVirtioGpuDisplay.cpp` 的 `create()`（surface 和開機 framebuffer）。
+- **crosvm 的 C++ log（display client）只進 logcat**，而手機的 logcat 幾分鐘就被系統訊息洗掉；stderr 檔（app 的
+  `cache/console_<vm>_stderr.log`）只有 Rust 的 log。要抓就先在手機背景錄：
+  `logcat -v time -T 1 crosvm:V BufferQueueProducer:D '*:S' > /data/local/tmp/crosvm-logcat.txt &`。
+- **檢查手機上的旋轉：**`dumpsys SurfaceFlinger` 找 VMNativeDisplayActivity 的 SurfaceView（BLAST）層：Display 轉過時
+  `geomBufferTransform` 應該不是 0，`toDisplayTransform` 的 x、y 縮放應該相同。
 
 **owner 工具：**
 - **每個 owner 工具都要 ad-hoc 簽，而且要帶 `com.apple.private.security.no-container`**，否則會被 launch constraint 擋下。
@@ -1358,6 +1465,16 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 - **Mac 的 `hdiutil attach` 在 `/Volumes/DATA` 上 over ssh 會被拒**，seed 相關的腳本要從 `/tmp` 的 root 跑。
   `seed-data-grow.py` 的磁碟辨識 bug 已在 fork `0fecbc8` 修好。
 - **主機當機**都是 watchdog bite，而且都發生在 stop 之後立刻 start、大頁池還沒回收完的時候 → 一律照 `hugepage-harness.md` 做。
+- **手機重開機後，先跑 `load-modules.sh` 再 `vm.sh start`。**沒有 `/dev/udmabuf` 時 crosvm 一啟動就 panic
+  （「failed to open udmabuf driver」，hostwatch 報 UNEXPECTED＋BOOT FAILED）。大頁池被系統拿回、補不滿時，重開手機能拿回整池。
+- **host Turnip 的建置目錄編的是另一份原始碼**（`turnip/banners-turnip/turnip_workdir/mesa/build-android-aarch64` 用相對路徑指到
+  `DroidVM_meta_repo/turnip/...`）：要改那一份，改完用 llvm-objdump 確認。
+
+**量測：**
+- 手機廠商會動態限制大核頻率（1.36～2.57 GHz 之間都看過），每個效能數字都要記 `scaling_max_freq`。
+- 主機上 vCPU 執行緒的 CPU% 沒有參考價值（96% 在 Gunyah 的 hvc 裡，包括 guest 的 WFI）；看 guest 的 `gfxprobe cpu`。
+- 主畫面從不閒置：時鐘小工具約 20 fps、時鐘 app 圖示約 10 fps。量手勢 fps 要扣掉前後的這些幀。
+- 用 `lsdiag launch-args` 啟動 GFXBench 偶爾會卡在 dyld（suspended），kill 後重新啟動。
 
 ## 7. 下一步
 
@@ -1374,7 +1491,11 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
      - 注意：GFXBench 的 container 在 `/private/var/mobile/Containers/Data/` 底下，guest 的 root ssh 沒有權限列出（Operation not permitted），所以看不到它的快取檔。gfxprobe 的快取在 `/var/root/Library/Caches/native-metal-shaders/`。
 2. **Metal Check：** host／guest均28 PASS、0 FAIL、0 SKIP，三項benchmark PASS，UI啟動／保存／停止控制已驗證；兩次五分鐘壓測完成。最後20輪API/counters PASS但視覺FAIL（見上文），不是完整Metal或display conformance。
 3. **通用外設：** `plans/HOST_PERIPHERALS_SURVEY.md` 已完成；實作未開始。下一步先定共同 protocol/capabilities，再按 survey 驗證 battery provider；transport 支援不代表 guest OS 原生 API 已接通。
-4. **顯示效能：** 將 producer 依賴精確綁定每個 IOSurface，評估減少不必要的全域等待；接入 3D 前隔離 renderer／display fence。
+4. **介面流暢度（2026-10-28 的狀態見最上面的續報）：**瓶頸是 metal2vulkan 每個 draw 約 27 µs。兩條路還沒決定：
+   - A1：一般 draw 的快速路徑（依 pipeline 快取要檢查的功能），工程較大，預估每個 draw 省 30～50%；
+   - A2：零星小修（例如 `render.rs` 的 `sampler_maps` 每個 draw 掃一遍所有 texture），約 5%。
+   另外待查：外掛裡閒置吃 19% CPU 的執行緒（省電）；健康檢查的「fence waits timed out」計數一直增加；
+   把 GPU 頻率拉高能讓顯示階段減半，但屬於耗電策略，要使用者同意。
 5. **GPU 恢復與文字破圖：** 尚無自動 GPU 恢復；若文字破圖重現，立即截圖並記錄 backboardd 的 IOSurface 資訊。
 6. **3D 改走 drm2kgsl**（survey 第 4-7 步），之後再評估 venus／gfxstream。
 
