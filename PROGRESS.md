@@ -50,6 +50,41 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 頻率沒鎖時，同一測試可以差到 30%：13:00 那輪 T-Rex 42.7、Car Chase 13.7。
 - 診斷用的 dump 跑分偏低，不算在內。
 
+## 續報（2026-10-27 08:40，Claude）：開機參數內建進 kernel；fps 診斷（綁核、vsync、KGSL trace、Codex 報告）
+
+**內建開機參數**
+- fork e516aaa 新增 `patches/xnu/native-builtin-boot-args.patch`：`PE_parse_boot_argn`／`PE_parse_boot_arg_str` 在命令列找不到某個參數時，改找 `PE_builtin_boot_args`。XNU 端是弱定義的空字串，其他板子不受影響。
+- device 62b9b6b：新增 `package/DroidVMBootArgs.c`，放 32 個這塊板子固定開著的開關（856 位元組），說明註解從 board.toml 搬過來，並編進 display archive。
+- 命令列（board.toml `kernel_args`）只留 8 個，從 1004 降到 152 位元組：
+  - `debug`、`kt_fixed_zones`、`-no_slto_panic`、`ml-timeout-lock-panic-scale`、`tlto_us`。
+  - `-apfs_shared_datavolume`：kernel 裡找不到這個字串，保險起見留著。
+  - `armcpu-diagnostics`、`droidvm-monitor`。
+- 命令列的值優先；要在某次開機關掉某個內建開關，就在命令列寫 `name=0`。deploy.sh 的 `BOOT_ARGS_DROP` 只能拿掉命令列上的參數，對內建開關無效。
+- 驗證：開機正常；顯示和觸控、Data store state 2、Metal {0, 5, 0}、orientd、Weather／Safari、tools overlay 都正常，停用的工作都沒在跑。
+
+**fps 診斷（同一次開機的 A/B，大核上限 1.36～1.40 GHz）**
+- **KGSL trace**（`/data/local/tmp/kgsltrace.sh`，`adreno_cmdbatch_submitted`／`retired`）：
+  - guest 主 context（ctx 21，優先權 8、rb 2）每批 GPU active 約 16～17 ms。即使閒置也以每秒 20 批的速度在跑（動態桌布），而且 231 MHz 和 903 MHz 下的批次時間差不多。
+  - GPU 整體忙約 57%，vCPU 約 40～57%，GPU worker 約 43%，三邊都沒滿，所以是「某處在等」。
+  - 每批收到就立刻開始，約 17 ms 跑完，接著閒置 30～45 ms 才收到下一批。
+- **綁核**（scratchpad `pin.sh`，taskset）：
+  - vCPU 綁 2～5、GPU worker（被函式庫改名成 `Binder:crosvm` 的 epoll 執行緒）單獨綁核 7：flush 從約 20 ms 降到約 12 ms，翻頁從約 28 fps 升到約 35 fps，小工具面板約 22 → 23 fps。
+  - 綁核 6 沒有效果。
+  - 正式做法用 VM 設定的 `cpu_affinity` 和 `gpu_cgroup`（`gpu_cgroup_cpus`），還沒套用。
+- **60 fps 上限**：沒有 `sheng-vsync` 時，CoreAnimation 用自己 1/60 秒的心跳（NativeLegacyDisplay 註解 int-210）。
+  - 實驗 `sheng-vsync=120`：`vsyncHz` 是 120、更新率資訊已發布，但 vsync 的「已送出」是 0（CA 沒註冊 vsync）。等 GPU 降到 2～4 ms，flush 仍 17～23 ms，fps 沒有明顯改善（23～34）。
+  - 這次沒有保留這個參數；現在命令列有空間，之後可以再加。
+- **MetalCheck benchmark**：512×512 繪製每批 GPU 0.12 ms，從 commit 到完成卻要 18 ms（被大批次擋住）。帶 fence 的 NOP 來回 1.3 ms。
+- **Codex（astra）的唯讀分析**，全文在 `plans/IOS_GPU_PIPELINE_DIAGNOSIS.md`：
+  1. 顯示一次只處理一張，而且等的是所有 client 的全域快照。
+  2. 完成通知要經過兩層 1 ms 的輪詢（Turnip 的 `dw_wait_fence_raw` 和 guest kernel）。Linux 的 virtio 後端有「GPU 寫入的完成標記」，約 300 µs 就能看到完成。
+  3. metal2vulkan 把每個 encoder／barrier 錄成獨立的 primary CB。Turnip 在每個 primary CB 開頭做 WFI 和快取失效、結尾做快取清空，再加上每 16 個 IB 切一次送出。這是單批 16 ms 的頭號嫌疑。
+  4. Darwin 後端在送出前，於送出鎖裡用 CPU 等待輸入 semaphore（`tu_knl_darwin.cc:909-915`），最像之前 KGSL native context「每步都同步」的問題。
+  5. NativeMetal 在 commit 前後各對整個 IOSurface 做一次 dcache flush。
+  6. 建立 BO 要兩次同步 RPC。
+  7. drm2kgsl 忽略 guest 指定的 context 優先權。
+- **下一步**：先量同一批工作的「GPU 末端標記 → XNU 看到 fence」延遲，以及每張畫面的 semaphore 等待次數和 primary CB／16-IB 分段數。
+
 ## 續報（2026-10-27 07:55，Claude）：guest 的 droidvm-gpu 驅動拆除；wip/vpu 已 rebase 並強制推送
 
 **guest 拆除**（裝置 4284c6c）
