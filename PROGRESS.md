@@ -1483,8 +1483,17 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 原則：
 - **ownervisor 只用來除錯。**整個拿掉也不能影響 iPadOS 的使用；使用者會用到的功能都要走 iPadOS 原廠的機制
   （launchd、IOKit、HID、locationd 等），不能依賴 ownervisor 底下的服務。要先盤點目前哪些功能靠它（例如旋轉的 orientd）。
-- host 端照舊只加通用裝置（virtio），共用的 crosvm／drm2kgsl 改動要 opt-in，Linux guest 不受影響
-  （`plans/HOST_PERIPHERALS_SURVEY.md` 有各外設的 host 來源與三種 guest 的接法）。
+- **外設通用性（host 端）：**
+  - 最後推送的 host 端（crosvm、virglrenderer／drm2kgsl、DroidVM app）相對 DroidVM 原本只能多出**通用的虛擬裝置**
+    （virtio、virtio-mmio 這類標準傳輸）。不加只給 iOS 用的裝置（droidvm-gpu 就是因此在 2026-10-26 退役）。
+  - host 程式**不辨識 guest**：不依 guest 名稱、context 名稱分支（drm2kgsl 的 `xnu:` 判斷已改成對所有 guest 一樣）。
+    真的要不同時，用 guest 自己宣告的 capability。
+  - guest 特有的行為放在 guest 端（裝置 repo、UniXNU fork）；例如 guest 頁面的生命週期歸 guest 管。
+  - 共用的 crosvm／drm2kgsl 改動要 opt-in，或證明對 Linux guest 沒有影響，並在 Ubuntu VM 上實際驗過。
+  - 每加一段 host 程式先問：Linux guest 能不能原封不動地用它？
+- **外設的架構**（`plans/HOST_PERIPHERALS_SURVEY.md`「建議架構」）：同一個 Android 資料來源與共同協定，經標準虛擬裝置送進 guest，
+  再由各 guest（iOS、Windows、Linux）自己的 provider 接到原生 API。線上協定不帶 IOKit selector、Objective-C 物件、Apple struct
+  或 host 指標。傳輸能通只代表資料送得到 guest，不代表系統 API 已經接上（例如陀螺儀現在進得了 guest，app 卻讀不到）。
 
 1. **陀螺儀：拿掉 ownervisor 路線，改走原廠路線。**
    - 現況：crosvm `--input motion` → guest `DroidVMVirtioInput.c` → sysctl `kern.droidvm_motion`（方向、加速度、角速度）→
