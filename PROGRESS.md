@@ -3,6 +3,63 @@
 更新：2026-10-28。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-28 06:00，Claude）：上游 UniXNU rebase 進來了（元件改名），建置、開機、圖形都驗過，已推送
+
+**為什麼 rebase 而不是 merge：**上游 10-25 把元件全面改名（`components.toml` 的 `legacy_name`），之後每天幾十個 commit 都落在新路徑上。
+越晚接衝突越多，所以把 fork 的 78 個 commit 和 4 個 Droid-VM submodule 的分支一次 rebase 到上游最新的 `120067c`。
+
+**上游的改名：**
+- NativeMetal → AdrenoMetal、NativeMobileDisplay → GopFramebuffer、NativeAdreno → Adreno740。
+- NativeAES → SoftwareAES、NativeRamBlock → RamBlock、NativeVirtio{Block,Console} → VirtioMmio{Block,Console}。
+- kits/NativePrelink → kits/XnuPrelink。
+- NativeHidInput 搬出 fork，變成獨立 repo ShengHidInput；裝置 repo 用 `feeds.toml` 拉，pin 是原本的 `ba03e5d` 加一個文件 commit，程式碼相同。
+
+**圖形相關的衝突怎麼解：**
+- **metal2vulkan：**上游改成 AdrenoMetal 自帶一串 bridge patch（`bridge/patches` 0001–0016），並檢查原始碼必須等於 pin 加前 N 個 patch。我們的 0006–0012（shader cache 可選、sRGB、bitreverse、記憶體區塊成長、無 control point 的 patch、旋轉走 2D 引擎、queue priority）接在後面。
+- **Mesa：**12 個 patch 照順序套上，最後兩個是我們的 rotated-copy 和 queue-priority。
+- **Metal 外掛：**上游自己也做了 client 名稱的前綴比對（`名稱*`），外掛建置只補上桌布需要的 `*X*`（名稱包含 X，`*Poster*`）。
+- **include 路徑：**Adreno740 和 AdrenoMetal 互相 include 對方的標頭，改用新的目錄名。
+- **元件比對：**`components.py` 的 `official_alias` 原本只認 `github.com/unixnu/`，加上 `github.com/droid-vm/<id 或舊名>`，我們的 fork 才會被當成同一個元件。
+- **AdrenoMetal 一個解衝突時漏掉的 `}`：**已併回原本的 commit。
+- **submodule pin：**rebase submodule 會改寫它的 commit，所以用 filter-branch 把 fork 歷史裡 23 個指向舊 SHA 的 pin 換成新 SHA。換完 tip 的 tree 完全不變，每個 pin 都能從要推送的分支取到。
+
+**裝置 repo**（`ace6a4f`…`888e126`，跟著改名）：
+- `build-arm-driver.py`：目錄對照、輸出目錄改名，RamBlock／VirtioMmioBlock 的物件另外連到舊名。
+- `board.toml`、defconfig：改用新的 archive 路徑。
+- `build-native-legacy-display.py`、`build-droidvm-gpu.py`：改用新目錄。
+- `DroidVMGpu.cpp`：Adreno740 新增的 stall／fault 診斷方法加上不作用的實作（stallState、kick、drainBus、ibBefore 等）。
+- `DroidVMStubs.c`：GopFramebuffer direct scanout 會 weak import `native_ufs_dpu_*`。這塊板子沒有 sheng 的 UFS，所以給一個 ready bit 永遠為 0 的定義，顯示不會走那條路。
+- `tools/rig/plugin-redeploy.sh`：改用 `build-adreno-metal-bridge.py`。
+
+**驗證（rebase 後的 kernel＋外掛，10-28 05:35 開機）：**
+- 開機正常：health 乾淨，GPU 指令錯誤 0、fence 逾時 0。桌面、小工具、桌布都正常。
+- MetalCheck：29 pass、0 fail、0 skip，和 rebase 前相同。
+- GFXBench：
+  - ALU 2：90.5、107.8 fps（rebase 前 95.0、106.8）。
+  - Aztec Normal：32.7 fps（rebase 前 34.7、37.5）。這次開跑時大核限頻在 1.40 GHz，結束時才回到 2.57 GHz。
+- Safari 能載入、顯示網頁；觸控和實體鍵盤正常（網址列打得出 example.com）；手機橫拿時 iPadOS 跟著轉成橫向。
+- 開機前備份了 guest 的 MobileGestalt 快取，因為上游 zzyb 會在每次開機時刪掉它；目前沒看到問題。
+
+**rig 工具的限制（不是 rebase 造成的）：**guest 跟著手機轉成橫向時，`shot.py` 和 `input.py` 仍把畫面當成直立的 guest，裁切和座標都錯。
+這時要用 `adb exec-out screencap` 和 `adb shell input tap` 的手機座標。
+
+**推送（10-28，使用者確認強制覆蓋）：**舊的 tip 都先推成 `pre-rebase-20261028` tag 備份，再強制推送。
+
+| Repo | 分支 | 舊 → 新 |
+|---|---|---|
+| Droid-VM/NativeMetal（AdrenoMetal） | `wip/hackintosh` | `2872c22` → `7e1f149` |
+| Droid-VM/NativeAdreno（Adreno740） | `wip/hackintosh` | `7708896` → `836b3d7` |
+| Droid-VM/NativeMobileDisplay（GopFramebuffer） | `wip/hackintosh` | `4f32f0f` → `f536660` |
+| Droid-VM/DarwinBoot | `wip/droidvm-virtio-gpu` | `af934b2` → `18fce18` |
+| fork Droid-VM/UniXNU | `wip/droidvm` | `8977151` → `ca1aaf9`（上游 `120067c` 加 78 個 commit） |
+| 裝置 repo | `wip/hackintosh` | `2277809` → `888e126`（一般推送） |
+
+推送前逐一對過遠端獨有的 commit，強制推送沒有丟東西：
+- 我們自己的 4 個 commit，上游都已經有等價版本（device query 快取 `31867dc`、bootstrap pass `7f79d5b`、union 目錄 `cb07499`），或已併進 `.gitmodules`。
+- 其他是上游改寫歷史前的舊 commit，以及 submodule 指標的更新。
+
+本機 worktree：fork 在 `orgrepos/UniXNU-rebase`（`rebase-p2`），submodule 在 `orgrepos/*-rebase`（`rebase-upstream`）。舊的 `orgrepos/UniXNU` checkout 還停在 rebase 前。
+
 ## 續報（2026-10-28 04:30，Claude）：介面滑動 22 → 64～92 fps；GFXBench 畫面被拉伸的根因；全部推上 GitHub
 
 ### GFXBench 畫面被拉伸（10-28 修好）
@@ -1359,7 +1416,7 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 | Virtualization（display client，連結進 crosvm） | 本 repo 的 `Virtualization/` | `droidvm` → `git push droidvm HEAD:wip/hackintosh`；改完要重建 crosvm |
 | virglrenderer（drm2kgsl） | 本 repo 的 `virglrenderer/` | `droidvm` → `git push droidvm droidvm:wip/hackintosh` |
 | Banners-Turnip（host Turnip） | 本 repo 的 `turnip/banners-turnip`（detached HEAD） | `git push origin <commit>:refs/heads/wip/hackintosh` |
-| fork 的 Droid-VM submodule（NativeMetal、NativeAdreno、NativeMobileDisplay） | fork 的 `drivers/` | `git push droidvm HEAD:wip/hackintosh`；先推 submodule 再推 fork |
+| fork 的 Droid-VM submodule（AdrenoMetal＝Droid-VM/NativeMetal、Adreno740＝NativeAdreno、GopFramebuffer＝NativeMobileDisplay、DarwinBoot；10-28 起用上游的新目錄名） | fork 的 `drivers/` | `git push droidvm HEAD:wip/hackintosh`；先推 submodule 再推 fork |
 | DroidVM app | `DroidVM-display-fix` worktree | `git push origin HEAD:wip/hackintosh` |
 
 2026-10-24 最初交接時的head（歷史；最新commit見文件頂端）：
@@ -1369,7 +1426,7 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 - crosvm：`61c47a469`
 
 元件（NativeMetal、NativeAdreno、NativeMobileDisplay…）是 fork 的 `drivers/` submodule，先找各自的 dev 分支，再用 org 的穩定 droidvm 分支。
-上游 UniXNU 每天有幾十個 commit。上一次合併是 fork 的 a3412ef（2026-10-23），重點：
+上游 UniXNU 每天有幾十個 commit。2026-10-28 把 fork rebase 到上游 `120067c`（元件改名，見 10-28 06:00 續報）。上一次 merge 是 fork 的 a3412ef（2026-10-23），重點：
 - 在獨立的 worktree 試合併。
 - 用 bundle 把 Mac 的 checkout 搬過去。
 - patch 名稱改了要 reset `.cache/xnu-work`。
@@ -1386,7 +1443,7 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 |---|---|
 | XNU patch | 在 Mac 的 `out/droidvm/tree/.cache/xnu-work` 改 → tree 裡跑 `scripts/save-xnu-patch.py NAME FILE` → 把 patch 複製回本機 fork。要換掉已套用的 patch，先用**絕對路徑**的 `git apply --reverse` 退掉舊版 |
 | kernel 或板子程式碼（`package/*.c`） | 同步裝置 repo 的 `package/` **和 `scripts/`** 到 Mac → Mac 上 `PATH=/opt/homebrew/bin:$PATH ./unixnu build kernel` → rig 的 `deploy.sh` → `vm.sh restart`。編譯失敗後缺物件時，刪掉 `build/xnu/ios-obj/.../osfmk/DEVELOPMENT/startup.o{,.json}` 讓它跑 bootstrap pass |
-| Metal 外掛（frontend、bridge、turnip） | `tools/rig/plugin-redeploy.sh`（`FORK` 指向本機 fork）。新加的 metal2vulkan／Mesa patch 要先在 Mac 的 `.cache/…` 手動 `git apply` 一次 |
+| Metal 外掛（frontend、bridge、turnip） | `tools/rig/plugin-redeploy.sh`（`FORK` 指向本機 fork）。Mesa 的 patch 清單（`scripts/data/adreno-compiler-inputs.json` 的 `patches`）改了，就把 Mac 的 `.cache/mesa-work` reset 回 pin，再照順序 `git apply`。metal2vulkan 的 patch 由 AdrenoMetal 的建置自己堆疊套用，原始碼只要停在 pin |
 | owner 工具或 trust | 在 Mac 跑 `build-droidvm-*.py`，然後 `tools/rig/payload-redeploy.sh [TOOL…]`。新的 binary 要 reseed；只是新增一個服務用已信任的 binary 不必 |
 | crosvm | 本 repo 的 `./2_build_crosvm.sh`（約 10 分鐘）→ `vm.sh stop` → `CROSVM_BIN=… tools/rig/crosvm-deploy.sh` → `vm.sh start`。guest 的 `DroidVMGpuWire.h` 和 `droidvm_gpu.rs` 的 wire 版本必須一致 |
 | Data seed | `seed-data-grow.py`、`add-*-data.py` 產生新的 `.dbr`，再 `DATA_SEED=… payload-redeploy.sh`。**換 seed＝Data 重來**（第 6 節） |
