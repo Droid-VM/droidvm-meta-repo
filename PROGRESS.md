@@ -3,6 +3,38 @@
 更新：2026-10-28。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-28 07:00，Claude）：wip/vpu 全部 rebase 進 wip/hackintosh
+
+11 個有 `wip/vpu` 的 repo，現在都在 `wip/hackintosh` 上帶著 VPU 的工作。meta 的建置腳本照「meta 分支名 → droidvm」挑每個元件，所以每個 VPU 元件都要有 `wip/hackintosh` 分支。
+
+| Repo | 怎麼做 | `wip/hackintosh` |
+|---|---|---|
+| crosvm | 76 個 VPU commit rebase 到 wip/hackintosh 上（`wip/virtio-mmio` 同步） | `78f31540e` → `0f2db62ae` |
+| DroidVM app | 25 個 VPU commit 加 master 比 hackintosh 新的 22 個（9 個 hackintosh 已有等價版本，自動略過） | `5a40943` → `927f548` |
+| meta | 78 個 commit（plans、`deploy/vpu`），沒有共同檔案 | 本 commit |
+| virtio-media、v4l2r、mesa、libva-v4l2、droidvm-guest-additions、crosvm-minimal-manifest | 原本沒有 `wip/hackintosh`，新建在 `wip/vpu` 的 tip（都直接長在 droidvm 上） | 新分支 |
+| DroidVM-Prebuilt-Root | droidvm 加一個 commit：`usr/bin/crosvm` 換成上面 rebase 後建出的 crosvm | 新分支 `e6302e4` |
+| DroidVM-Prebuilts | Publish prebuilts workflow 自動產生 | 新分支 `a8ad0e8` |
+
+**crosvm 的衝突：**
+- cmdline／config 兩邊都在同一處加欄位（virtio-mmio 的開關和 `--virtio-media`）。兩邊都保留，再照 `#[sorted]` 排序（`virtio_media` 排在 `virtio_mmio_*` 前面，排序在當初加入它的 commit 裡就改好）。
+- 其他 7 個共同檔案都等於乾淨的 3-way merge。
+- VPU 那邊也改了 Gunyah 記憶體準備（mTHP 連鎖 collapse → 只 collapse 到 2 MiB），所以 iOS VM 也要重新驗。
+
+**Prebuilt：**wip/vpu 的 Prebuilt-Root 帶的是 B17 驗收用的 crosvm（wip/vpu `bfccd3d5a`），沒有 virtio-mmio，開不了 XNU guest，所以沒有沿用，改放新建的 crosvm（sha256 `7994700e…`）。
+app 的 `assets/prebuilts` 指到新的 payload `a8ad0e8`（`927f548`），裡面的 crosvm 和實機測過的 binary 相同。
+
+**驗證：**
+- crosvm 部署到手機（舊的留作 `crosvm.bak-b3fdae3c`），iPadOS 開機正常，GPU 指令錯誤 0、fence 逾時 0，logcat 沒有 Gunyah 記憶體準備的警告。
+- MetalCheck 29/29；GFXBench ALU 2 106.8 fps（大核 1.40 GHz）。
+- app：582 個單元測試全過，APK 建置成功。
+- **沒做的：**這版 crosvm 沒有重跑 VPU 的 Linux 驗收（`deploy/vpu/tests/smoke_media.sh`）。VPU 的實驗手機是 :5566，本 rig 不動它。
+
+**建置的記憶體：**virtio-media、v4l2r 的 Android.bp 換了，soong 要重新分析，需要約 13.4 GB。主機上的其他服務讓可用記憶體只剩 14 GB，所以被 OOM 砍了兩次。
+這次的做法是臨時開 16 GB swap 檔，建完就移除。之後只改 .rs 的增量建置不需要。
+
+**soong 樹：**`crosvm_build/external/virtio-media` 和 `external/rust/crates/v4l2r` 已切到 Droid-VM fork 的 `wip/vpu`，和 manifest 的 wip/vpu 相同。
+
 ## 續報（2026-10-28 06:00，Claude）：上游 UniXNU rebase 進來了（元件改名），建置、開機、圖形都驗過，已推送
 
 **為什麼 rebase 而不是 merge：**上游 10-25 把元件全面改名（`components.toml` 的 `legacy_name`），之後每天幾十個 commit 都落在新路徑上。
