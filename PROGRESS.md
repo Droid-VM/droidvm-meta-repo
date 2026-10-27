@@ -1478,26 +1478,59 @@ baseline 為 28 PASS、0 FAIL、0 SKIP 且三項 benchmark PASS；guest 尚未�
 
 ## 7. 下一步
 
-本輪完成項：virtio-gpu 顯示已取代 simplefb 顯示，無 simplefb 開機與顯示已實測；過時的 simplefb 閃爍問題描述只作歷史背景，以上方新狀態為準。
+### TODO（使用者 2026-10-28 指定，依序）
 
-1. **GFXBench：** 全部 Metal 測試都能跑到出分（Tessellation 測試除外：這版 iOS 建置沒有它）。待辦：
-   - ~~記憶體破壞的來源~~：已修好（8 位元 ASID＋vCPU 遷移，fork zzxa-16bit-asid.patch，見最上面的續報）；
-   - 把改過的 `libvirglrenderer.so` 正規打包進 APK；
-   - ~~GFXBench 每次啟動都在行程內重新編譯所有 shader~~：已加入持久化 shader 快取（NativeMetal 3eb5926，fork 4675e62）。
-     - 快取放在每個行程自己的 `Library/Caches/native-metal-shaders/`，key 是 MTLCompiler 的 UUID 加上請求內容的 SHA-256。
-     - Car Chase 總時間從 232 秒降到 133 秒，fps 不變。
-     - 第一次啟動仍會完整編譯。
-     - `NATIVE_METAL_NO_SHADER_CACHE=1` 可以關閉。
-     - 注意：GFXBench 的 container 在 `/private/var/mobile/Containers/Data/` 底下，guest 的 root ssh 沒有權限列出（Operation not permitted），所以看不到它的快取檔。gfxprobe 的快取在 `/var/root/Library/Caches/native-metal-shaders/`。
-2. **Metal Check：** host／guest均28 PASS、0 FAIL、0 SKIP，三項benchmark PASS，UI啟動／保存／停止控制已驗證；兩次五分鐘壓測完成。最後20輪API/counters PASS但視覺FAIL（見上文），不是完整Metal或display conformance。
-3. **通用外設：** `plans/HOST_PERIPHERALS_SURVEY.md` 已完成；實作未開始。下一步先定共同 protocol/capabilities，再按 survey 驗證 battery provider；transport 支援不代表 guest OS 原生 API 已接通。
-4. **介面流暢度（2026-10-28 的狀態見最上面的續報）：**瓶頸是 metal2vulkan 每個 draw 約 27 µs。兩條路還沒決定：
+原則：
+- **ownervisor 只用來除錯。**整個拿掉也不能影響 iPadOS 的使用；使用者會用到的功能都要走 iPadOS 原廠的機制
+  （launchd、IOKit、HID、locationd 等），不能依賴 ownervisor 底下的服務。要先盤點目前哪些功能靠它（例如旋轉的 orientd）。
+- host 端照舊只加通用裝置（virtio），共用的 crosvm／drm2kgsl 改動要 opt-in，Linux guest 不受影響
+  （`plans/HOST_PERIPHERALS_SURVEY.md` 有各外設的 host 來源與三種 guest 的接法）。
+
+1. **陀螺儀：拿掉 ownervisor 路線，改走原廠路線。**
+   - 現況：crosvm `--input motion` → guest `DroidVMVirtioInput.c` → sysctl `kern.droidvm_motion`（方向、加速度、角速度）→
+     ownervisor 服務 orientd（`gfxprobe orient-follow`）→ `BKSHIDServicesSetDeviceOrientationForAutomation`。只有畫面會轉；
+     app 用 CoreMotion 讀不到加速度計／陀螺儀。
+   - 已查到（10-28）：
+     - **locationd 被停用**（`DroidVMBootArgs.c` 的 `droidvm-disable-jobs`，沿用 UniXNU skip-setup：當初首次開機的 Setup 會等它）。
+       CoreMotion 在 app 裡是經 XPC 向 locationd 拿資料，所以它不跑，就算有感測器也沒用。Setup 現在已跳過，要重新啟用並確認沒有東西卡住。
+     - **backboardd 自己就會算方向**：`BKAccelerometerInterface` 在找加速度計的 HID 服務，開機時記錄
+       「missing accel HID service plugin」。有了原廠形狀的服務，orientd 就不需要了。
+     - 真機（iPad7,1）的感測器在 `com.apple.driver.AppleSPU`（經 RTBuddy）後面：發布 `AppleSPUHIDDevice`、`AppleSPUHIDDriver`
+       及兩者的 UserClient。locationd 用 `CLHidManager`／`CLHidDevice`（IOHIDManager，依 DeviceUsagePage／DeviceUsage 配對）、
+       `CLAccelerometer`、`CLGyro`，並以 `CLSPUHIDDriverInterface::sendCommand` 對 SPU 下設定指令；
+       motion 資料是 usage page `0xff0c` 的 vendor 事件（BackBoardHIDEventProcessors 有對應 log）。
+   - 做法：重新啟用 locationd → guest kernel 加一個驅動，用 locationd／backboardd 認得的形狀發布加速度計、陀螺儀（之後加磁力計）的
+     HID 服務，資料來自現有的 virtio-input motion → 刪掉 orientd 和 `kern.droidvm_motion`。
+   - 還要逆向：配對用的屬性與 usage、事件格式與單位（IOHIDEvent 的 accelerometer／gyro、IOFixed）、locationd 送給 SPU 的指令。
+     分析用的 binary（locationd、backboardd、BackBoardHIDEvent*、CoreMotion）可從 root FS（`044-76040-038.dmg`）與已解開的 shared cache 取得。
+   - 驗收：一般 app 的 `CMMotionManager` 讀得到 raw 加速度與角速度；不靠 ownervisor 也會自動旋轉；停掉 ownervisor 後 iPadOS 照常可用。
+2. **iPadOS 內的 IPA 安裝器（普通 app／特權 app）。**調查結論在上面「待辦（2026-10-27）：guest 內的 IPA 自助安裝器」：
+   兩種權限都卡在同一處——cdhash 要在開機時載入的信任快取裡。兩條路：A. kernel 在執行時載入信任快取（不用重開機、不用 host，風險最高）；
+   B. host 協助重建並重開機。共用的前段：guest 內的安裝器 app（選 IPA、顯示 bundle id／cdhash／權限、拆包、登記）。
+3. **音訊（喇叭、麥克風）。**host 已有：DroidVM 的喇叭／麥克風設定、crosvm virtio-snd 的 `backend=aaudio`。guest 缺驅動：
+   調查 IOAudio2 family 或原映像的 HAL plug-in 能否接 virtio-snd（survey 表格；`plans/VIRTIO_SND_PROTECTED_VM.md`）。
+4. **VPU（編碼器、解碼器）與相機（含對焦、閃光燈）。**host 端有 `wip/vpu` 分支與 `android_camera`（Camera2）基礎，但沒有完成的
+   guest virtio-media 裝置（`plans/VIRTIO_MEDIA_PLAN.md`）。iPadOS 端要讓 VideoToolbox 用得到編解碼，相機要接上 camera 堆疊：都需要逆向原廠驅動的介面。
+5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**和第 1 項共用：locationd 要先能跑。手機有 mmc56x3x 磁力計，走第 1 項的 HID 路徑；
+   GPS 的最小探針是 `com.apple.locationd.simulation`（私有 SPI，未驗證），之後再做原生 provider；
+   Wi-Fi 只讀掃描結果（host WifiManager 掃描快取 → wifid／IO80211 → locationd）。過期的位置要標 age／invalid。
+6. **電池。**host BatteryManager → guest 的 IOPMPowerSource 子類別＋powerd（真機是 AppleSmartBattery／AppleARMPMUPowerSource，
+   要確認只提供基類夠不夠）。驗收：電量變化、插拔電源、充電／充滿，`UIDevice` 都讀得到。
+
+### 其他待辦
+
+1. **介面流暢度（2026-10-28 的狀態見最上面的續報）：**瓶頸是 metal2vulkan 每個 draw 約 27 µs。兩條路還沒決定：
    - A1：一般 draw 的快速路徑（依 pipeline 快取要檢查的功能），工程較大，預估每個 draw 省 30～50%；
    - A2：零星小修（例如 `render.rs` 的 `sampler_maps` 每個 draw 掃一遍所有 texture），約 5%。
    另外待查：外掛裡閒置吃 19% CPU 的執行緒（省電）；健康檢查的「fence waits timed out」計數一直增加；
    把 GPU 頻率拉高能讓顯示階段減半，但屬於耗電策略，要使用者同意。
-5. **GPU 恢復與文字破圖：** 尚無自動 GPU 恢復；若文字破圖重現，立即截圖並記錄 backboardd 的 IOSurface 資訊。
-6. **3D 改走 drm2kgsl**（survey 第 4-7 步），之後再評估 venus／gfxstream。
+2. **GFXBench：**全部 Metal 測試都能跑到出分（這版 iOS 建置沒有 Tessellation 測試）。待辦：把改過的 `libvirglrenderer.so` 正規打包進 APK。
+   - 已完成：記憶體破壞（16 位元 ASID）、持久化 shader 快取（NativeMetal 3eb5926：Car Chase 232 → 133 秒；`NATIVE_METAL_NO_SHADER_CACHE=1` 關閉；
+     GFXBench 的 container 在 `/private/var/mobile/Containers/Data/`，root ssh 列不出來）。
+3. **Metal Check：**host／guest 均 28 PASS、0 FAIL、0 SKIP，三項 benchmark PASS；最後 20 輪 API／counters PASS 但視覺 FAIL（見上文），
+   不是完整的 Metal 或 display conformance。
+4. **GPU 恢復與文字破圖：**尚無自動 GPU 恢復；若文字破圖重現，立即截圖並記錄 backboardd 的 IOSurface 資訊。
+5. ~~3D 改走 drm2kgsl~~：已完成（2026-10-25 起預設）；venus／gfxstream 之後再評估。
 
 使用者允許 Luna（max）承接明確、機械性的工作；Sol承接大範圍程式碼／文檔粗篩，由主agent細讀。
 
