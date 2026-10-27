@@ -3,6 +3,35 @@
 更新：2026-10-27。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-27 10:45，Claude）：GPU 利用率的兩個根本原因：旋轉合成、顯示走 CPU 複製（後者已修）
+
+**GFXBench：**VM 裡現在和 iPad 上是同一份 app（CDHash `0cbc80e6`，device `1bb358f`）；release `v5.0.0-droidvm.2` 已發布。
+
+**原因 1：旋轉合成（未修）。**面板是直立的 1024×1366，iPadOS 介面是橫向，CoreAnimation 把每個圖層轉 90° 合成。
+IOSurface 在 Adreno 上是線性排列，轉置取樣幾乎每次都打到 DRAM（UCHE 計數器：DRAM beat 數約等於 texture 請求數）。
+
+| 介面方向 | backboardd 每批 | DRAM 讀取（5 秒） |
+|---|---|---|
+| 橫向（要旋轉） | 17 ms | 3.5 億 beat |
+| 直向（不旋轉） | 1.2 ms | 5200 萬 beat |
+
+已排除：GPU 時脈（鎖 903 MHz）、匯流排（`bus_split=0`）、sysmem/GMEM、concurrent binning、IOSurface 頁面映射（`gfxprobe gpubw`）。
+可能的解法：直接用橫向面板；或讓 CoreAnimation 不旋轉（QuartzCore 的 `main-screen-orientation`、`-[CADisplay nativeOrientation]`、IOMFB 的 `SupportsRotation`，尚未確認）。
+
+**原因 2：host 的顯示是 CPU 複製（已修）。**Turnip 把 1024×1366 的線性影像排成 1368 列，要求 5603328 bytes；guest 的 blob 只有 5595136，
+每幀匯入都被拒，crosvm 的 GPU 執行緒改用 CPU 複製（ANativeWindow lock，每幀 7～10 ms）。修正：
+- device `0ee54d2`：blob 延伸到 surface 最後一頁的結尾；顯示資源快取 8 → 32 格 LRU（拖動時原本幾乎每幀都重建資源）。
+- device `cd6ed5e`：最後一頁沒有剩餘空間的 surface，在 blob 尾端接一個共用的 16 KiB 補白頁。
+- crosvm `78f31540e`：匯入失敗後每 120 次 present 重試一次（開機時畫面還沒接上的失敗原本會永久卡在 CPU 路徑）。
+
+結果（同一次開機）：每幀 flush 11～14 ms → 2～3 ms；翻頁 30～36 → 41～42 fps；小工具頁仍約 20～24 fps（被原因 1 卡住）。
+
+**工具：**rig `tools/gpuperf`（KGSL 效能計數器，先 `echo 1 > /sys/class/kgsl/kgsl-3d0/perfcounter`）、`gfxprobe gpubw W H ROUNDS [KIND]`、
+`atrace -t 4 gfx`（GPU 路徑才有 `crosvm_display.*`）、crosvm 的 stderr 在 app 的 `cache/console_<vm>_stderr.log`。
+
+**順帶：**`vmguard2.sh`（mksh）每輪約漏 4 KB，跑 15 小時後 swap 裡有 872 MB；VM 停機時頁面被釋放回系統，池子補不滿，手機已重開。
+app 更新後舊 daemon 會跳 Outdated Daemon 對話框擋住觸控：先 `vm.sh stop` 再重啟 daemon。
+
 ## 續報（2026-10-27 01:00，Claude）：整套 iOS hackintosh 都推上 GitHub 了
 
 從 meta repo 的 `wip/hackintosh` 重建時，各元件依 `lib_branch.sh` 的分支鏈（`wip/hackintosh` → `droidvm`，app 是 → `master`）拿到的版本，都已核對等於目前部署的版本。
