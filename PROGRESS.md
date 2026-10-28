@@ -3,6 +3,58 @@
 更新：2026-10-29。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-29，Claude）：從零建置自動化——`build-droidvm-all.py`＋`fresh-deploy.sh`；applebox 獨立成倉庫
+
+使用者要求「跑通目前的 build 流程、做成自動化腳本」，並在 8 Gen 3 那支手機上刪掉原本的 UniXNU、部署新的。以前的 build 環境是一路手動補出來的
+（reference candidate、mesa-work、Data seed 鏈、plugin 與工具事後 stage 進 guest），全新 checkout 根本跑不起來；現在全部收進腳本。
+
+### 建置（build Mac）：裝置 repo `scripts/build-droidvm-all.py`
+從全新 clone（fork `wip/droidvm`＋裝置 repo `wip/hackintosh`）一路做到 `out/droidvm/release/`（`droidvm-disk.img`、`os.img`、`systemos.img`、
+`kernel.macho`、`release.json`）。步驟：setup → volumes → policies → data-base → reference → kernel → package → tools → plugin → data →
+trust → payload → images；每步一個 stamp（`--from`／`--only`／`--list`），log 在 `out/droidvm/build-all/logs/`。
+一路修掉的斷點（都在腳本裡處理）：
+- **hdiutil 在 ssh 下不能掛外接卷**（映像檔或掛載點在 `/Volumes/DATA` 都被拒）：OS 映像複製到 `/tmp/droidvm-build-$USER` 並掛在那裡，
+  tree 內 `target-volumes/{dmg,os-mount}` 是 symlink；seed 腳本從 `/tmp` 下的腳本副本跑（它們的暫存映像在 `ROOT/build`）。
+- **Data 卷 UUID**：新 fixture 的 APFS 卷 UUID 每次不同，kernel 靠它掛 Data → build kernel 前寫進 `.config` 的 `CONFIG_XNU_OWNER_DATA_VOLUME_UUID`。
+- **reference candidate**（storage／display audit 要讀「沒有 storage/display driver 的本板 kernel」）：以前是 10-21 手動留下的；現在在
+  `out-reference/` 用裝置 repo 副本＋關掉 storage/display/owner-root 的 defconfig＋精簡 archive 清單自動 build。
+- **DarwinBoot.efi** 要用 unixnu 準備的 LLVM toolchain（`CLANG_BIN=out/droidvm/toolchain/`；Apple clang 沒有 llvm-lib）。
+- **Mesa**：上游沒有準備腳本 → 腳本自建 `.cache/mesa-venv`（meson 1.12.1、Mako 1.4.3）、bison/flex 連結、`mesa-work` 依 pin sparse clone＋依序套
+  patch；metal2vulkan 依 pin 淺取。plugin 另外需要 host Turnip（錄 Turnip 第一個 submission 給 plugin replay）。
+- NativeAdreno 的 hostsim 缺 `proc_selfpid`（上游 4fed9a1 加了呼叫）→ fork 修（NativeAdreno 7b61139）。hostsim 的 **deferred-pressure 檢查失敗**
+  （上游 Turnip patch 與測試不一致，舊 tree 從未重跑）→ 記在 `release.json` 的 `checks`，不擋 build；待查。
+- kernel link 失敗後會留下 `startup.o.json` 沒有 `startup.o` → 腳本自動刪 record 讓 bootstrap pass 重跑。
+- IPSW 的 OS／SystemOS 卷遠端只有約 1.5 MB/s：`--ipsw-cache` 從別的 checkout 的 `out/ipsw/<build>` clone（仍照 board.toml 的 sha256 驗）。
+
+### 動態 ADT 接進正式流程
+`board.toml` `[payload.adt]` 改 `--dynamic`，fork 的 `drivers/DarwinBoot` pin bump 到 b2ad902：同一個 payload 能開帶 snd／battery／media 的 VM，
+不再手動 swap ADT、手動換 DarwinBoot.efi。owner 工具（applebox、ipatool、debugserver、lsdiag）也直接烤進 Data seed，不再開機後 stage。
+
+### 部署（rig）：`tools/rig/fresh-deploy.sh [--build] [--yes]`
+停舊 VM、從 daemon 與 app 的 `vms.json` 刪掉（留備份）、清掉 VM 目錄，推 release 的 OS／SystemOS／開機碟與 edk2 firmware、建空 Data store、
+裝 `CROSVM_BIN`，用 `tools/rig/unixnu-vm.template.json`（新 id、手機的 br-wifi 與 app uid）建新 VM，開機、放 ssh key。
+
+### applebox 獨立倉庫
+`github.com/Droid-VM/applebox`（使用者 10-29 指示）：`build.py OUT [--entitlements PLIST]`。裝置 repo 以 `feeds.toml` 釘 commit（kit → tree 的
+`kits/applebox`），`build-droidvm-applebox.py` 只剩包裝（簽 `package/debug-entitlements.plist`、寫 owner trust）。
+
+### 實機驗證（10-29，8 Gen 3 那支手機）
+- 舊的 UniXNU VM（daemon、app 的 `vms.json`）已不在，只剩它的目錄（映像、Data store 與 5 份 16 GiB 的 store 備份）→ 全部刪除；新 VM 由
+  `fresh-deploy.sh` 建立，crosvm 換成 wip/hackintosh 的 d5c13c494（舊的留 `crosvm.bak-63b2de59`）。
+- 開機：DarwinBoot 從 FDT 補出「2 disk + data store、5 input、net、gpu、snd、1 media」；新 seed 的 Data（新 UUID）掛上；**首次開機約 5 分鐘**
+  才出第一張圖（新 Data 要建所有 app／extension 的 container），之後鎖定畫面、主畫面（時鐘／備忘錄／行事曆小工具）正常，經 virtio-gpu＋Metal
+  （2 個 GPU client、53 次 fenced submission、0 timeout、0 refusal）。en0 拿到 IPv4／IPv6。狀態列電量＝手機電量。
+- virtio-media：found／up、9 個 command、0 timeout；virtio-snd：stage 3、2 streams、0 error；電池 IOPMPowerSource 已發布。
+- debug shell 全部從 seed 出來就能用：applebox（34 個指令，新倉庫建的）、ipatool、debugserver（lldb-19.1.7）、ownervisor（`ctl.sock`＋`app.sock`）、
+  dropbear（ssh）——不再需要開機後 stage。
+- 仍開著：桌布黑（Poster 問題，見 memory）；兩格小工具首開空白；hostsim 的 deferred-pressure 檢查失敗（不擋 build）；libimobiledevice 還沒有
+  device repo 的 build 腳本，所以不在自動流程裡。
+- **推上去之後再從乾淨 clone 跑一次全流程**（不帶任何手動同步）：fork 1c8e709＋裝置 312cb4a，`build-droidvm-all.py` 從 clone 到 release 一次跑完、約 16 分鐘（有 `--ipsw-cache`），`release.json` 的來源都是乾淨 commit。
+- 已推：裝置 repo `wip/hackintosh` b3ec07b..312cb4a、fork `wip/droidvm` ca1aaf9..1c8e709（DarwinBoot b2ad902、Adreno740 7b61139）、
+  Droid-VM/NativeAdreno `wip/hackintosh` 7b61139、新倉庫 Droid-VM/applebox `main` 2307bb9。
+
+---
+
 ## 續報（2026-10-28 晚，Claude，手機 5566）：TODO 6 電池完成；TODO 3 音訊整條原廠堆疊通；TODO 5 GPS 調查完、暫停
 
 這條線在 5566（rig `/root/gitrs/UniXNU/droidvm-5566`，裝置 repo worktree `UniXNU-droidvm-audio`，branch `wip/audio`）上做，
@@ -157,6 +209,7 @@ UniXNUSetting 本質上是幫 ownervisor 做的 app 內 GUI，所以用 ownervis
   - **8 Elite Gen 5（Adreno 840）的 Metal 修好**——5566 的 Data seed 帶的舊 Turnip 不在開機 trust cache；換成已 trust 的 plugin bundle（seed 也換新）後 iPadOS 走 Metal，軟體渲染 fallback 的 backboardd SIGBUS 與設定 app 空白一起消失。
   - **動態 ADT**——DarwinBoot 開機時從 firmware 的 FDT 補上 RAM 與 `/arm-io` 裝置（DarwinBoot b2ad902、device 2c9227e…3f3474d 的 `--dynamic`）；crosvm 裝置或 pool 變動不必再重產 ADT。
   - **iPadOS 的 virtio-media 傳輸層通了**——guest 自檢讀到解碼器的格式（H.264／HEVC／VP9／AV1 → NV12）；crosvm `--virtio-mmio-media`（d5c13c494）、guest `DroidVMVirtioMedia.c`（e66a7b4）。
+  - **從零建置自動化**——裝置 repo `scripts/build-droidvm-all.py`（全新 clone → release）＋ rig `fresh-deploy.sh`（手機上換一台新 VM）；動態 ADT 接進 board.toml；applebox 獨立成 Droid-VM/applebox；8 Gen 3 手機上刪掉舊 VM、部署新的，開到主畫面。
 
 ## 1. 現況
 
@@ -269,6 +322,7 @@ UniXNUSetting 本質上是幫 ownervisor 做的 app 內 GUI，所以用 ownervis
 
 | 改了什麼 | 怎麼做 |
 |---|---|
+| 全部從頭（新 checkout） | 在 Mac 的裝置 repo 跑 `python3 scripts/build-droidvm-all.py --unique-chip-id …`（`--ipsw-cache` 免重抓 IPSW 卷）→ `out/droidvm/release/`；rig 的 `fresh-deploy.sh [--build]` 把它變成手機上的一台新 VM（舊的連目錄一起刪） |
 | XNU patch | 在 Mac 的 `out/droidvm/tree/.cache/xnu-work` 改 → tree 裡跑 `scripts/save-xnu-patch.py NAME FILE` → 把 patch 複製回本機 fork。要換掉已套用的 patch，先用**絕對路徑**的 `git apply --reverse` 退掉舊版 |
 | kernel 或板子程式碼（`package/*.c`） | 同步裝置 repo 的 `package/` **和 `scripts/`** 到 Mac → Mac 上 `PATH=/opt/homebrew/bin:$PATH ./unixnu build kernel` → rig 的 `deploy.sh` → `vm.sh restart`。編譯失敗後缺物件時，刪掉 `build/xnu/ios-obj/.../osfmk/DEVELOPMENT/startup.o{,.json}` 讓它跑 bootstrap pass |
 | Metal 外掛（frontend、bridge、turnip） | `tools/rig/plugin-redeploy.sh`（`FORK` 指向本機 fork）。Mesa 的 patch 清單（`scripts/data/adreno-compiler-inputs.json` 的 `patches`）改了，就把 Mac 的 `.cache/mesa-work` reset 回 pin，再照順序 `git apply`。metal2vulkan 的 patch 由 AdrenoMetal 的建置自己堆疊套用，原始碼只要停在 pin |
