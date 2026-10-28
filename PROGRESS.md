@@ -270,7 +270,16 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   或 host 指標。傳輸能通只代表資料送得到 guest，不代表系統 API 已經接上（例如陀螺儀現在進得了 guest，app 卻讀不到）。
 
 1. ~~**陀螺儀：原廠路線**~~ **已完成（2026-10-28）**：kernel HID 服務（`DroidVMMotionHid.inc`）→ locationd/CoreMotion → backboardd；ADT 根 compatible 改 `J120AP`；一般 app `CMMotionManager` 讀得到，自動旋轉不靠 orientd。詳見最上面續報與 memory [[droidvm-motion-sensors]]。待補：陀螺儀單位、動態轉動的實機驗證。
-2. **iPadOS 內的 IPA 安裝器 / DVMSetting（進行中）。** 見最上面「TODO 2 續報」：**runtime 信任快取已證實可行**（裝完當場信任、不用重開機/主機）、**entitlement 可任意授予**。架構＝ DVMSetting（GUI app + owner daemon）+ applebox（單一 multicall debugutil）。配對走原廠 lockdownd，但機內協定被結構阻擋，剩 USB-mux 模擬 / 無線 / 直接寫 pair record 三條。下一步待定。
+2. **iPadOS 內的 IPA 安裝器 / DVMSetting（進行中）。** 見最上面「TODO 2 續報」：runtime 信任快取已證實可行、entitlement 可任意授予。配對先擱著。範圍與動工順序：
+   - **(1) shell 環境（先做）＝ 4 個工具，全部簽上 entitlement 全集 + owner-trust，每個 applet/行程都帶滿權限**（AMFI 對 cdhash-trusted binary 授予任意 entitlement，已驗）：
+     **applebox**（單一 multicall：Apple OSS `_cmds`（file/text/shell/adv/network…）+ toybox 補缺口（xz/timeout/od…）+ zsh，用 `ld -r` + exported-symbols-list 併一顆）、**dropbear**（ssh，login shell exec applebox-zsh → 滿權限 zsh）、**debugutil**（原 gfxprobe）、**libimobiledevice**（備著，待配對通了才用）。entsh 暫不做（這幾顆滿權限的就是它）。
+     `build-applebox.py`：table-driven、per-tool `-Dmain=<t>_main` + `ld -r` localize + 聚合一個 `applebox.json` trust。研究報告見 scratchpad `applebox-research.md`。
+     待辦子項：entitlement 全集要盤一份 curated 清單（多數 boolean、少數陣列值如 iokit-user-client-class/finegrained-*；逐步加、個別 restricted AMFI 可能拒要一加一驗）；terminfo db 要一起 stage（less/vim/top/zsh 互動要）；scp/sftp 用 OpenSSH sftp-server。
+   - **(2) trust-cache user client（唯一要改 kernel 的一塊）**：讓 userspace 呼叫已驗證的 `load_legacy_trust_cache`（owner-gated）。+ 機內 cdhash 抽取 → **普通 IPA 安裝端到端**（抽 cdhash → runtime 信任 → staged + LaunchServices 登記 → 上主畫面；移除走 SpringBoard 長按）。
+   - **(3) 持久化 trust 清單 + 開機 trust-loader 服務**：裝好的 cdhash 存到 Data，開機早期由 ownervisor 服務重載（撐過重開機、不用主機、不重建 kernel）。+ **特權 IPA 安裝/移除**（同 (2) + owner entitlement/category；移除：刪 bundle + 從清單移除）。
+   - **(4) serial-shell 服務**（zsh 掛到指定 serial，getty 式）+ **ownervisor `protected` 旗標**（ssh、serial-shell 可停不可刪）+ **服務管理**（新增/刪除/列表/狀態，GUI over ownerctl）。
+   - **(5) DVMSetting GUI app（普通 SpringBoard）+ dvmsettingd（owner daemon）** 把以上串成一個管理介面，本機 socket + JSON。
+   - **配對（獨立 track，擱置）**：USB-mux 模擬 / 無線（設密碼）/ 直接寫 `/var/db/lockdown` 的 pair record（吃 kernel 控制，待逆向格式）。
 3. **音訊（喇叭、麥克風）。**host 已有：DroidVM 的喇叭／麥克風設定、crosvm virtio-snd 的 `backend=aaudio`。guest 缺驅動：
    調查 IOAudio2 family 或原映像的 HAL plug-in 能否接 virtio-snd（survey 表格；`plans/VIRTIO_SND_PROTECTED_VM.md`）。
 4. **VPU（編碼器、解碼器）與相機（含對焦、閃光燈）。**host 端有 `wip/vpu` 分支與 `android_camera`（Camera2）基礎，但沒有完成的
