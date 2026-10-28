@@ -4,6 +4,9 @@
 app `6a5f283`),三個 virtio-media device 都尚未實作。2026-08-26;同日對碼覆核
 (7 路平行、file:line 逐條)後修訂——被推翻的結論收在 §7 末六列。
 
+**iPadOS guest（2026-10-29 起）**：傳輸層（XNU 的 virtio-media 驅動、crosvm `--virtio-mmio-media`、DarwinBoot 的動態 ADT）的進度與下一步記在
+`plans/TODO3-6_PERIPHERALS_PLAN.md` 的 TODO 4 一節；本文以 Linux guest 為主。
+
 順序是 **相機 → 解碼 → 編碼**,理由在 §6。三者共用同一組地基(§2),所以先做的那個負責把
 未知數趟掉,後面兩個是加法。
 

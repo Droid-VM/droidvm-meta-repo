@@ -1,11 +1,115 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-28。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-29。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
-## 續報（2026-10-28，Claude）：TODO 2 調查——runtime 信任快取可行、entitlement 可任意授予、機內配對卡在結構阻擋；applebox／DVMSetting 設計
+## 續報（2026-10-28 晚，Claude，手機 5566）：TODO 6 電池完成；TODO 3 音訊整條原廠堆疊通；TODO 5 GPS 調查完、暫停
 
-**TODO 1（陀螺儀原廠路線）已完成**（見「已完成里程碑」）。本輪主力是 TODO 2（iPadOS 內的 IPA 安裝器／DVMSetting）的可行性調查。
+這條線在 5566（rig `/root/gitrs/UniXNU/droidvm-5566`，裝置 repo worktree `UniXNU-droidvm-audio`，branch `wip/audio`）上做，
+和 5567 的 TODO 2 分開。分工原則（使用者 10-28）：**crosvm 提供通用設備（Windows／Linux 也能用）；XNU 讀通用設備、翻譯成
+userspace 看得懂的介面；userspace 只負責呈現到 app**。
+
+### TODO 6 電池：完成（實機驗過放電與充電）
+- host：crosvm `--battery type=goldfish`，新的通用 backend `power_monitor/src/sysfs.rs` 讀手機 `/sys/class/power_supply`
+  （`PowerClient` 要同時實作 `get_power_data` 與 `last_request_timestamp`，否則編不過——曾因 wrapper 吃掉退出碼而部署到舊 binary，
+  畫面一直顯示 goldfish 預設 50%）。
+- guest：`package/DroidVMBattery.cpp`，直接繼承 `IOPMPowerSource`（開源 IOKit，不必像音訊那樣改 metaclass），~2 s 輪詢 goldfish
+  暫存器 → powerd → SpringBoard。**陷阱：先 `init()` 再 `attach()`**，順序反了會在 `attachToParent` data abort。
+  ADT：`make-droidvm-adt.py --battery` 從 FDT 的 `google,goldfish-battery` 節點產生 `/arm-io/battery`。
+- 驗收：狀態列顯示手機真實電量，放電（1%／未充電）與充電（12%＋閃電圖示）都對。memory [[droidvm-battery]]。
+
+### TODO 3 音訊：原廠堆疊整條通，剩真實 app 播放／錄音的驗收
+- guest `IOAudio2Device`（類別名另取、metaclass 掛到原廠 family 下）以 **UID 分裝置**：`Speaker`（→ Device_Speaker_Aspen，可路由
+  port，載入 J120 喇叭 DSP）與麥克風；HAL 兩個都開（clients=2）。transport＝guest virtio-snd 驅動 → crosvm vhost-user AAudio
+  helper（以 app uid 跑）。
+- crosvm 兩個通用修正（virtio-mmio 上的 vhost-user 原本不能用）：activate 不再強求 MSI-X；frontend 尊重
+  `VIRTQ_AVAIL_F_NO_INTERRUPT`（輪詢的 guest 不會被一條沒人 ack 的 SPI 灌爆，否則 launchd 卡死）。
+- PCM 以 kernel self-test（`droidvm-snd-selftest=N`）＋ crosvm `backend=file` 驗到**逐位元正確**。
+- **實際播放已驗（10-28 晚）**：Safari 播一個 MP3，guest 以即時速率送出 period（約 5 s 1100 個），手機 AudioFlinger 上 app uid 的 AAudio
+  track 為 active。手機原本沒聲音是因為**手機自己的媒體音量是 0**（`STREAM_MUSIC` speaker index 0，`mutedState: streamVolume`），不是我們的問題；
+  經使用者同意用音量鍵調到 40/160 後 `mutedState: none`、`PortMuted false`，track 位置以 48 kHz 前進，**手機喇叭實際播出 guest 的音樂**，之後音量調回 0。
+  （`cmd media_session volume --set` 在這支手機上設不進去，要用 `KEYCODE_VOLUME_UP/DOWN`。）
+- **錄音還沒在 app 裡驗到**：host 端的 capture stream 一直開著且未被靜音，但 guest 沒收到 input 的 StartIO。Voice Memos 按錄音沒反應（log 裡
+  tccd 處理 `voicememod` 時 LaunchServices 回 -10814，麥克風權限可能卡在 app 登記）；改用 Safari 的錄音頁時被下面的 backboardd crash 打斷。
+- **已 push（10-28 晚）**：裝置 repo `wip/hackintosh` 8d4d493..3e0d34c（音訊、電池、rig `load-modules.sh`；從 worktree `UniXNU-droidvm-land`
+  的 branch `wip/peripherals` 推，**接在原本的遠端 tip 上**，不含 5567 那邊 `main` 上 4 個「not for push」的實驗 commit——已通知那個 session
+  下次 push 前先 rebase）；crosvm `wip/virtio-mmio` 與 `wip/hackintosh` 0f2db62ae..8d587f266（vhost-user on mmio＋NO_INTERRUPT、
+  `--virtio-mmio-snd`、sysfs 電池）。`board.toml` 的 trust pin 是 5566 rig 自己的，沒 commit。memory [[droidvm-audio]]。
+- **5566 的 Metal（Adreno 840）已修好（10-29）**，不用改程式：開機參數改 `vgpu-3d=1` 後 backboardd 仍拿不到 Metal device，原因是
+  AMFI 拒絕 `NativeAdrenoMetal.bundle/libvulkan_freedreno.dylib`——5566 的 Data seed 帶的是**舊版 Turnip（cdhash `fe53f4fe`），不在開機
+  trust cache 裡**。把 Mac 上目前 build、已被 trust 的 bundle（NativeAdrenoMetal `49ae0dfe`、Turnip `93f89c29`）放進 guest Data 後重開：
+  `gpu-3d` 3 個 client、8600+ 次 fenced submission、0 timeout、0 refusal，手機 KGSL 沒有 fault；主畫面、Safari、設定、Notes 都走 Metal。
+  下面兩個問題都是軟體 fallback 的症狀，已一起消失。**seed 也換了（10-29）**：audio tree 的 `build/droidvm-data/data-12g-skip-ov.dbr`
+  改成只換掉 plugin bundle 的新版（sha `5bd07045`；舊的留在 `data-12g-skip-ov.pre-plugin2.dbr`）。下一次 5566 的 `payload-redeploy.sh`
+  會看到 seed 變了，要 `ALLOW_CHANGE=seed`，而且**會重置 5566 的 Data**（先備份 `/private/var/ngpu`）。5567 main tree 的 seed 還是舊的
+  （同樣帶未 trust 的舊 Turnip），沒動。memory [[gpu-8e5-support]]。
+- （已解決，見上）5566 當時沒有 Metal（`vgpu-3d=0`）時的兩個問題：(a) **backboardd 反覆 SIGBUS**：`CA::OGL::SWContext::set_surface` →
+  `__bzero`，多半發生在開 app 的動畫，畫面停住，等 launchd 重啟 backboardd／SpringBoard；(b) **設定 app 開起來一片空白**：主執行緒卡在
+  `dispatch_sync`，另外兩條執行緒在等某個 daemon 的同步 XPC 回覆。
+
+### TODO 5 GPS：調查完、**暫停**（使用者 10-28：晚點回來做）
+結論都在 memory [[droidvm-gps-plan]]，scratchpad `gnss/`、`ipsw-j121/`。
+- 原廠流程：CoreLocation → locationd → gpsd（on-demand）→ 晶片廠 dylib → GNSS 晶片。gpsd 的 `ForceGnssDeviceLibraryName`
+  （`/private/var/Managed Preferences/mobile/gpsd.plist`）可讓它 `dlopen` 任意 plugin；plugin 放 `/private/var/ngpu/addons`
+  就會出現在 `/System/Library/Extensions`。gpsd 以 `_gpsd` 跑，sandbox 允許讀該 plist、讀寫 `/dev/cu.gps`。
+- 已還原的 ABI：`gnss::Device` vtable 59 格、`getGnssDeviceVersion()` 必須回 2502、`gnss::Result::kSuccess=1`、gpsd 在
+  `newGnssDevice` 後同步等建構 callback；`gnss::Fix` 0xc8 bytes 的欄位位置與 gpsd 丟棄 fix 的檢查規則（gpsd 內嵌了
+  `GnssTypes.proto` descriptor 可對照欄位名）。
+- **擋住的地方（L1）**：locationd 只在 `CLPlatformInfo::getProviders() & 0x8`（GPS）成立時建立 GNSS provider，**所有 WiFi 版
+  iPad 都沒有這個 bit**，J120 上 GNSS 永遠不會啟動。要換成蜂窩版 **J121AP／iPad7,2**：值已從同一份官方 IPSW 的
+  `DeviceTree.j121ap.im4p` 取得（`product-id 61792bce…1a67`、`/product/gps-capable=1`、`compatible-device-fallback iPad6,8`…，
+  `/baseband` 節點不加）。
+- **未解的風險**：J121 的 GNSS 在 Qualcomm 基頻（`mav16`）裡；locationd 有 gpsd（`CLGnssDaemonDevice`）與基頻 QMI
+  （`CLEurekaController`）兩條後端，還不知道 J121 會選哪條。回來時第一步：只換 ADT 身分開機實測（清 MobileGestalt cache；
+  注意 CoreMotion 的機型表、CommCenter 雜訊、「無服務」）。
+- 設計定案：host＝virtio-console 具名 port 傳 NMEA 0183（RMC/GGA/GSA/GST），資料由 app（Java LocationManager，app uid）寫進
+  crosvm 的 console socket；XNU＝virtio-console 驅動，解析 NMEA、在 `/dev/cu.gps` 提供整理好的 fix；userspace 只多一個很薄的
+  vendor plugin（GNSS 晶片 plugin 在 Apple 的設計裡本來就在 userspace）。陀螺儀維持 virtio-input。
+
+### 其他
+- 5566 在 1% 時手機重開過：模組與 hugepage 池會消失。`gh_hugepage_reserve.ko` 在使用者的 KernelSU 目錄（請使用者 insmod），
+  `load-modules.sh` 改成依 `uname -r` 選模組目錄。memory [[droidvm-host-reboot-recovery]]。
+- 曾嘗試搬到 5568 後中止（使用者把 5566 接上充電）：5568 留下 app r312、我的 crosvm（備份 `crosvm.bak-579d1a5b`）、UniXNU 映像與
+  VM 項目（data-store 已失效）。**教訓：複製 data-store 前一定先停來源 VM**，否則 guest panic「libSystem.B.dylib not loaded」。
+  memory [[droidvm-5568-state]]。
+- 以上都已 commit 並 push（commit hash 見各項）。這條線的詳細計畫與狀態總表：`plans/TODO3-6_PERIPHERALS_PLAN.md`。
+
+---
+
+## 續報（2026-10-28 下午，Claude）：entitlement 全集盤點（stock 21H461）；UniXNUSetting 改做特權 app（同日晚上再修訂：改為 ownervisor 的 in-app GUI，見下方「決定」）
+
+接續下方 TODO 2 續報。使用者問「entitlement 全集的 list 型別是不是很難枚舉」、並提議「UniXNU 做成特權 app 更好」。從 build Mac 已掛載的 stock 21H461 rootfs（`/private/tmp/dmg.*`，rootfs dmg `044-76040-038.dmg`）＋ cryptex（`044-76034-038.dmg`）用 `scratchpad/entdump.py` 解出全部簽章 binary 的 entitlement。
+
+### 數據
+- 2,505 顆簽章 binary，1,595 顆帶 entitlement，**3,658 個不同 key**；其中 **3,309 個是純 bool**（設 true 即可，無枚舉問題）。
+- **247 個 list 型 key、8,185 個不同值**，分三類：
+  - **sandbox 例外**（`security.exception.*`／`temporary-exception.*`／`seatbelt-profiles`／`sandbox.profile*`）：81 key／4,618 值。**整類丟掉**——no-sandbox 行程不讀；最大的 `mach-lookup.global-name`（1,368 值）就在此類。
+  - **身分／行為設定**（`application-identifier`、`container-required`、`application-groups`、`pac.shared_region_id`、`web-browser-engine.*`、`security.message-filter`、`UIKit.vends-view-services`、iCloud／aps…）：74 key／533 值。**絕不能聯集**——這些決定「行程是誰、進哪個 sandbox」，塞進去反而關進 sandbox 或改行為。
+  - **權限清單**：175 key／3,034 值。**只有這類需要人工盤點。**
+- 權限清單再分：**值域封閉、可從檢查方找齊**（`tcc.allow`、`iokit-user-client-class`＝kernelcache 全部 UC 類別＋我們的 driver、`mobileinstall.allowedSPI`、`lockdown.finegrained-*`、CommCenter、MobileGestalt）；**值域開放、找不齊**（`trial.client` 數字 ID、biome stream、IDS topic、asset type、通知 bundle id、keychain group）——但 stock 聯集已涵蓋所有原廠 consumer，第三方值我們用不到。
+- **陷阱**：(a) 有檢查方吃萬用字元（stock 自己用 `com.apple.MobileAsset.*`、`geoservices.map-subscriptions` 的 `*`），但比對規則各異，不可當通則；keychain `*` 需 Security 源碼查證，未驗。(b) 同一 key 型別不一致（`iokit-user-client-class` 有人寫字串、`tcc.allow` 有巢狀陣列），給錯型別＝沒給。(c) 有雜訊（Apple 自己的錯字 `no-sandbox\n`、誤入的 `CFBundleIdentifier`／`MachServices`），所以**聯集 ≠ 真全集**。
+- 只取權限類、bool 設 true、清單取聯集 → 候選全集 **3,430 key、約 360 KB XML**（對照「設定」app 585 個）。AMFI／XPC 收不收這麼大一包**未驗**。
+- 對 `cap.sys_admin` 計畫的影響：userspace daemon 是自己拿整包、自己查清單裡有沒有某值，所以 kernel 注入那份**仍要逐一列值**；「任何值都算有」只能用在 kernel 端檢查（`IOTaskHasEntitlement`／sandbox）。
+
+### 決定（10-28 晚修訂）：UniXNUSetting＝ownervisor 的 in-app GUI，root 操作交 ownervisor
+UniXNUSetting 本質上是幫 ownervisor 做的 app 內 GUI，所以用 ownervisor 不違反「ownervisor 只除錯」。**不做特權 app**：先前「no-sandbox＋bundle 內 persona helper」的方案撤回（persona 提權實測 mobile→root EPERM，見下方驗證結果 1）。
+- **要 root 的操作**：交給 kernel 以 root spawn 的 ownervisor（app 經本機 socket 呼叫）。app 本身以 mobile 跑，不簽大 entitlement 集。
+- **真正要守的兩件事**（使用者 10-28）：(a) **未經使用者授權的第三方 app 碰不到 ownervisor 和底下的 debug 工具**；(b) **使用中不會不小心把 UniXNUSetting 刪掉**。
+- 機制（待實作／驗證，細節 `plans/UNIXNUSETTING.md` §3.1）：(a) app 專用 socket，ownervisor 用對端 audit token 取 cdhash，只認 payload 內建的 UniXNUSetting——**不能只查 entitlement**（AMFI 把任何 entitlement 授予任何 cdhash-trusted binary，含之後 runtime 信任的使用者 IPA）；現有 `ctl.sock`／`control/` spool 沒有對端驗證且 `add` 能以 root 跑任何 trusted binary，維持 root-only；debug 工具目錄 root-only。(b) 當 staged 系統 app 放在唯讀 os.img，不在可刪除清單，SpringBoard 不給刪。
+- **TODO 2 (3) 要改**：「開機時 ownervisor 服務重載信任清單」違反原則；改成 **Data 掛上時由 kernel 直接讀已存 cdhash 清單**（`DroidVMTrustCache.c` 已有載入碼）。
+
+### 驗證結果（2026-10-28 實機；細節＋captest 原始輸出見 `plans/UNIXNUSETTING.md` §3/§5）
+1. **persona 以 root 啟動 helper → 只在呼叫者已是 root 時可行。** root→root persona override spawn 成功（子 uid=0）；但 euid 降 501、以及純 mobile（ruid=euid=svuid=501）→ spawn root persona **皆 EPERM**。→ **mobile app 無法靠 persona 自力提權**；要 root 的操作改交 **kernel 以 root spawn 的 ownervisor root helper**（app 經 socket 呼叫），persona 只用於「已是 root 的 daemon 要降成特定 uid 跑子行程」。
+2. no-sandbox staged app 從主畫面啟動：launch-constraint 半邊已由 `owner-skip-launch-constraints=1` 解除；app-launch 半邊要等 runtime 安裝器（`staged_system_apps` 在唯讀 os.img 上）。**本輪未端到端跑**，仍待安裝器就緒。
+3. **~360 KB 全集 AMFI 不收**（實測 SIGKILL「entitlements too large」）；實務上限約 256 KB XML。**改走 curated：109-key 全 lockdownd 除錯集（17 KB）實測 AMFI 100% 授予（109/109）**，遠在限內。→ 不簽 360 KB 全集，curate 即可。
+
+產物：`scratchpad/fullset-candidate.plist`（候選全集）、`scratchpad/ents-21H461.jsonl`＋`ents-21H461-cryptex.jsonl`（逐 binary 原始 entitlement）、`scratchpad/entdump.py`／`entclass.py`（擷取／分類腳本）。memory [[entitlement-fullset]]。
+
+---
+
+## 續報（2026-10-28，Claude）：TODO 2 調查——runtime 信任快取可行、entitlement 可任意授予、機內配對卡在結構阻擋；applebox／UniXNUSetting 設計
+
+**TODO 1（陀螺儀原廠路線）已完成**（見「已完成里程碑」）。本輪主力是 TODO 2（iPadOS 內的 IPA 安裝器／UniXNUSetting）的可行性調查。
 
 ### 關鍵實驗結果（實機）
 - **runtime 信任快取：可行（path A 成立）。** XNU patch `zzyd-owner-runtime-trust-cache.patch` + 開機參數 `owner-runtime-trust-cache=1`
@@ -20,7 +124,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   （吃我們的 kernel 控制，待逆向 `/var/db/lockdown` 的 record 格式 + crypto）。
 
 ### 設計（討論定案，未實作）
-- **DVMSetting** = GUI app（普通 SpringBoard，category 0，sandbox）+ **dvmsettingd**（owner daemon，category 3），本機 socket + JSON。
+- **UniXNUSetting** = GUI app（普通 SpringBoard，category 0，sandbox）+ **unixnusettingd**（owner daemon，category 3），本機 socket + JSON。
   功能：裝普通 IPA（移除走 SpringBoard 長按）、裝/移除特權 IPA、SSH（開關 + auth_keys）、serial-shell（zsh 掛到指定 serial）、
   服務管理（新增/刪除/列表/狀態；ssh 與 serial-shell 是 protected，可停不可刪）、lockdownd pairing + debug bridge。持久化裝好的 cdhash
   到 Data，開機由一個 trust-loader 服務重載（撐過重開機、不用主機）。
@@ -36,7 +140,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ---
 
-## 已完成里程碑（2026-10-24 ~ 10-28，根因與細節見各 memory 檔與下方參考章節）
+## 已完成里程碑（2026-10-24 ~ 10-29，根因與細節見各 memory 檔與下方參考章節）
 
 - **10-24**：GFXBench 第一次出分；GPU 記憶體 2 GB → 590 MB；發現手機 OPLUS daemon 把大核限頻（跑分要記 `scaling_max_freq`）。
 - **10-25**：**drm2kgsl 遷移**——iOS 的 3D 預設改走 virtio-gpu + drm2kgsl（`vgpu-3d=1`），ALU2 22→50 fps；重型 GFXBench（Aztec/Car Chase/T-Rex）都出分；兩種手機 watchdog 當機修好（guest WFE + secondaries 讀 stale boot data）。
@@ -47,6 +151,12 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - **上游 UniXNU rebase 進來**（元件改名 NativeMetal→AdrenoMetal 等；建置、開機、MetalCheck 29/29、GFXBench 都驗過；強制推送，舊 tip 存 `pre-rebase-20261028` tag）。
   - **wip/vpu 全部 rebase 進 wip/hackintosh**（11 個 repo；crosvm 76 個 VPU commit；app 582 測試過；新 crosvm 實機驗過）。
   - **TODO 1 陀螺儀原廠路線完成**——kernel HID 服務（`DroidVMMotionHid.inc`：加速度計 `{0xff00,3}`、陀螺儀 `{0xff00,9}`、方向 `{0x20,0x8a}`，各帶空 `{0xff0c,3}` + HIDDefaultBehavior，方向事件帶 `{0xff15,2}` 時間戳）→ locationd/CoreMotion → backboardd；ADT 根 compatible 第一項改 `J120AP`（否則 CoreMotion 查不到感測器）；一般 app `CMMotionManager` 讀得到，自動旋轉不靠 orientd。
+  - **TODO 6 電池完成**——crosvm goldfish battery（新的通用 sysfs backend）→ guest `DroidVMBattery`（`IOPMPowerSource` 子類別）→ powerd → SpringBoard，狀態列電量與充電圖示跟著手機走。
+  - **TODO 3 音訊原廠堆疊整條通**——`IOAudio2Device`（Speaker／Mic 依 UID 分裝置）→ VirtualAudio → HAL → virtio-snd（virtio-mmio 上的 vhost-user AAudio）；Safari 播放經手機喇叭實際出聲，剩 app 內錄音驗收。
+- **10-29**：
+  - **8 Elite Gen 5（Adreno 840）的 Metal 修好**——5566 的 Data seed 帶的舊 Turnip 不在開機 trust cache；換成已 trust 的 plugin bundle（seed 也換新）後 iPadOS 走 Metal，軟體渲染 fallback 的 backboardd SIGBUS 與設定 app 空白一起消失。
+  - **動態 ADT**——DarwinBoot 開機時從 firmware 的 FDT 補上 RAM 與 `/arm-io` 裝置（DarwinBoot b2ad902、device 2c9227e…3f3474d 的 `--dynamic`）；crosvm 裝置或 pool 變動不必再重產 ADT。
+  - **iPadOS 的 virtio-media 傳輸層通了**——guest 自檢讀到解碼器的格式（H.264／HEVC／VP9／AV1 → NV12）；crosvm `--virtio-mmio-media`（d5c13c494）、guest `DroidVMVirtioMedia.c`（e66a7b4）。
 
 ## 1. 現況
 
@@ -62,6 +172,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - **網路：** en0，DHCP IPv4／IPv6，走 app 的 br-wifi。
 - **Metal：** 經 virtio-gpu＋drm2kgsl 到主機 KGSL（droidvm-gpu 已在 2026-10-26 退役）。GFXBench 的 Metal 測試都能跑到出分。
 - **旋轉：** 面板是直式 1024×1366；陀螺儀（crosvm `--input motion`）讓 iPadOS 自然旋轉，app 可以轉 Display、鎖 Screen。
+- **電池：** 狀態列顯示手機真實電量與充電狀態（crosvm goldfish battery → `IOPMPowerSource`，2026-10-28，5566 上驗過）。
 - **Data volume：** 12 GiB，會持續保存。
 - **owner 工具：** 可以 ssh 進 guest；有 ownervisor 服務管理、toybox、zsh、lsdiag、gfxprobe。
 
@@ -270,26 +381,47 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   或 host 指標。傳輸能通只代表資料送得到 guest，不代表系統 API 已經接上（例如陀螺儀現在進得了 guest，app 卻讀不到）。
 
 1. ~~**陀螺儀：原廠路線**~~ **已完成（2026-10-28）**：kernel HID 服務（`DroidVMMotionHid.inc`）→ locationd/CoreMotion → backboardd；ADT 根 compatible 改 `J120AP`；一般 app `CMMotionManager` 讀得到，自動旋轉不靠 orientd。詳見最上面續報與 memory [[droidvm-motion-sensors]]。待補：陀螺儀單位、動態轉動的實機驗證。
-2. **iPadOS 內的 IPA 安裝器 / DVMSetting（進行中）。** 見最上面「TODO 2 續報」：runtime 信任快取已證實可行、entitlement 可任意授予。配對先擱著。範圍與動工順序：
+2. **iPadOS 內的 IPA 安裝器 / UniXNUSetting（進行中）。** 見最上面「TODO 2 續報」：runtime 信任快取已證實可行、entitlement 可任意授予。配對先擱著。範圍與動工順序：
    - **(1) shell 環境（先做）＝ 4 個工具，全部簽上 entitlement 全集 + owner-trust，每個 applet/行程都帶滿權限**（AMFI 對 cdhash-trusted binary 授予任意 entitlement，已驗）：
      **applebox**（單一 multicall：Apple OSS `_cmds`（file/text/shell/adv/network…）+ toybox 補缺口（xz/timeout/od…）+ zsh，用 `ld -r` + exported-symbols-list 併一顆）、**dropbear**（ssh，login shell exec applebox-zsh → 滿權限 zsh）、**debugutil**（原 gfxprobe）、**libimobiledevice**（備著，待配對通了才用）。entsh 暫不做（這幾顆滿權限的就是它）。
      `build-applebox.py`：table-driven、per-tool `-Dmain=<t>_main` + `ld -r` localize + 聚合一個 `applebox.json` trust。研究報告見 scratchpad `applebox-research.md`。
      待辦子項：entitlement 全集要盤一份 curated 清單（多數 boolean、少數陣列值如 iokit-user-client-class/finegrained-*；逐步加、個別 restricted AMFI 可能拒要一加一驗）；terminfo db 要一起 stage（less/vim/top/zsh 互動要）；scp/sftp 用 OpenSSH sftp-server。
      **entitlement 全集 → 日後搬進 kernel（`cap.sys_admin` 計畫）**：現在「簽滿」是為了快速把全集盤穩；穩了之後定義一個自定義 entitlement **`cap.sys_admin`**（非 apple 前綴，不受 AMFI restriction 檢查，就是個 dict key），工具只簽它，**patch AMFI 在 exec 附掛 entitlement 時、看到 `cap.sys_admin` 就注入 kernel 內 curate 的全集 dictionary**。這個附掛點**一處同蓋 kernel 端（`IOTaskHasEntitlement`／sandbox／MACF）與 userspace （`SecTask`/`csops` → lockdownd 等）**，因兩層都讀 task 附掛的 entitlements；value 型 entitlement（finegrained-*、iokit-user-client-class）要給值/萬用。`cap.*` 命名留擴充空間（日後 `cap.net_admin`、`cap.pairing`… 各映射 entitlement 子集，做成 capability 風格）。取捨：改全集內容「簽滿」是 re-sign（輕）、`cap.sys_admin` 要重建 kernel（重），所以迭代用前者、穩定用後者。
    - **(2) trust-cache user client（唯一要改 kernel 的一塊）**：讓 userspace 呼叫已驗證的 `load_legacy_trust_cache`（owner-gated）。+ 機內 cdhash 抽取 → **普通 IPA 安裝端到端**（抽 cdhash → runtime 信任 → staged + LaunchServices 登記 → 上主畫面；移除走 SpringBoard 長按）。
-   - **(3) 持久化 trust 清單 + 開機 trust-loader 服務**：裝好的 cdhash 存到 Data，開機早期由 ownervisor 服務重載（撐過重開機、不用主機、不重建 kernel）。+ **特權 IPA 安裝/移除**（同 (2) + owner entitlement/category；移除：刪 bundle + 從清單移除）。
-   - **(4) serial-shell 服務**（zsh 掛到指定 serial，getty 式）+ **ownervisor `protected` 旗標**（ssh、serial-shell 可停不可刪）+ **服務管理**（新增/刪除/列表/狀態，GUI over ownerctl）。
-   - **(5) DVMSetting GUI app（普通 SpringBoard）+ dvmsettingd（owner daemon）** 把以上串成一個管理介面，本機 socket + JSON。
+   - **(3) 持久化 trust 清單**：裝好的 cdhash 存到 Data；**開機早期由 kernel（`DroidVMTrustCache.c`）在 Data 掛上時直接讀已存清單重載**（不經 ownervisor 服務——見上方 10-28 下午續報的決定；撐過重開機、不用主機、不重建 kernel）。+ **特權 IPA 安裝/移除**（同 (2) + 全集只簽在 helper；移除：刪 bundle + 從清單移除）。
+   - **(4) serial-shell 服務**（zsh 掛到指定 serial，getty 式）+ **ownervisor `protected` 旗標**（ssh、serial-shell 可停不可刪）+ **服務管理**（新增/刪除/列表/狀態，GUI 由 (5) 經 app socket 交 ownervisor 執行）。
+   - **(5) UniXNUSetting＝ownervisor 的 in-app GUI（10-28 晚修訂，取代「特權 app」與更早的「GUI＋unixnusettingd」）**：staged 系統 app（唯讀 os.img、不可刪）、以 mobile 跑、不簽大 entitlement；要 root 的操作經 app 專用 socket 交 ownervisor 執行，ownervisor 以對端 cdhash 只認 payload 內建的 UniXNUSetting，擋未經授權的第三方 app；debug 工具目錄 root-only。細節 `plans/UNIXNUSETTING.md` §3.1。
    - **配對（獨立 track，擱置）**：USB-mux 模擬 / 無線（設密碼）/ 直接寫 `/var/db/lockdown` 的 pair record（吃 kernel 控制，待逆向格式）。
-3. **音訊（喇叭、麥克風）。**host 已有：DroidVM 的喇叭／麥克風設定、crosvm virtio-snd 的 `backend=aaudio`。guest 缺驅動：
-   調查 IOAudio2 family 或原映像的 HAL plug-in 能否接 virtio-snd（survey 表格；`plans/VIRTIO_SND_PROTECTED_VM.md`）。
-4. **VPU（編碼器、解碼器）與相機（含對焦、閃光燈）。**host 端有 `wip/vpu` 分支與 `android_camera`（Camera2）基礎，但沒有完成的
-   guest virtio-media 裝置（`plans/VIRTIO_MEDIA_PLAN.md`）。iPadOS 端要讓 VideoToolbox 用得到編解碼，相機要接上 camera 堆疊：都需要逆向原廠驅動的介面。
-5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**和第 1 項共用：locationd 要先能跑。手機有 mmc56x3x 磁力計，走第 1 項的 HID 路徑；
-   GPS 的最小探針是 `com.apple.locationd.simulation`（私有 SPI，未驗證），之後再做原生 provider；
-   Wi-Fi 只讀掃描結果（host WifiManager 掃描快取 → wifid／IO80211 → locationd）。過期的位置要標 age／invalid。
-6. **電池。**host BatteryManager → guest 的 IOPMPowerSource 子類別＋powerd（真機是 AppleSmartBattery／AppleARMPMUPowerSource，
-   要確認只提供基類夠不夠）。驗收：電量變化、插拔電源、充電／充滿，`UIDevice` 都讀得到。
+3. **音訊（喇叭、麥克風）：原廠堆疊已通（2026-10-28，5566）。**guest `IOAudio2Device`（Speaker／Mic 依 UID 分裝置）→ VirtualAudio →
+   HAL → virtio-snd → crosvm vhost-user AAudio helper（app uid）；PCM 以 self-test＋`backend=file` 驗到逐位元正確。
+   **剩：**iOS 裡實際播放（聽得到）與錄音（`droidvm_snd_rx_periods` 會漲）的驗收；commit。見最上面 10-28 晚續報、memory [[droidvm-audio]]。
+4. **VPU（編碼器、解碼器）與相機（含對焦、閃光燈）。**
+   - **host＋Linux guest：已完成。**virtio-media 三個裝置（相機、解碼器、編碼器）、vhost-user helper（app uid）、`media_host`／`media_guest`
+     池、Linux guest driver（DKMS）、libva-v4l2 都做完，Ubuntu 上出貨組態驗收（Firefox 硬解 H.264／VP9／AV1、ffmpeg 硬體編碼、相機）
+     大部分已關；`wip/vpu` 已 rebase 進 `wip/hackintosh`。還開著的：**P-6**（畫面卡死、之後鎖定畫面全黑，blocker，未能重現）、**P-5**
+     （硬體編碼 drain 偶發掉尾幀，非決定性）、P-2（low）、P-9 的 12.4 h 實機 soak 沒做。細節 `plans/VPU_DESIGN.md` §7.8。
+   - **iPadOS guest：傳輸層第一個里程碑完成（10-29，5566；已 push：crosvm d5c13c494、device e66a7b4／3f3474d、DarwinBoot b2ad902）。**guest 開機自檢讀到
+     `droidvm decoder caps 0x4004000 out: H264 HEVC VP90 AV01 cap: NV12`（9 個 command、0 timeout）。
+     - crosvm：新增 `--virtio-mmio-media`（media 裝置接在 snd 之後的 virtio-mmio）；VM 加 `--pre-alloc ...,media-host-mb=64`、
+       `--virtio-media kind=decoder,uid=10367`（helper 以 app uid 跑，buffer 從 `media_host` pool 配）。
+     - guest：`package/DroidVMVirtioMedia.c`（輪詢式 virtio-mmio 傳輸、commandq/eventq、OPEN/CLOSE/IOCTL/MMAP/MUNMAP API）。
+       陷阱：`VIDIOC_QUERYCAP` 由 driver 用 config space 自己回答，送給 device 會回 ENOTTY。
+     - **動態 ADT（使用者 10-29 提議）**：DarwinBoot 開機時從 firmware 的 FDT（EDK2 `FDT_CLIENT_PROTOCOL`）補上 RAM
+       （`dram-base/size` 與 `/pram`、memory-limit、video-memory、`kern.maxvnodes`）和 `/arm-io` 的裝置節點（逐一讀 virtio-mmio
+       視窗的 DeviceID 分類，加上 pool 與電池）；`make-droidvm-adt.py --dynamic` 只產靜態部分。加 media pool 讓 RAM 從
+       `0x13f200000` 縮成 `0x13b200000`、drm pool 搬家，都自動處理，不用再為了 crosvm 裝置變動重產 ADT。
+       驗證：host harness 跑出的結果與 Python 靜態 ADT 逐位元相同（現況與加 media 兩種配置），5566 實機開機正常。
+       memory [[droidvm-dynamic-adt]]、[[droidvm-virtio-media-ios]]。
+     - 下一步：kernel 自檢跑一次完整解碼往返（S_FMT、REQBUFS MMAP、QBUF 一段 H.264、STREAMON、DQBUF／SOURCE_CHANGE 事件、
+       NV12 校驗），再加 encoder／camera；之後才決定怎麼接 VideoToolbox 與相機堆疊（要逆向原廠驅動介面）。
+5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**
+   - **GPS：調查完、暫停（使用者 10-28 指示，晚點回來）。**結論見最上面 10-28 晚續報：J120 上 locationd 不會啟動 GNSS（WiFi 版
+     iPad 沒有 `kProviderLocationGps`），要換 J121AP 身分（值已從官方 IPSW 取得）；未解的是 J121 上 locationd 走 gpsd 還是基頻
+     QMI。路線：virtio-console 具名 port（NMEA）→ XNU 驅動提供 `/dev/cu.gps` → gpsd＋薄 vendor plugin。
+   - 磁力計：手機有 mmc56x3x，走第 1 項的 HID 路徑（未做）。
+   - Wi-Fi 唯讀：survey 過，kernel 沒有 IO80211 family、真驅動是 DriverKit，太重，暫不做。
+6. ~~**電池**~~ **已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別，
+   只提供基類就夠）→ powerd → SpringBoard。放電、充電都驗過。memory [[droidvm-battery]]。
 
 ### 其他待辦
 
