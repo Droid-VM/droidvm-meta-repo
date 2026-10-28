@@ -3,6 +3,47 @@
 更新：2026-10-28。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-28 08:50，Claude）：TODO 1 陀螺儀走原廠路線——CoreMotion 讀得到，自動旋轉不再靠 ownervisor
+
+**結果：**
+- 一般的 `CMMotionManager`：加速度計、陀螺儀、device motion 都回報可用，資料是經 locationd 拿到的。手機靜置時加速度大小 1.00 g。
+- backboardd 的方向來自 CoreMotion（`Updating device orientation from CoreMotion to: landscapeLeft (3)`）。
+- ownervisor 的 orientd 已停用、不再放進 seed；停掉它之後 iPadOS 開機照樣是橫向。
+
+**鏈路：**crosvm `--input motion` → guest `DroidVMVirtioInput.c`（`droidvm_motion`）→ kernel 的三個 HID 裝置（裝置 repo `package/DroidVMMotionHid.inc`）
+→ IOHIDFamily 的 IOHIDEventDriver → locationd／CoreMotion → app 與 backboardd。
+
+**過程中找到的五個條件：**
+1. **locationd 要跑：**從 `droidvm-disable-jobs` 拿掉（`9e89d1e`；首次開機的 Setup 本來就跳過了）。
+2. **HID 服務的形狀：**用 primary usage pair 配對（descriptor 第一個 application collection）。
+   - locationd 配對：加速度計 `{0xff00, 3}`、陀螺儀 `{0xff00, 9}`。
+   - backboardd 配對：方向 `{0x20, 0x8a}`（Sensor／Device Orientation）。
+   - 資料欄位用 HID sensor page（加速度 0x453–0x455、角速度 0x457–0x459）。
+   - IOHIDEventDriver 要能 attach：
+     - 再加一個空的 `{0xff0c, 3}` collection（kernel 的 "HID Sensor" personality 只認這組）；
+     - 裝置要有 `HIDDefaultBehavior` 屬性。
+3. **硬體型號：**MobileGestalt 的 HWModelStr 取 ADT 根節點 `compatible` 的第一項，原本是 `droidvm,crosvm-gunyah`。
+   CoreMotion 的 `CLPlatformInfo::queryEmbeddedSystemHardware` 拿型號的 SHA-1 去查表，查不到就沒有任何感測器。
+   - 改成 `J120AP` 放第一項，再加上 J120 的 `/product/product-id` 和 `/product/audio`（`99af413`，等同上游 688fa88）。
+   - 改完之後 locationd 會照 J120 的硬體清單去找裝置。
+4. **方向的編碼：**每個方向一個 bit，在 Apple motion page，usage = 0x64 + UIDeviceOrientation（從這版 kernel 的 IOHIDEventDriver 反組譯得到）。
+   - 方向由 guest kernel 依重力判定（等同真機 SPU 做的事）。
+   - 方向改變時送出；改變後 2 分鐘內每 2 s 重送，之後每 30 s 重送。晚開啟服務的 client（開機時的 backboardd）只收得到事件，所以要重送。
+5. **時間戳：**CoreMotion 從方向事件的第一個 child（vendor event `{0xff15, 2}`，8 bytes）取時間，不比上一筆新就丟掉。
+   - 症狀：`Skipping stale orientation (3 @ 0)`。
+   - 做法：descriptor 在 Apple vendor Message collection `{0xff00, 0x23}` 下帶這個欄位，每筆報告填 `mach_absolute_time`。
+
+**新工具：**`gfxprobe motion [秒]`（HID 服務＋CoreMotion 讀值）、`gfxprobe ioreg CLASS`（guest 沒有 ioreg）。
+
+**還沒做／沒驗證：**
+- **陀螺儀的單位：**目前送 rad/s。手機靜置只能看到約 0，要實際轉動手機才能確認不是差了 57 倍。
+- **動態旋轉：**只驗證了開機時的方向；轉動手機時的換向還要實機試。
+- **locationd 期待但沒提供的裝置：**`{0xff0c, 1/4/7/8}`、`{0xff00, 50}`（motion activity 之類），會記錄 "not ready"。
+- **`kern.droidvm_motion` sysctl 和 `gfxprobe orient-follow`：**留作除錯用，沒有服務在跑。
+- **J120AP 的副作用：**HWModelStr 改了，其他依型號查表的元件（音訊、MediaExperience）行為可能改變，要留意。
+- **一次性的系統卷錯誤：**其中一次開機約 4 分鐘後，系統卷（`/dev/disk3s1`）讀取全部回 "Device not configured"，backboardd 隨之崩潰循環。
+  host 端沒有 block 錯誤；重開後連續 6 分鐘以上都正常，沒有再出現，原因未明。
+
 ## 續報（2026-10-28 07:00，Claude）：wip/vpu 全部 rebase 進 wip/hackintosh
 
 11 個有 `wip/vpu` 的 repo，現在都在 `wip/hackintosh` 上帶著 VPU 的工作。meta 的建置腳本照「meta 分支名 → droidvm」挑每個元件，所以每個 VPU 元件都要有 `wip/hackintosh` 分支。
