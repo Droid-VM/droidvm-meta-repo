@@ -1,0 +1,11 @@
+caller uid=0 euid=0 gid=0 egid=0
+kpersona_pidinfo(self) errno=3 (No such process)
+no existing persona; allocating one via persona-mgmt
+kpersona_alloc(type=DEFAULT uid=0) r=0 errno=3(No such process) id=501
+using root persona id=501
+persona[root->root] id=501 ovr_uid=0: set=0/0/0 spawn=0(ok) pid=985
+whoami uid=0 euid=0 gid=0 egid=0
+dropped euid to 501; now spawning a root child via persona
+persona[mobile(euid)->root] id=501 ovr_uid=0: set=0/0/0 spawn=1(Operation not permitted) pid=0
+fully-mobile child uid=501 euid=501: spawning root via persona id=501
+persona[fullmobile->root] id=501 ovr_uid=0: set=0/0/0 spawn=1(Operation not permitted) pid=0
