@@ -1,6 +1,6 @@
 # UniXNUSetting：iPadOS 內的管理介面（細節）
 
-狀態：2026-10-28。大方向見 `PROGRESS.md` 的「TODO 2」與 10-28 下午續報；本文件放細節。
+狀態：2026-10-29（§8 新增：精簡早期除錯用 kernel 改動、ownervisor 當 pid 1 的計畫）。大方向見 `PROGRESS.md` 的「TODO 2」與 10-28 下午續報；本文件放細節。
 定位決策（10-28 晚修訂）：UniXNUSetting 是 **ownervisor 的 in-app GUI**——staged 系統 app（不可刪）、以 mobile 跑；要 root 的操作經本機
 socket 交 kernel 以 root spawn 的 ownervisor 執行。**不做特權 app**（persona 提權不通，§3）。存取控制與防刪見 §3.1。
 
@@ -134,6 +134,8 @@ iOS 的 lldb remote server 就是 **`debugserver`**（Xcode / DeveloperDiskImage
 | ownervisor | ✅ app.sock（§3.2） |
 | libimobiledevice | ✅ **已建**：Mac 交叉編 iOS arm64 —— libplist 2.6.0 + glue 1.3.1 + libusbmuxd 2.1.0 + OpenSSL 3.0.15（靜態）+ libimobiledevice 1.3.0，21 個工具（ideviceinfo/idevicepair/idevicesyslog/idevice_id/plistutil/idevicedebug/idevicedebugserverproxy…），no-container+network 簽、全數信任+staged+實機可跑。plistutil 完全可用；連裝置的工具乾淨回報 No device found（無 usbmuxd/配對＝§4 擱置 track）。build tree 在 Mac 的 /tmp/libimd-1028，尚未寫成 device-repo build script。 |
 | lldb-server | 🔧 **路線定案、待建**：建 llvm-project 的 `lldb/tools/debugserver`(＝Apple debugserver 源碼,自足、不連 llvm/clang、有 arm64)。build＝`mig` dbgnub-mig.defs 產 mach_exc glue + 編 source/*.cpp + MacOSX/*.{cpp,mm} + arm64/*.cpp,連 Foundation/CoreFoundation/Security,用 109-key 集簽。第一關障礙(照 toybox/zsh 從 macOS SDK shim):mig 需 `mach/mach_exc.defs`(指向 macOS SDK)、`libproc.h`(iphoneos SDK 無,從 macOS SDK 複製),預期要逐一補標頭。尚未寫成 build-droidvm-debugserver.py。stub 到位後 applebox 的除錯 entitlement 讓 `debugserver 127.0.0.1:PORT --attach=PID` + host lldb 即可用,目標 app 不需 get-task-allow。 |
+
+**10-29 更新**：debug shell 已整個搬到 `github.com/Droid-VM/ownervisor`（manager＋applebox〔釘 Droid-VM/applebox〕＋dropbear＋zsh＋debugserver＋libimobiledevice＋內建服務 ssh／selftest／serial-shell），由 `build-droidvm-all.py` 自動建進 Data seed；libimobiledevice 做成一顆 4 MB multicall（21 個工具，各自連結 70 MB 放不進 payload），debugserver（llvm 19.1.7）已建並實機驗證。ipatool 留在裝置 repo。
 
 **serial-shell（更正:尚未可用,2026-10-28)**：原判「已做」有誤。截圖+marker 實測:App 的 **serial1 是 DarwinBoot loader 的 log**,凍結在交棒給 kernel;交棒後 **XNU 沒有把 console 接到任何 App 可見的 UART**(與既有 silent-panics 一致),`/dev/console` 是一條 sink —— 寫入被丟棄、讀不到輸入。所以掛在 `/dev/console` 的 serial-shell **不能用**(service 已定義但設為不自動啟動)。
 - **serial 驅動診斷(2026-10-28)**:XNU 這塊板是 BCM2837 config,`pe_serial.c` 只編了 **PI3_UART = BCM2837 mini-UART(AUX)+ GPIO**,crosvm 不模擬 → 必然靜默。XNU **沒有 16550 驅動**(serial 列舉:APPLE/PI3/VMAPPLE/DCC),所以 serial1/NS16550 用不了。crosvm 硬體裡唯一對得上的是 **PL011**(pl011@6000,SBSA,console=true),而 XNU 的 **`VMAPPLE_UART` 就是 PL011 驅動**,但只在 `VMAPPLE.h` 定義,BCM2837 build **沒編進去**。
@@ -275,3 +277,90 @@ kernelcache 是 prelinked。所以**沒有對應 entitlement**（harvest 裡 kex
 - `debug-entitlements.plist`：目前成品（109 key / 17 KB）。
 - `entdump.py`：從掛載的檔案樹 dump 每個 Mach-O 的 entitlement（harvest 工具）。
 - `captest.c`：entitlement 授予 + persona 提權驗證探針。
+
+## 8. 精簡早期除錯用的 kernel 改動；ownervisor 當 pid 1（計畫，2026-10-29，待實作）
+
+背景：早期沒有正經的除錯工具（沒有 ssh、debugserver、serial），只好在 kernel 裡做各種「從 host 讀 RAM」的除錯管道。現在 debug shell 齊了，
+使用者想把這些底層除錯 patch 收掉，改用 userspace 工具；權限類的 kernel 程式碼也想盡量搬回 userspace（ownervisor）。
+
+### 8.1 相對上游 UniXNU 的 kernel 改動（盤點，rebase 基準 `120067c`）
+
+三個地方：
+- **A. fork 的 XNU patch**（`patches/xnu/`，新增或改了 11 個，約 +1,100 行）。
+- **B. 裝置 repo 的板子程式碼**（`package/*.c|cpp|inc`，以 `kits/droidvm` 編進 kernel：`build-native-legacy-display.py`、`build-droidvm-gpu.py`；約 7,000 行）。
+- **C. fork 出來的 kernel driver submodule**：Adreno740（6 個 commit：virtgpu DRM ABI、3D 方法、hostsim）、GopFramebuffer（5 個：swap retire／cancel、
+  單一 layer、刷新率 hook）、ArmCpu（2 個：IRQ drain 計數、副核 WFI 等待）。AdrenoMetal 的 30 個 commit 是 userspace plugin，不算 kernel。
+
+| 類別 | 東西 | 檔案 |
+|---|---|---|
+| 驅動 | virtio net／GPU 顯示＋3D／input／motion／snd＋audio／media／battery、Data store、RTC | `DroidVMVirtioNet.c`、`DroidVMVirtioEthernet.cpp`、`DroidVMVirtioNetIf.cpp`、`DroidVMVirtioGpu*.cpp`、`DroidVMGpu.cpp`、`DroidVMVirtioInput.c`、`DroidVMMotion.c`＋`DroidVMMotionHid.inc`、`DroidVMVirtioSnd.c`＋`DroidVMAudio.cpp`、`DroidVMVirtioMedia.c`、`DroidVMBattery.cpp`、`DroidVMDataStore.c`、`DroidVMClock.c` |
+| 驅動 | sheng 的綁定 probe（複製） | `LegacyDisplayProbe.cpp`、`HidInputProbe.cpp`、`KeyStoreProbe.cpp` |
+| 驅動（VM 正確性） | Gunyah vCPU、ASID、pmap 快取 | `non-apple-vcpu-park`、`non-apple-vcpu-start-flush`、`zzxa-16bit-asid`、`zzx-pmap-sync-flush`、`zzx-pmap-user-mappings` |
+| 權限 | 拉起 ownervisor＋修它的 bootstrap port＋launchd disable 覆寫＋GPU client 名單＋LaunchServices 首開標記 | `DroidVMLaunchPolicy.c`（接 `native-board-launch-policy.patch` 的 hook） |
+| 權限 | 內建開機參數 | `DroidVMBootArgs.c`（接 `native-builtin-boot-args.patch`） |
+| 權限 | sandbox／資料保護／App 掛載 | `zzu-dataprotect-without-cprotect`、`zzw-native-adreno-sandbox-grant`（改上游）、`zzt-sysctl-pagesize-anybody`、`zzy-union-staged-apps`、`zzy-zbindfs-vget` |
+| 除錯 | 檔案信箱（`export.py ls/cat/get/put/ps/kill/mem`） | `DroidVMFileExport.c` |
+| 除錯 | `droidvm-monitor` worker（信箱輪詢、行程採樣、UI trace、bootstrap 修正） | `DroidVMStubs.c` |
+| 除錯 | 行程採樣（`procs.py`）、UI 執行緒 trace（`trace.py`） | `BootProcessProbe.c`、`BootUiTraceProbe.c` |
+
+不在主線的：runtime trust cache（`zzyd-owner-runtime-trust-cache.patch`＋`DroidVMTrustCache.c`，只在實驗分支）。上游本來就有的不算差異：
+`zzyc-owner-skip-launch-constraints`、`zzy-staged-system-apps`、`zzy-native-gpu-addon-mount` 等。「跑命令」本來就不在 kernel：host 用 `export.py put`
+把 `.req` 放進 ownervisor 的 control spool，由 ownervisor 在 userspace 執行（`guest-run.sh`）。`patch-early-probe.py` 是 rig 部署時改 kernel binary 的副本，
+不是原始碼 patch。`panic.py`／`peek.py`／`dmesg.py` 直接經 crosvm memfd 讀 guest RAM，**不靠任何除錯 patch**，精簡後照樣能查 panic。
+
+### 8.2 精簡計畫
+
+| 東西 | 做什麼 | 取代 | 備註 |
+|---|---|---|---|
+| 檔案信箱 `DroidVMFileExport.c` | host 經 guest RAM 讀檔、寫 `/private/var/ngpu`、送 signal | **serial-shell** ＋ ssh | serial-shell **要先能用**：kernel 在 `BCM2837.h` 打開 `VMAPPLE_UART`（PL011；ADT 的 `uart0` 已寫好，見 §1.7）。信箱現有用途要先搬：`guest-ssh.sh --key`（改成 build 時把 rig 公鑰烤進 seed）、`crashes.py`／`logarchive.py`／`guest-newlogs.sh`／`health.py` 的 ps（改走 ssh，例如 tar over ssh）、`export.py kill`（userland 卡死、ssh 進不去時救 SpringBoard——只有 serial-shell 能接手） |
+| 行程採樣 `BootProcessProbe.c` | 每秒在 kernel 掃全部行程（名稱、pid、執行緒各狀態數、CPU、記憶體），等於不需 userland 的 `top` | ssh 上的 `ps`（`/bin/ps`）、`lsdiag procs`、`gfxprobe cpu` | 失去「開機早期、ssh 還沒起來」那段 |
+| UI 執行緒 trace `BootUiTraceProbe.c` | 不打擾地抓 backboardd／SpringBoard／`--focus` 行程的主執行緒暫存器與 stack、各執行緒在等哪個 pid 的 Mach 訊息、最忙的執行緒 | **spindump**（不打擾的取樣，最接近）＋ **debugserver**＋host lldb（互動，`bt all`） | debugserver attach 會暫停目標（attach backboardd 畫面會停），也 attach 不了 launchd、看不到開機早期 |
+| rig 寫入觸控 `touch.py` | 從 guest RAM 寫 `native_touch_*` | `input.py`（Android input → virtio-input） | **沒有 kernel patch 要刪**：那組全域變數是 `DroidVMVirtioInput.c` 交給 NativeHidInput 用的，只淘汰 rig 工具 |
+| `droidvm-monitor` worker | 跑上面三樣＋修 bootstrap port | — | **陷阱**：bootstrap 修正目前只在這條執行緒裡跑，直接拿掉 `droidvm-monitor` 會讓 ssh 裡的工具連不到 launchd。要先把它搬到自己的觸發點（例如 launch-policy hook 在 launchd 起來後的下一次 exec），或 §8.3 的 userspace 做法 |
+
+**不能砍的**：
+- **修 bootstrap port**（`DroidVMLaunchPolicy.c`）不是除錯功能。kernel 在 launchd 自己 exec 時拉起 ownervisor，那時 launchd 的 bootstrap port 還不存在，
+  ownervisor 和它啟動的一切（dropbear → ssh shell → ipatool／lsdiag／libimobiledevice）都碰不到 launchd／XPC。10-29 實機驗過修正有效（ssh 裡 `lsdiag`
+  可用 LaunchServices）。只要 ownervisor 是 kernel 拉起的就需要它。
+- **`native_touch_probe()`**：名字是 sheng 留下的，實際是板子的**驅動啟動點**（virtio input／net／snd／media／battery 都從這裡啟動，monitor 執行緒也是）。
+- **開機參數機制**（`native-builtin-boot-args.patch`＋`DroidVMBootArgs.c`）：把板子固定的開關烤進 kernel（DarwinBoot 命令列上限 1023 bytes），
+  幾乎全是功能開關（`owner-service-manager`、`owner-skip-launch-constraints`、`owner-dataprotect`、`droidvm-data-persist`、`vgpu-3d`、`armcpu-self-ipi`、
+  `droidvm-disable-jobs`…）。只在拿掉對應功能時順手刪除錯用的：`droidvm-monitor=1000`、`armcpu-diagnostics=1`、`boot-ui-focus*`。`debug=0x14e` 留著（管 panic 行為）。
+
+### 8.3 ownervisor 當 pid 1（init wrapper）
+
+**iOS userspace 啟動流程**：開機載入器（真機 iBoot；本板 edk2 → UniXNU.efi → DarwinBoot）載 kernelcache／DT／trust cache → XNU（prelinked kext、
+IOKit 匹配、依 UUID 掛唯讀 System 卷；本板 kernel 在 init 前也掛好 Data）→ `bsd_init` → `load_init_program()` exec **pid 1＝`/sbin/launchd`** →
+launchd 跑開機任務、從**簽過章的編譯快取**（`/System/Library/xpc/launchd.plist`）啟動 daemon（開機時或被 XPC／Mach service 找時）；每次 exec 過 AMFI、
+launch constraints、sandbox → backboardd → SpringBoard → app。角色和 Linux 一樣（pid 1＝init＋服務管理，像 systemd），差別：
+- init 路徑寫死在 kernel（`kern_exec.c` 的 `init_programs[]`：`/usr/appleinternal/sbin/launchd.{debug,development}`、`/sbin/launchd`；DEVELOPMENT kernel
+  的 `launchdsuffix=X` 也只能指向 `/usr/appleinternal/sbin/launchd.X`），**沒有 `init=`**。
+- launchd 只在 pid 1 才正常運作；job 只來自簽章快取（丟 plist 無效——ownervisor 存在的原因）。
+
+**現況**：`native-board-launch-policy.patch` 在 kernel 準備 exec launchd 時呼叫 `DroidVMLaunchPolicy.c`，在 kernel 裡做五件事：設 RTC、寫 launchd
+disable 覆寫、寫 GPU client 名單、標記 LaunchServices 首開完成、`posix_spawn` ownervisor（不是 pid 1，事後要 kernel 補 bootstrap port）。
+
+**提案（Linux initramfs 式的 `exec /sbin/init`）**：
+1. kernel 只加一個很小的 init 路徑 patch：例如 boot-arg `owner-init=/private/var/ngpu/bin/ownervisor`，在 `init_programs[]` 之前試，失敗就照舊退回 `/sbin/launchd`。
+2. pid 1 先跑 `ownervisor-init`：以 root 在 launchd 之前做完 userspace 能做的事（寫覆寫、GPU 名單、首開標記），fork 出 ownervisor 常駐行程，
+   然後自己 `exec /sbin/launchd`——launchd 仍是 pid 1。
+3. 成功的話：`native-board-launch-policy.patch` 和 `DroidVMLaunchPolicy.c` 大部分邏輯搬進 ownervisor 倉庫；RTC 屬驅動，留 kernel。
+
+「把 launchd 當 ownervisor 的子行程」**不行**（launchd 只在 pid 1 運作）。
+
+**要先實驗確認的風險**：
+- launchd 自己的 launch constraint（應有「必須是 init proc」之類的條件）：exec 後 pid 仍是 1，照理會過，未驗。
+- **失敗代價變大**：現在 ownervisor 壞掉只少 debug shell；改當 pid 1 後，它在 exec launchd 前崩潰或卡住，整台 guest 起不來。必須極簡、任何錯誤都直接
+  exec launchd；kernel 端也要有退回機制。
+- **bootstrap port 問題還在**：fork 出的常駐行程比 launchd 建 port 早。可能改在 userspace 解：ownervisor 是 root 又有除錯 entitlement
+  （`task_for_pid-allow`、`system-task-ports`），也許能 `task_for_pid(1)` 拿 launchd 的 bootstrap port 自己設上（launchd 的 task port 可能另有保護，未驗）。
+  成功的話 kernel 的 bootstrap 修正也能拿掉。
+
+### 8.4 順序（使用者 10-29：「等下再實作」）
+
+1. 兩個小實驗：init 路徑 patch（含 fallback）、userspace `task_for_pid(1)` 拿 bootstrap port。
+2. bootstrap 修正搬離 monitor 執行緒（或依實驗結果改由 userspace 做）。
+3. kernel 打開 `VMAPPLE_UART`，serial-shell 可用（啟用服務）。
+4. rig 改走 ssh／serial：公鑰 build 時烤進 seed；`crashes.py`、`logarchive.py`、`guest-newlogs.sh`、`health.py` 改用 ssh。
+5. 刪 `DroidVMFileExport.c`、`BootProcessProbe.c`、`BootUiTraceProbe.c`、monitor 執行緒、`touch.py`，以及對應的開機參數。
+6. 視 §8.3 實驗結果，把權限類 kernel 程式碼搬進 ownervisor（pid 1 init wrapper）。
