@@ -1,7 +1,22 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-29（更晚）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-29（近午夜）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-29 近午夜，Claude）：iPadOS 27 的 launchd 起來了，userland 開到 SpringBoard
+
+- **Data seed**：`ipados27/scripts/build-droidvm-data-seed.py` 用 24A446 自己的 /private/var 做新的 APFS volume（fork 的
+  prepare-owner-data-fixture.py 改成由呼叫端釘 launchd 雜湊），打包、放大成 2 GiB 揮發性 container、跳過 Setup（`--build=24A446`）。
+  在 Mac 的系統碟做（ssh 進來的行程不能在外接 DATA volume 上 attach 映像），約 20 秒。defconfig 的 Data UUID 換成 seed 的。
+  還沒加 App cryptex、GPU plugin、ownervisor；Data 沒有 data-store，重開就回到 seed。
+- **Trust cache**：`ipados27/scripts/build-droidvm-trust.py` 把 IPSW 原版的 static／SystemOS／App 三個 version-2 trust module
+  原封不動包成 DarwinBoot 的 TrustCache bundle（3711 筆）。沒有它 AMFI 會拒絕 /sbin/launchd（adhoc、CT policy 0）。
+- **boot-arg**：`interrupt-masked-debug-mode=0`、`sched_preemption_disable_debug_mode=0`（DEVELOPMENT kernel 的 625 µs 看門狗，
+  vCPU 被 host 搶占就觸發）。
+- **現況（P4 進行中）**：Data（OwnerData）掛上，launchd 跑完 boot task（「Early boot complete」），上百個 daemon 起來，backboardd、
+  SpringBoard 都有啟動；SpringBoard 跑約兩分鐘後 crash、反覆重啟，launchd 進入關機，卸載時 kernel 在 vnode_rele_ext panic
+  （usecount 變負）。下一步：拿到 SpringBoard 的 crash 原因（這台還沒有顯示器：27 的 MOBILE_DISPLAY／GPU 都還沒接），以及關機
+  卸載的 vnode 參照問題。
 
 ## 續報（2026-10-29 更晚，Claude）：上游 bump 到最新；iPadOS 27 kernel 掛上 root（OS＋SystemOS），停在 Data
 

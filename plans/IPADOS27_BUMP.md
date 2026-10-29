@@ -73,8 +73,9 @@ BLRAA/RETAA/LDRAA，EL1 與 EL0 各一輪）。
 
 - P1、P2、P3 完成（2026-10-29 更晚）：6 顆 CPU、BSD、APFS 起來，24A446 原版 OS volume 以 root 掛載、SystemCryptex 掛上；
   停在 owner chain 的 Data mount（還沒有 27 的 Data seed）。fork 已 bump 到上游 6ad1297（GPU userland 與 RamBlock 例外，見 PROGRESS）。
-- P4 下一步：iPadOS 27 Data seed（換掉 OWNER_DATA_VOLUME_UUID 佔位值、payload 帶 PackedRAMDisk、data-store）、board 的內建
-  boot-args（DroidVMBootArgs.c 連進 27 的 kernel）、launchd → SpringBoard。
+- P4 進行中（近午夜）：Data seed、trust cache 完成，launchd 與上百個 daemon 起來，SpringBoard 啟動後 crash、launchd 關機（卸載時
+  vnode_rele_ext panic）。下一步：SpringBoard crash 原因（顯示器：MOBILE_DISPLAY／GPU 還沒接）、data-store 持久化、App cryptex、
+  board 的內建 boot-args（DroidVMBootArgs.c 連進 27 的 kernel）。
 - 遺留：emitter 把 native segment 對齊 64 KiB（拿掉 `use_contiguous_hint=0`）；ArmCpu fe98808 在 17 上量過後釘進 fork（現在只是
   Mac 本地覆寫）；剩下 24 個 stub 呼叫點與 IOHID 那個沒配對的旗標；上游 GPU userland 新版量過再換。
 
