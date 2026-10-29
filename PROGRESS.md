@@ -3,6 +3,30 @@
 更新：2026-10-30（凌晨）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-30 清晨，Claude）：iPadOS 27 的鎖定畫面用 Metal 畫出來了（AdrenoMetal＋Turnip，virtio-gpu＋drm2kgsl）
+
+- **kernel**：17 的 virtio GPU（傳輸、3D、display）和 NativeAdreno 給 Metal 的那面（`build-droidvm-gpu.py`）放進 27 的 display
+  archive；staged AGXAccelerator 掛在 24A446 原廠 IOGPUFamily 下（IOAcceleratorES 136 bytes 對得上，publish stage 5）。Adreno740／
+  AdrenoMetal 不當 component（會連 sheng 的整個 GPU driver 一起編），改由 `ipados27/scripts/link-droidvm-gpu-sources.py` 把 checkout
+  連進 tree。virtio GPU 那 9 MiB 的 queue／command buffer 改成開機時配一塊連續記憶體（`DROIDVM_VIRTIO_GPU_DYNAMIC`），因為 native
+  `__DATA` 要塞進原 kernel 的槽位。fork 的 accelerator stub 也改成 `ldr x16 / br x16` 絕對位址。
+- **userland**：fork 的 ios27 target 直接能編（Mac 上 Xcode 27.1；rust 1.98.0 要先 `rustup component add rust-src`）：Turnip 36 秒、
+  plugin（含 Rust bridge 的 PAC trampoline）4 分鐘。Data seed builder 加 `--plugin build/adreno-metal-plugin27`（fork 的
+  add-gpu-plugin-data.py 加 `--plugin`、`--clients`），trust 用 `build-droidvm-trust.py --owner .../trust.json`（owner module＋三個
+  原版 module），boot-arg `sheng-gpu-addon=1`、`droidvm-gpu-clients=` 同 17。backboardd 載入 plugin，CA 的 RGhA render pipeline 49 個成功。
+- **記憶體**：揮發性 2 GiB Data 一次開機就吃掉 781 MiB guest RAM，GPU 要的連續 blob 頁配不到（64 MiB blob 被拒，
+  `vm_page_find_contiguous` 掃完 112 萬頁沒有 256 KiB 空段）。改走 17 的 data-store：`droidvm-data-persist=2`、VM 加第三顆
+  `--virtio-mmio-block .../UniXNU27/data-store.img`（`make-data-store.sh 16`）、seed 放大到 12 GiB。**換 seed 就要重建 data-store。**
+- **黑畫面的原因**：27 的 render server swap 的是 half-float（'RGhA'）frame，virtio display 只吃 BGRA，所以走 NativeLegacyDisplay
+  的 CPU 轉換寫進 GOP framebuffer，而那份複製在 GPU 畫完之前就讀 surface（每一格都黑）。`LegacyDisplayProbe.cpp` 現在在這種
+  複製前等 GPU 做完（同 virtio display worker 的作法，最多 200 ms）；BGRA 但 virtio display 忙著拒收的不等。之後鎖定畫面（日期、
+  時鐘、Swipe up to open，黑桌布＝@1x 已知問題）出現，約 10 秒後照 iOS 行為熄屏——27 board 還沒有 HID 輸入，叫不醒。
+- **陷阱**：每次建 seed 都是新的 Data volume UUID；改 defconfig 之後要 `unixnu defconfig -D <board> droidvm_ipados27_defconfig`
+  重新合併 work dir 的 `.config`，再刪 `kern_exec.o`（XNU 的 make 不追 define），不然 kernel 還是舊 UUID → `offline scratch Data
+  mount failed: 2`。seed builder 現在會提示。
+- **下一步**：HID 輸入（觸控、按鍵）讓畫面能叫醒、解鎖；half-float frame 直接給 virtio display（GPU 轉換，免掉 CPU 轉換）；
+  App cryptex、DroidVMBootArgs.c、關機卸載的 vnode_rele_ext panic。
+
 ## 續報（2026-10-30 凌晨，Claude）：iPadOS 27 的 SpringBoard 起來了；顯示接上但沒有 GPU，畫不出畫面
 
 - **SpringBoard 的兩個 crash**：(1) 沒有顯示器 → `-[FBSDisplayMonitor _initWithDisplays:...]` 自己 trap（sheng 的 `sheng-exc-name`
