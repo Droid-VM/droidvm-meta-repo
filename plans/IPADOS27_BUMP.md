@@ -73,9 +73,9 @@ BLRAA/RETAA/LDRAA，EL1 與 EL0 各一輪）。
 
 - P1、P2、P3 完成（2026-10-29 更晚）：6 顆 CPU、BSD、APFS 起來，24A446 原版 OS volume 以 root 掛載、SystemCryptex 掛上；
   停在 owner chain 的 Data mount（還沒有 27 的 Data seed）。fork 已 bump 到上游 6ad1297（GPU userland 與 RamBlock 例外，見 PROGRESS）。
-- P4 進行中（近午夜）：Data seed、trust cache 完成，launchd 與上百個 daemon 起來，SpringBoard 啟動後 crash、launchd 關機（卸載時
-  vnode_rele_ext panic）。下一步：SpringBoard crash 原因（顯示器：MOBILE_DISPLAY／GPU 還沒接）、data-store 持久化、App cryptex、
-  board 的內建 boot-args（DroidVMBootArgs.c 連進 27 的 kernel）。
+- P4 進行中（10-30 凌晨）：Data seed、trust cache、legacy display（GOP framebuffer）完成；SpringBoard 起來待機，CA 有 primary
+  display 但只送一張黑 frame（沒有 GPU／Metal）。下一步：GPU 堆疊（P5 的 GPU 部分提前：virtio-gpu + drm2kgsl、24A446 IOGPUFamily 的
+  accelerator、ios27 的 plugin／Turnip），之後 data-store 持久化、App cryptex、DroidVMBootArgs.c、關機卸載的 vnode_rele_ext panic。
 - 遺留：emitter 把 native segment 對齊 64 KiB（拿掉 `use_contiguous_hint=0`）；ArmCpu fe98808 在 17 上量過後釘進 fork（現在只是
   Mac 本地覆寫）；剩下 24 個 stub 呼叫點與 IOHID 那個沒配對的旗標；上游 GPU userland 新版量過再換。
 

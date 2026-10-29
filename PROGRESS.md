@@ -1,7 +1,23 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-29（近午夜）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-30（凌晨）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-30 凌晨，Claude）：iPadOS 27 的 SpringBoard 起來了；顯示接上但沒有 GPU，畫不出畫面
+
+- **SpringBoard 的兩個 crash**：(1) 沒有顯示器 → `-[FBSDisplayMonitor _initWithDisplays:...]` 自己 trap（sheng 的 `sheng-exc-name`
+  讓例外進 kernel log，Mac 上掛 SystemOS cryptex 用 `ipsw dyld a2s` 符號化；slide 從 pc 附近 8 個指令字在 cache 裡找、要 16K 對齊）；
+  (2) 接上顯示後 `CASecureIndicatorLayerInvalidName`（J820 是 Medina 機型，SpringBoard 的指示燈圖層沒有名字）→ Data seed 寫入
+  `com.apple.coreanimation CAEnableMedina=false`（`ipados27/scripts/seed-data-prefs.py`）。之後 SpringBoard 停在 UIApplicationMain 待機。
+- **顯示**：`ipados27/scripts/build-droidvm-legacy-display.py` = sheng 的 27 legacy display（GopFramebuffer 的後端掛在原廠
+  IOMobileFramebufferLegacy 底下，ABI 用 sheng 審過的 legacy-display-24A446.json），畫到 DarwinBoot 的 GOP framebuffer。stub 改用
+  `ldr x16 / br x16` 讀絕對位址，不需要 sheng 的 native-slide。backboardd 的 CA 有 primary display，但只送一張黑 frame：27 kernel 沒有
+  GPU，CA 的 render server 用 Metal 合成（QuartzCore 有 SWContext，但只用在 external update）。**下一步：把 17 的 virtio-gpu +
+  drm2kgsl GPU 堆疊搬到 27**（kernel：DroidVMGpu／VirtioGpu 3D／display 與 24A446 IOGPUFamily 上的 accelerator，要換上游 Adreno740
+  的 27 驅動；userland：Data seed 的 GPU plugin、ios27 Turnip／metal2vulkan）。
+- **檔案信箱**：DroidVMFileExport.c 進 27 的 archive（buffer 256 KiB，因為 native `__DATA` 要塞進原 kernel 的槽位），rig 的
+  `export.py ps/ls/get`、`crashes.py` 可用；`stacks+*.ips`（stackshot）含所有行程的 thread 堆疊，是看 userland 卡在哪的好工具。
+- **fork**：RELEASE 參考 kernel 也替 `__zone_site_register` 補 stub（DEVELOPMENT 編的 archive 用了 kalloc_data）。
 
 ## 續報（2026-10-29 近午夜，Claude）：iPadOS 27 的 launchd 起來了，userland 開到 SpringBoard
 
