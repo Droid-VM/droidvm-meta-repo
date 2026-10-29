@@ -69,15 +69,16 @@ BLRAA/RETAA/LDRAA，EL1 與 EL0 各一輪）。
 - 機型從 J120（A10X）換成 J820：動作感測、MobileGestalt、桌布（@1x vs @2x）、per-process jetsam 上限都會變。
 - 我們 iPadOS 17 路徑上的每個 kernel patch、driver、seed 腳本都要重新驗一次；「追平」清單以 PROGRESS 的已完成里程碑為準。
 
-## 4. 狀態（2026-10-30 清晨）
+## 4. 狀態（2026-10-30 早上）
 
 - P1、P2、P3 完成（2026-10-29 更晚）：6 顆 CPU、BSD、APFS 起來，24A446 原版 OS volume 以 root 掛載、SystemCryptex 掛上；
   停在 owner chain 的 Data mount（還沒有 27 的 Data seed）。fork 已 bump 到上游 6ad1297（GPU userland 與 RamBlock 例外，見 PROGRESS）。
 - P4 完成（10-30 清晨）：鎖定畫面由 Metal 畫出（P5 的 GPU 部分提前完成：virtio-gpu + drm2kgsl、24A446 IOGPUFamily 上的
   accelerator、arm64e plugin／Turnip）；Data 走 host 的 data-store（12 GiB seed）。CA 的 half-float frame 目前由 CPU 轉進 GOP
   framebuffer、virtio display 當 boot console 送出。
-- P5 進行中：下一步 HID 輸入（叫醒、解鎖）、half-float frame 直接給 virtio display、App cryptex、DroidVMBootArgs.c、關機卸載的
-  vnode_rele_ext panic。
+- P5 進行中（10-30 早上）：HID（觸控、Home、鍵盤、動作感測）、時鐘、4 MiB 信箱、unified log 完成；可解鎖、開 Settings。
+  下一步：上游 AdrenoMetal 9eca077 的合併版（圖示／CoreImage、8-bit framebuffer）、網路、音訊、電池、App cryptex、
+  DroidVMBootArgs.c、關機卸載的 vnode_rele_ext panic。
 - 遺留：emitter 把 native segment 對齊 64 KiB（拿掉 `use_contiguous_hint=0`）；ArmCpu fe98808 在 17 上量過後釘進 fork（現在只是
   Mac 本地覆寫）；剩下 24 個 stub 呼叫點與 IOHID 那個沒配對的旗標；上游 GPU userland 新版量過再換。
 

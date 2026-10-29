@@ -3,6 +3,35 @@
 更新：2026-10-30（凌晨）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-30 早上，Claude）：iPadOS 27 能觸控、解鎖、開 Settings；時鐘、log、信箱都接上了
+
+- **HID**：`ipados27/scripts/build-droidvm-hid-input.py` 用 sheng 的 27 版 ShengHidInput（24f1f3f，等於 17 用的 5f3a37c 再加 arm64e
+  的邊緣觸控），對 profile 釘的 IOHIDFamily 公開 header 編（`NATIVE_HID_SOURCE_API`），每個 IOHIDDevice virtual 都保有真名與
+  discriminator，再照 sheng 審過的 `hid-device-24A446.json` 按 slot 綁回原廠（53 個 binding，兩個 owned vtable 的 diversity 全對）；
+  17 的鍵盤 sink 與動作感測照搬。原廠 IOHIDFamily／IOStorageFamily 用到三個 IIG `*_Invoke`（IOService Start／Stop／SetProperties），
+  靠它們常數裡的 64-bit message ID 認出來、補進 reviewed pairing（Start_Invoke 的 stub 一啟動 NativeHidInput 就 panic）。
+- **觸控要獨立的 digitizer 裝置**（`sheng-touch-split=1`）：27 的 HID event service 是 AppleUserHIDEventService（DriverKit），
+  合併裝置的 primary usage 留在 Keyboard（1/6），probe 事後改寫無效，backboardd 只收 Digitizer/Touch Screen 的事件 → 觸控全被丟。
+  分開後：Home 叫醒、往上滑解鎖、點開 Settings 都可以（圖示空白，見下）。
+- **native `__DATA` 槽位**：fileset emitter 把 native `__DATA` 固定在 collection `__DATA` 開頭，後面緊接保留的 kext data（Libm），
+  只剩 16 KiB。virtio-input 的 queue、display 的 scratch、信箱 buffer 改成執行期配置（`DROIDVM_INPUT_DYNAMIC`、
+  `DROIDVM_VIRTIO_GPU_DYNAMIC`、`DROIDVM_EXPORT_DYNAMIC`），現在剩 336 KiB。
+- **信箱 4 MiB**：資料 buffer 在第一次 poll 時配連續記憶體並公布實體位址，`export.py` 改讀公布的位址：75 KB/s → 1.8 MB/s。
+- **時鐘**：27 也從 crosvm 的 PL030 設日曆（`DroidVMClock.c`，在 `native_touch_probe` 裡、launchd 之前）。
+- **unified log**：macOS 27 的 `log show` 要 archive 的 Info.plist 帶時間參考（各 store 的 oldest、end），`logarchive.py` 現在從
+  timesync 記錄算出來寫進去；整份 249 MB 約 6 分鐘，之後增量。Metal plugin 的訊息多半是 `<private>`，要開 private data 才看得到。
+- **Settings 圖示空白的原因**（log）：IconRendering 讀到 device 的最大 texture 是 0（`too large MTLTexture (max: 0x0)`）、
+  CoreImage 的 metallib（ci_stdlib、ci_filters…）全部載入失敗，接著在 `CI::ProgramNode::create_program_and_arguments` 當掉；
+  還有 heap texture 被拒。上游 AdrenoMetal 9eca077（metal2vulkan 624bab39、heap texture 大小、render server 8-bit framebuffer）
+  有相關修正：本機已合成 `merge-9eca077`（0d55f46，衝突一處、取上游等價修法），但換上後 render server 初始化完就停住、只送一格
+  blank，已還原到 7da9d3d（fork 的 bridge patch 清單與 m2v pin 也還原，diff 留在 scratchpad）。要開 private log 再查。
+- **陷阱**：(1) 換 plugin 時原地覆寫正在用的檔案，kernel 快取的簽章 blob 對不上（`CODE SIGNING: rejecting invalid page ...
+  cs_mtime != mtime`），只 respring 不夠，要重開 VM。(2) `deploy27.sh` 會把 `out/kernel.nm` 換回 native 位址，每次都要重跑
+  `fileset-syms.py`，否則 rig 讀到的全是錯的（還會誤報 panic）。(3) 叫醒後約 2 秒就熄屏（J820 是 Face ID 機型）；probe 在
+  transfer 少於 2 次時不受理 Home，熄屏的 respring 後要先用 `touch.py`（寫 guest RAM，不碰手機畫面）點一下。
+- **下一步**：查合併版 plugin 卡住的原因（private log）→ 換上後應能修好圖示／CoreImage、frame 變 8-bit 直接給 virtio display；
+  iconservicesagent 的 inactive 上限 15 MB（J820 的 jetsam 設定）；Liquid Glass 的重影；網路、音訊、電池、App cryptex。
+
 ## 續報（2026-10-30 清晨，Claude）：iPadOS 27 的鎖定畫面用 Metal 畫出來了（AdrenoMetal＋Turnip，virtio-gpu＋drm2kgsl）
 
 - **kernel**：17 的 virtio GPU（傳輸、3D、display）和 NativeAdreno 給 Metal 的那面（`build-droidvm-gpu.py`）放進 27 的 display
@@ -602,6 +631,18 @@ UniXNUSetting 本質上是幫 ownervisor 做的 app 內 GUI，所以用 ownervis
    - Wi-Fi 唯讀：survey 過，kernel 沒有 IO80211 family、真驅動是 DriverKit，太重，暫不做。
 6. ~~**電池**~~ **已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別，
    只提供基類就夠）→ powerd → SpringBoard。放電、充電都驗過。memory [[droidvm-battery]]。
+7. **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**
+   - iPadOS 上它們不是鍵盤頁（0x07）的鍵，而是 Consumer page（0x0C）的 HID 按鍵事件：Power／Lock 0x30、Volume+ 0xE9、
+     Volume− 0xEA（另有 Mute 0xE2、Home＝Menu 0x40）。backboardd／SpringBoard 依 usage page＋usage 分辨。
+   - 現況：`package/DroidVMVirtioInput.c` 只把 Linux keycode 轉成 boot keyboard 的 report 1，表裡沒有 `KEY_MUTE`(113)、
+     `KEY_VOLUMEDOWN`(114)、`KEY_VOLUMEUP`(115)、`KEY_POWER`(116)，app 送了也會被丟掉。`NativeHidInput` 的 report 2 已是
+     Consumer Menu（Home），但只有 rig 的 `tools/rig/home.py` 在用；上游給 sheng ButtonProbe 的 `native_buttons_set_sink`
+     在 DroidVM 是空 stub（`package/DroidVMStubs.c`）。
+   - 做法：host（app）在 virtio keyboard 上（或另開一個通用的 virtio-input 按鍵裝置，類似 gpio-keys）送標準 Linux keycode，
+     Linux guest 不用改就能用（logind 處理電源鍵）；XNU 把這幾個碼分出來、改送 Consumer report（擴充 report 2，或實作
+     `native_buttons_set_sink`），Home 一併接到 app。
+   - 電源鍵要送真實的按下／放開與按住時間（長按叫 Siri／關機畫面、電源＋音量截圖都靠時序）。待驗：SpringBoard 的鎖定
+     是否要求按鍵服務帶 `Built-In`。
 
 ### 其他待辦
 
