@@ -69,9 +69,12 @@ BLRAA/RETAA/LDRAA，EL1 與 EL0 各一輪）。
 - 機型從 J120（A10X）換成 J820：動作感測、MobileGestalt、桌布（@1x vs @2x）、per-process jetsam 上限都會變。
 - 我們 iPadOS 17 路徑上的每個 kernel patch、driver、seed 腳本都要重新驗一次；「追平」清單以 PROGRESS 的已完成里程碑為準。
 
-## 4. 狀態（2026-10-29 深夜）
+## 4. 狀態（2026-10-29 更晚）
 
-- P1、P2 完成；P3 的「DarwinBoot 交給 kernel、arm_init 有輸出」達成，kernel 已跑到 AppleImage4。
-- 下一步：AppleImage4 介面表的指標（image4／code-signing ABI）、其餘 65 個 fileset stub 呼叫點、接上 OS／SystemOS 磁碟、
-  27 的 Data seed、board 的內建 boot-args（DroidVMBootArgs.c 還沒連進 27 的 kernel）、ArmCpu fe98808 在 17 上量過再釘。
+- P1、P2、P3 完成（2026-10-29 更晚）：6 顆 CPU、BSD、APFS 起來，24A446 原版 OS volume 以 root 掛載、SystemCryptex 掛上；
+  停在 owner chain 的 Data mount（還沒有 27 的 Data seed）。fork 已 bump 到上游 6ad1297（GPU userland 與 RamBlock 例外，見 PROGRESS）。
+- P4 下一步：iPadOS 27 Data seed（換掉 OWNER_DATA_VOLUME_UUID 佔位值、payload 帶 PackedRAMDisk、data-store）、board 的內建
+  boot-args（DroidVMBootArgs.c 連進 27 的 kernel）、launchd → SpringBoard。
+- 遺留：emitter 把 native segment 對齊 64 KiB（拿掉 `use_contiguous_hint=0`）；ArmCpu fe98808 在 17 上量過後釘進 fork（現在只是
+  Mac 本地覆寫）；剩下 24 個 stub 呼叫點與 IOHID 那個沒配對的旗標；上游 GPU userland 新版量過再換。
 

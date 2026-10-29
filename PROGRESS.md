@@ -1,7 +1,32 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-29（深夜）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-29（更晚）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-29 更晚，Claude）：上游 bump 到最新；iPadOS 27 kernel 掛上 root（OS＋SystemOS），停在 Data
+
+- **上游 bump**：fork 併入 UniXNU `feat/ipados27-gpu-parity` 6ad1297（ArmSmmu4K 的修正、刪掉 host pipeline cache）；GPU userland
+  （AdrenoMetal、Adreno740、bridge patch、Mesa）與 RamBlock 留在我們的版本：上游 metal2vulkan patch 重新編號、Turnip 換了 render
+  mode patch，跟 board 自己的旋轉／佇列優先權 patch 衝突，要量過才換；RamBlock 4be2d7e 只在 Install（sheng-data-reset）時才建
+  Data store，DroidVM 新 VM 的空白 data-store.img 會永遠存不進去。sheng 6ed0ba4 的 kernel 改動（每次開機丟掉 LaunchServices 資料庫）
+  已移植到 27 board。
+- **AppleImage4 那個壞指標是我自己的錯**：先前手動補的配對把 `read_random`（0xfffffe000ae9bd20）認成 `SHA512_Init`（字串掃描
+  跑過了函式結尾）。AppleImage4 取亂數時拿到 SHA-512 context，把它 `__bss` 裡的介面指標蓋掉。改正後，其餘 stub 逐一對照原廠
+  反組譯與 xnu-12377 原始碼一次補 28 個（cs_blob／bufattr／proc／thread／task accessor、mach_vm_region、OSAction 等），stub
+  呼叫點 65 → 24（剩下的都在這台不會載入的 kext 或 DriverKit RPC 路徑）。
+- **資料參照**：emitter 對沒配上的 kext→kernel 資料參照會原地加 slide 留著，落在 native 的某個物件上（kernel.json `missing`）。
+  APFS 的 vnode op 表因此把 3 個 named-stream vnop desc 指到 native zone 資料，vfs_fsadd 當掉；sandbox 的 sysctl `audio_active`
+  也是。`fileset-reviewed.json` 新增 `data` 清單補上。IOHIDFamily 還有一個只讀不寫的 32 位元旗標沒配（落在 0 上），先不動。
+- **其他修正**：lockdown 時 PTE contiguous hint 的 assert（emitter 把 4K kernel 的 `__TEXT` 放在 16K 邊界）→ 暫用
+  `use_contiguous_hint=0`，正解是 emitter 對齊 64 KiB；ArmCpu 52454a2 在 xnu-12377 上 IRQ handler 還沒裝就收到中斷 → 27 需要
+  ArmCpu fe98808（目前只在 Mac 的 27 樹用 ignored `ipados27/local.toml` 覆寫，fork 的 pin 沒動，等 17 量過再釘）；sheng 的
+  SIGPdisabled recovery 在第一顆 secondary 啟動時搶先清旗標 → 預設關閉（`sheng-sigp-recover=1` 才開）；ADT 補
+  `/chosen/kernel-ctrr-to-be-enabled = 0`（12377 在 bsd_init 的 DTrace SDT 前要它）。
+- **現況（P3 達成）**：6 顆 CPU 都起來，BSD、Skywalk、APFS、IOSurface 起來；VM 接上 24A446 原版 OS／SystemOS raw 磁碟（唯讀
+  virtio-mmio）後，OS volume 以 root 掛載（APFS ARV 啟用），owner chain 掛上 SystemCryptex，停在「offline scratch Data mount
+  failed: 2」：還沒有 iPadOS 27 的 Data seed，這是 P4 的下一步。
+- **rig**：`kcdiff.py`（guest 記憶體對照映像）；panic.py 在 fileset kernel 上的符號是錯的，改用 scratchpad 的 kcsym.py 對
+  out/kernel.nm。
 
 ## 續報（2026-10-29 深夜，Claude）：iPadOS 27 arm64e kernel 在 8 Elite Gen 5 上開到 AppleImage4
 
