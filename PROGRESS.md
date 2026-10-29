@@ -1,7 +1,24 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-29。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-29（深夜）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-29 深夜，Claude）：iPadOS 27 arm64e kernel 在 8 Elite Gen 5 上開到 AppleImage4
+
+- **P2 完成**：裝置 repo 新增第二個 board `ipados27/`（schema 2，iPadOS 17 的 board 不動），XNU series = 上游 sheng 的
+  iPadOS 27 bring-up（扣掉 SoC 專屬的部分；它已含上游移植的我們大部分 17 patch）＋我們只有 Gunyah 才需要的（不用 WFE、
+  idle 一律 WFI、early trace、pmap write-back、GPU grant pattern、launch policy hook、早期 panic 記錄）。arm64e kernel 連結成功，
+  並 prelink 進 24A446 的 fileset kernelcache（為此在 fork 補上上游沒公開的 RELEASE+LTO 比對用 kernel 建置）。
+- **儲存（步驟 2）**：照 sheng 的 source storage 做法：IOBlockStorageDevice 從公開原始碼編譯，原廠 storage family 載入後才註冊、
+  掛在原廠類別底下，再用 17 的 personality 經 IOCatalogue 配上 NativeVirtioBlock、NativeRamBlock 和 Data store。24A446 的
+  OS／SystemOS raw image 與簽章 root policy 都已產生，雜湊與 OS profile 的 pin 完全相符（policy 117 MiB，上限 128 MiB）。
+- **開機（P3）**：手機上另開一台「UniXNU 27」VM（17 的 VM 保留）。DarwinBoot 交接成功（ADT 補 RootPolicies 欄位）。kernel
+  依序修掉：random-seed 要 256 bytes（12377 少了會在 console 出來前 panic）、fileset 裡原廠元件呼叫到沒配對的 kernel 函式
+  （`ipados27/fileset-reviewed.json` 逐一附證據補配對，stub 呼叫點 162 → 65）。目前跑完 corecrypto FIPS POST（全過）、IOKit、
+  NVRAM、lockdown mode，停在 AppleImage4 建介面表時讀到壞指標：kernel 與 24A446 原廠 kext 之間 image4／code-signing 介面的
+  ABI 差異，是下一步。
+- **待處理**：5566 上的 iPadOS 17 VM 在我停／開它、重啟 daemon 之後開機 panic「offline scratch Data mount failed: 2」，
+  Data 的 RAM disk 沒出現；開機碟沒動過。沒修（重建 Data seed 會清掉 Data），等使用者決定。
 
 ## 續報（2026-10-29 晚，Claude）：卡頓與閃退修掉、上游 GPU parity 合進來（約 1.7 倍幀數）、arm64e 可行性、iPadOS 27 計畫
 

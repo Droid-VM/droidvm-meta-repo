@@ -56,7 +56,7 @@ BLRAA/RETAA/LDRAA，EL1 與 EL0 各一輪）。
 |---|---|---|
 | P0 | 可行性 | 已完成（上表） |
 | P1 | fork 吃進上游 iPadOS 27／arm64e（profiles、xnu-12377 series、腳本、XnuPrelink、DarwinBoot、VerifiedRoot bump）；裝置 repo 加 27 的 board 變體（`os_profile = ipados-27.0.1-24A446`），17 的 board 不動 | 兩個 board 都能 `unixnu status`，17 照舊 build |
-| P2 | DroidVM 的 kernel 改動 port 到 xnu-12377（arm64e、BCM2837 machine config）；裝置 package 的 C++ driver 以 arm64e 編（ptrauth vtable）；B 的 0003/0004/0005/0008/0010 進 series | arm64e kernel link 成功 |
+| P2 ✅ | DroidVM 的 kernel 改動 port 到 xnu-12377（arm64e、BCM2837 machine config）；裝置 package 的 C++ driver 以 arm64e 編（ptrauth vtable）；B 的 0003/0004/0005/0008/0010 進 series | arm64e kernel link 成功 |
 | P3 | 24A446 fileset prelink；DarwinBoot arm64e；J820 ADT（24A446 DeviceTree＋DarwinBoot 依 FDT 動態補 RAM/裝置/CPU） | DarwinBoot 交給 kernel，arm_init 有輸出 |
 | P4 | 開到 launchd → SpringBoard（PAC key、T0SZ、shared region、sandbox、owner chain／Data seed） | 鎖定畫面（軟體算圖即可） |
 | P5 | 顯示（virtio-gpu scanout、BGRA）、輸入、GPU（arm64e AdrenoMetal＋Turnip ios27＋我們的 virtgpu 後端）、網路、音訊、電池、動作感測 | 桌面＋Metal，iPadOS 17 現有功能逐項追平 |
@@ -68,3 +68,10 @@ BLRAA/RETAA/LDRAA，EL1 與 EL0 各一輪）。
 - 8 Gen 3 那支手機上的 Gunyah 路徑（6.1 kernel、舊 RM）對小 VM 不穩，大 VM 是否受影響要在 P3/P4 留意；測試一律走 hugepage 程序並開 hostwatch。
 - 機型從 J120（A10X）換成 J820：動作感測、MobileGestalt、桌布（@1x vs @2x）、per-process jetsam 上限都會變。
 - 我們 iPadOS 17 路徑上的每個 kernel patch、driver、seed 腳本都要重新驗一次；「追平」清單以 PROGRESS 的已完成里程碑為準。
+
+## 4. 狀態（2026-10-29 深夜）
+
+- P1、P2 完成；P3 的「DarwinBoot 交給 kernel、arm_init 有輸出」達成，kernel 已跑到 AppleImage4。
+- 下一步：AppleImage4 介面表的指標（image4／code-signing ABI）、其餘 65 個 fileset stub 呼叫點、接上 OS／SystemOS 磁碟、
+  27 的 Data seed、board 的內建 boot-args（DroidVMBootArgs.c 還沒連進 27 的 kernel）、ArmCpu fe98808 在 17 上量過再釘。
+
