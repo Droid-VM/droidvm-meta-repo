@@ -3,6 +3,33 @@
 更新：2026-10-29。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-10-29 晚，Claude）：卡頓與閃退修掉、上游 GPU parity 合進來（約 1.7 倍幀數）、arm64e 可行性、iPadOS 27 計畫
+
+### 隨機卡頓（Today／App Library／Spotlight／設定，0.2–1.8 s）
+兩層根因，裝置 repo 1d8a612：display worker 判斷「這幀的 GPU 工作做完了沒」時 TryLock 每個 client 的 `c->lock`，client 正在任何
+method 裡就當成沒做完 → 改成 per-client `fenceLock`；backboardd 的 64 MiB CREATE_BLOB 以 4 MiB 實體連續塊取頁，VM 跑久了要 0.5–1.8 s →
+改 256 KiB 塊（40–70 ms）。同一次開機老化後 A/B：舊版 4 輪 4–5 幀 >200 ms，新版 0。
+
+### 設定桌布、Stage Manager 閃退（整個 UI 重啟）與設定 App 崩潰
+- respring：NativeAdreno 判斷 OOL 輸入的條件錯（XNU 對 OOL 呼叫照樣把 `structureInput` 指向空的 inband buffer）→ 超過 4096 bytes 的
+  EXECBUFFER 全被拒 → Turnip DeviceLost → backboardd 被結束（NativeAdreno 32e864a）；另一個 44.5 MiB 分散頁 blob 被拒（裝置 4161a9a，1 MiB 大請求 buffer）。
+- 設定 App：mimalloc v3 在 Apple 平台用固定 TSD 108/109，正是 Swift 的 slot（fork 88675ae 改 v2；之後上游改回系統 allocator）。
+- 找 Turnip device loss 的方法：guest 開關 `/private/var/ngpu/debug/mesa-log`（NativeMetal c9f76cf）→ MESA_VK_ABORT_ON_DEVICE_LOSS → crash report。
+
+### 上游 `feat/ipados27-gpu-parity` 的 GPU 那一半
+合進：metal2vulkan 0dfdbcd＋AdrenoMetal 17 個 bridge patch（收了我們 5 個；我們的 2D 引擎旋轉、佇列優先權 rebase 上去）、Turnip 的
+紅黑樹 GPU 位址配置與 size-class BO 快取（我們另加 PROC_LIMIT 記憶體壓力釋放）、AdrenoMetal／GopFramebuffer 直接 merge。
+沒合：iPadOS 27/arm64e 移植、Adreno740 的實機驅動（本板 3D 走 virtio-gpu）、「每個行程都給 native device」（保留 clients 名單）。
+抓到並修掉上游一個 bug：surface import 保留在 cache 命中時存了呼叫者的 IOSurfaceRef → backboardd 約每 30 s 崩一次（NativeMetal 7da9d3d）。
+8 Elite Gen 5 上剛開機各 4 輪同樣手勢：100 s 內幀數 1572–2071 → 3283–3523，backboardd 每幀 CPU 21–31 → 9.5–9.7 ms，>40 ms 的幀 1–5 → 0–1。
+推上：fork 82744fe、裝置 b8e5279、NativeMetal 7da9d3d、NativeAdreno 627836d、NativeMobileDisplay 364ce27；三支手機中兩支已部署。
+**未解**：8 Gen 3 那支開機後一次 backboardd NULL deref（`tu_CmdCopyImageToBuffer2` ← metal2vulkan `ShadowCopy::record_gated` 的
+`ShadowTarget::Rotated` 分支＝我們的 0011 旋轉 patch；只有橫向畫面走這條路，8 Elite Gen 5 的測試都是直向）。
+
+### arm64e 可行性與 iPadOS 27
+三支手機在 Gunyah pseudo-unprotected 下 PAC 都可用（EL1／EL0、五組 key、FPAC），細節與 8 Gen 3 那支的一次手機重開見
+`plans/IPADOS27_BUMP.md`。使用者決定直接 bump 到 iPadOS 27，參考 Droid-VM/macOS-DroidVM（macOS 27 arm64e 已在 DroidVM 開到桌面）。
+
 ## 續報（2026-10-29，Claude）：從零建置自動化——`build-droidvm-all.py`＋`fresh-deploy.sh`；applebox 獨立成倉庫
 
 使用者要求「跑通目前的 build 流程、做成自動化腳本」，並在 8 Gen 3 那支手機上刪掉原本的 UniXNU、部署新的。以前的 build 環境是一路手動補出來的
