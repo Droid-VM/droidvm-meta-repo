@@ -1,7 +1,28 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-30（中午）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-30（下午）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-30 下午，Claude）：iPadOS 27 的圖示、widget、桌布（首頁與鎖定畫面）都畫出來了
+
+- **GPU userland 升到上游最新**：上游 UniXNU/NativeMetal 的 feat/ipados27-gpu-parity 改寫了分支，拿掉 9eca077（把 QuartzCore 的
+  「虛擬裝置」答案壓成 0），換成 7183e58。之前合 9eca077 那版會讓 27 的 render server 交出一張空白幀就停住；合 7183e58 這版
+  （Droid-VM/NativeMetal wip/hackintosh a188974）不會。fork 的 AdrenoMetal pin 跟著升，metal2vulkan 從 0dfdbcd 升到 development
+  624bab39，bridge 吃上游 0017–0019（不含 0020：它要上游 Turnip 的 render-mode patch，我們的 Turnip 還沒有）。fork 476204c。
+  **iPadOS 17 也用同一個 pin，但還沒用這版跑過。**
+- **結果（5566 實機，24A446）**：render server 正常出幀；IconRendering／CoreImage 好了，首頁和 Settings 的圖示都有圖；widget
+  有內容（時鐘、行事曆、Notes、News）。
+- **桌布**：桌布要自己的 process 有 GPU：poster extension（`*Poster*`，跟 17 一樣）和 PaperBoardUI 的 `SBRendererService`。
+  後者沒有 Metal device 時 NeutrinoCore 會在 `-[NUDevice_iOS _newRendererWithOptions:error:]` assert 然後 abort。cmdline 的
+  GPU client 清單改成 `WidgetRenderer_Default,*Poster*,iconservicesagent,SBRendererService`（4 個；內建清單也加了
+  SBRendererService）。首頁和鎖定畫面（27 的大時鐘）都有桌布了。手機可用記憶體維持在 2.7–2.8 GB，沒有掉進 swap。device 8277f55。
+- **還沒好：首頁版面**：widget 疊在圖示上，圖示也比 17 大一倍左右（4 欄）。不是 plugin 的問題（舊 plugin 時就這樣），也不是
+  螢幕尺寸：27 的 ADT 帶 J820 的身分（artwork-device-subtype 2752、scale 2 ＝ 1032×1376 point），VM 是 1024×1366；把 VM 改成
+  1032×1376 開機後一模一樣，所以改回 1024×1366。下一步查 SpringBoard 用的是哪套格子／圖示尺寸。
+- **觸控**：手機觸控螢幕（virtio-input）照常能解鎖；rig 的 `touch.py`（直接寫 guest RAM）有送進 NativeHidInput（HID report 會增加），
+  但這次鎖定畫面和首頁翻頁都沒反應，待查。
+- **ADT 與 FDT**：動態 ADT 在 27 有開（`--dynamic`；DarwinBoot `FdtAdt.c` 從 crosvm 的 FDT 補 RAM／panic 區／boot video 保留、
+  /arm-io 裝置、CPU／GIC）。`/product` 的機種身分是從 J820 device tree 靜態複製的，螢幕尺寸不在 FDT 裡（走 virtio-gpu／GOP）。
 
 ## 續報（2026-10-30 中午，Claude）：17 的功能搬到 iPadOS 27——網路、電池、App cryptex、ssh 除錯 shell、音訊
 
