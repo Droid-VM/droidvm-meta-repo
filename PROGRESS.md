@@ -1,7 +1,19 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-30（下午）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-30（傍晚）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-30 傍晚，Claude）：iPadOS 27 首頁版面修好（VM 螢幕 2048×2732、@2x），代價是幀率
+
+- **做法跟上游一樣**：上游的板子（sheng 的 Xiaomi Pad 6S Pro 3048×2032、ishtar、sirius）都是高解析 panel 加
+  `offline-legacy-unit-scale=2`，本來就跑 @2x，所以沒遇到這個問題；只有我們的 VM 是 1024×1366＋unit-scale=1。27 的 board 改成
+  unit-scale=2、VM 螢幕 2048×2732（＝12.9" 的 1024×1366 point），DarwinBoot 的開機畫面保留區 8→24 MiB。device 34c42ef。
+  VM 設定在 rig 的 `unixnu27-vm.2048.config.json`（daemon IPC `vm_modify`；手機上的 vms.json 沒有這台 VM 的磁碟，要用 rig 的檔）。
+- **結果**：UIScreen 1024×1366 @2x，SpringBoard 選 J320（iPad Pro 12.9"，screen type 110），widget 排在格子裡、圖示大小正常。
+- **代價**：render server 交的是 half-float（RGhA）幀，由 CPU 轉成 BGRA：每幀 22 MB、平均 33 ms，所以只有每秒 14–15 次 swap
+  （待機 15.3、連續翻頁 13.8）。要拿回幀率，得讓 render server 出 8-bit BGRA 幀交給 virtio display 直接 scanout（零 copy）——
+  27 選 RGhA 是因為「虛擬裝置」那個位元組（上游 9eca077 在 render server 裡把它壓成 0，後來上游拿掉了）；之前合 9eca077 那版卡住，
+  很可能就是 27 上第一次走 BGRA → virtio display 這條路，要另外追。
 
 ## 續報（2026-10-30 下午，Claude）：iPadOS 27 的圖示、widget、桌布（首頁與鎖定畫面）都畫出來了
 
