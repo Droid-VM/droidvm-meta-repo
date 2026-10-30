@@ -16,9 +16,14 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   後者沒有 Metal device 時 NeutrinoCore 會在 `-[NUDevice_iOS _newRendererWithOptions:error:]` assert 然後 abort。cmdline 的
   GPU client 清單改成 `WidgetRenderer_Default,*Poster*,iconservicesagent,SBRendererService`（4 個；內建清單也加了
   SBRendererService）。首頁和鎖定畫面（27 的大時鐘）都有桌布了。手機可用記憶體維持在 2.7–2.8 GB，沒有掉進 swap。device 8277f55。
-- **還沒好：首頁版面**：widget 疊在圖示上，圖示也比 17 大一倍左右（4 欄）。不是 plugin 的問題（舊 plugin 時就這樣），也不是
-  螢幕尺寸：27 的 ADT 帶 J820 的身分（artwork-device-subtype 2752、scale 2 ＝ 1032×1376 point），VM 是 1024×1366；把 VM 改成
-  1032×1376 開機後一模一樣，所以改回 1024×1366。下一步查 SpringBoard 用的是哪套格子／圖示尺寸。
+- **首頁版面（根因已找到，修法待決定）**：widget 疊在圖示上、圖示大一倍，是因為 27 的 UI 跑在 **@2x**：UIScreen 512×683 point、
+  scale 2（FrontBoard 的顯示模式「512x683@2x (1024x1366/2)」），MobileGestalt 的 main-screen-scale 其實是 1。24A446 的 QuartzCore
+  `-[CADisplayMode preferredScale]`：模式沒帶 preferredUIScale 時，虛擬裝置一律 ≥2，非虛擬裝置只要高度 >1080 也是 2——所以 27 上
+  任何 1366 高的 @1x panel 都會被當成 @2x（17 的 QuartzCore 沒有這段，17 是 @1x）。SpringBoardHome 拿 512×683 去比它的螢幕表，
+  只配得上最小的 iPad mini（screen type 104 = J310），J820 的 widget 尺寸就疊上去了。排除過的：螢幕尺寸（1032×1376 一樣）、
+  ADT artwork-scale-factor（改 1 一樣，已改回）、MobileGestalt 快取（27 上根本沒寫出來）。新工具：`gfxprobe mg`、`gfxprobe sbscreen`
+  （device 343ea40）。修法選項：panel 改 2048×2732@2x（像素 4 倍）、1536×2048@2x（768×1024 point，像素 2.25 倍），或在 render
+  server 的 plugin 裡把 QuartzCore 的 preferred UI scale 壓成 1（像上游改 QuartzCore 全域值那樣，不算 stock）。
 - **觸控**：手機觸控螢幕（virtio-input）照常能解鎖；rig 的 `touch.py`（直接寫 guest RAM）有送進 NativeHidInput（HID report 會增加），
   但這次鎖定畫面和首頁翻頁都沒反應，待查。
 - **ADT 與 FDT**：動態 ADT 在 27 有開（`--dynamic`；DarwinBoot `FdtAdt.c` 從 crosvm 的 FDT 補 RAM／panic 區／boot video 保留、
