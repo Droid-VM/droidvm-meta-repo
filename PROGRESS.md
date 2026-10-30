@@ -1,7 +1,27 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-30（凌晨）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-30（中午）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-30 中午，Claude）：17 的功能搬到 iPadOS 27——網路、電池、App cryptex、ssh 除錯 shell、音訊
+
+- **已搬上 27 並實機驗過**：launch policy（停用 5 個 job、GPU client 清單、lsd 首次開機標記）、內建 boot-arg
+  （`package/DroidVMBootArgs27.c`）、en0（IONetworkingFamily-188 從原始碼＋virtio-net，DHCP 拿到 IPv4／IPv6）、電池（手機電量與
+  充電狀態）、時鐘、Data store、觸控／Home、動作感測、App cryptex（Safari 的 daemon；27 要 `sheng-no-lc=1` 跳過 launch
+  constraint，17 的 `owner-skip-launch-constraints` 在 27 不讀）。
+- **ssh 除錯 shell**：iPadOS 27 會在 exec 時殺掉 arm64 的 platform binary（ownertest 每次重生都被 signal 9；ownervisor 連 main
+  都到不了），所以整套工具改編 arm64e：`DROIDVM_IOS_TARGET=arm64e-apple-ios27.0`（ownervisor c6c8b2a、applebox 6e3b471、裝置
+  repo 的 toybox／gfxprobe／lsdiag／ipatool 腳本；預設仍是 17 的 arm64）。ownervisor、dropbear、自我測試都在跑，ssh 能登入；
+  root 的 `~/.zshenv` 把 `/private/var/ngpu/bin` 放進 PATH（27 的 zsh 會重設 login shell 的 PATH）。裝置 08db257、70839e1。
+- **音訊**：原本 VirtualAudio 只發布 Null_Device，HAL 雖然看到 Speaker／Mic 卻從不開。原因是 ADT 的 `/defaults vmm-present`
+  → `kern.hv_vmm_present` → MobileGestalt `IsVirtualDevice`，27 的 VirtualAudio 因此當成 Apple 的研究用 VM（裝置過濾停在
+  AllowOnlyNull、routing 設定找 `Tunings/J820/VAD/v201_*` 失敗）。解法：fork 新 patch `zzyd-owner-hide-vmm`（7c8d2f6），
+  `owner-hide-vmm=audiomxd` 只對音訊 server 隱藏 hypervisor；另外 `/product/audio` 帶上原機的 `acoustic-id`（2029）。不能整個拿掉
+  vmm-present（AMFI panic「No PMGR?」），也不能對所有 process 隱藏（SpringBoard 的背光 watchdog 會殺 SpringBoard、畫面全黑）。
+  現在 audiomxd 開了兩個裝置、拿到 hog mode，鎖定／解鎖音效經 virtio-snd 播出。裝置 0bce497。
+- **還沒搬**：桌布／Poster（extension 還在 crash）、圖示與 CoreImage（等 AdrenoMetal 9eca077 合併的 render server 卡住問題）、
+  GPU client 清單擴回 17 的範圍（14 個時手機進 swap，現在 cmdline 只給 3 個）、tools overlay、virtio-media 解碼、麥克風錄音驗收。
+- 一次開機在開機動畫後就沒再出 frame（沒有 GPU fault），同一映像再開一次正常，先當偶發。
 
 ## 續報（2026-10-30 早上，Claude）：iPadOS 27 能觸控、解鎖、開 Settings；時鐘、log、信箱都接上了
 
