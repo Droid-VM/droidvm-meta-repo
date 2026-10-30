@@ -1,7 +1,42 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-30（晚上）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-31。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-31，Claude）：iPadOS 27 翻頁 82 → 98 fps（同一次開機 A/B）；GPU blob 不再佔 kernel 位址空間
+
+- **手機發燙**：ArmCpu 的 IPI 用 SPI 1008+core，這些 SPI 共用一個 GICD_IGROUPR／ICFGR 字，read-modify-write 沒上鎖，
+  有一顆核心被設成 level-triggered，每秒 150 萬次 IPI。ArmCpu 177a0d3（加鎖、回讀檢查、收到時清 ICPENDR），fork 4fb10c6。
+  另外停用手機上 crash loop 的 com.qti.qcc（使用者同意）。
+- **guest 記憶體用盡（畫面凍結、ssh 很慢）**：VM RAM 6 GiB；memorystatus 門檻 1280 MiB（device 65d9d21：XNU 把 inactive
+  檔案頁算成可用，一直到不了壓力警告）；Turnip 的 freed-BO cache 上限 96 MiB（fork b612590，`TU_DARWIN_BO_CACHE_MB`）；
+  metal2vulkan 空 block 回收（fork 32defe3＋NativeMetal exp-bgra，實測幾乎回收不到：空 block 是每幀的工作集）。
+- **host blit 走 KGSL 高優先**：手機 app 的 `libvulkan_freedreno.so` 換成帶 priority patch 的版本（備份 `.bak-sep3`），
+  blit 的 queue 等待 p90 6.4 → 2.3 ms。
+- **120 Hz 設定**（照 macOS 板子）：`droidvm-display-hz=120`、`ca-triple-buffer=1`（device 1ab7fdf）。display hold
+  （讓 commit 提早回傳）沒有可量到的收益。encode 執行緒提高優先度（SCHED_RR 54）也沒有收益：commit → 送出的 3.3 ms 是翻譯本身。
+- **流水線（主要收穫）**：5 ms 取樣的 spindump 時間線顯示 CA 顯示執行緒卡在 `IOMFBDisplay::can_update_ → swap_wait_timeout`：
+  CA 最多 2 個 swap 在途，第 3 個要等最舊的完成；而 swap 要等 host 回覆 blit 做完（post 後 2.8 ms，p90 9.5 ms）才算完成。
+  改成 scanout＋flush 一送出就完成 swap（device 905ee57，`droidvm_virtio_complete_on_post`，可在執行中切換）：
+  同一次開機交替 4 輪，開 101.5／98.2／95.8／98.7 fps，關 82.8／84.2／78.4／83.0；8130 幀 flush 失敗 0。安全性：CA 三幀後才會
+  再畫進同一張 framebuffer；1400 次 host blit 裡，沒有一次在 guest 開始畫第二個之後的幀之後才開始（blit 在該幀 GPU 完成後
+  p50 2 ms、最多 12 ms 開始，且優先度較高）。工具：scratchpad `tlrow.py`、`tlcap.sh`、`cop-ab.sh`、`blitrace.py`、`inflight.py`。
+- **kernel panic（已修）**：`bindfs_pagein: ubc_upl_map() failed with (3)`（KERN_NO_SPACE），開機 14 分鐘後。所有 guest blob 的頁
+  都是 kernel buffer，佔 kernel 的 buffer 位址範圍；2048×2732 下 blob 共 1.8 GB（render server 1.3 GB），先是整塊配置在還有
+  400 MiB 空閒時失敗，最後檔案 pagein 映射不到 UPL。改成配在呼叫端行程的位址空間（pageable，prepare() 固定，和 CREATE_BLOB_USER
+  一樣），kernel 不映射（device 0b73c2a，`droidvm_virtgpu_in_task`）。soak：3045 個 blob 全在行程裡、0 退回、0 panic，
+  強制結束 WidgetRenderer 兩次記憶體都正常收回。
+- **還沒到 120 的原因（量到的）**：
+  - metal2vulkan 的排程器從不扣住批次（NativeMetal exp-bgra 94b6c57 加的 Q 列：host step／gate／event／grouping 全 0），
+    73% 的提交送出時 GPU 佇列是空的。
+  - complete-on-post 之後，CA 錯過 tick 的當下大多只有 1 幀在 GPU 上，和準時的幀一樣：不再是 swap 上限。
+  - **錯位的量化**：翻頁時 KGSL 平均 busy 27%，時脈在 160–1200 MHz 之間跳（82 次取樣有 18 次在 160 MHz），但每幀 GPU
+    start→retire 6.4 ms。每幀都在關鍵路徑上，GPU 做完就閒著等下一幀，governor 看到低使用率就不升頻。
+  - 首頁編輯模式（圖示抖動，純 render server 動畫）只有 58 fps：每幀 47 個 render pass、467 個 draw、6100 萬像素（螢幕的 11 倍），
+    CA 編碼 9 ms、翻譯 8.5 ms、GPU 13.6 ms。
+  - 拖曳時畫面跟著觸控：手機 120 Hz、app 每個 vsync 收到一批觸控，和 guest 的 tick 是兩個獨立時脈。
+- **下一步候選**：讓 GPU 的工作不留空檔（每幀 GPU 階段縮短，或提前送下一幀）；app 端 `requestUnbufferedDispatch`
+  讓觸控不受手機 vsync 批次限制；毛玻璃類多 pass 內容的 GPU 成本（Turnip GMEM／sysmem 選擇）；CA 的 tick 對齊 host vsync。
 
 ## 續報（2026-10-30 晚上，Claude）：iPadOS 27 在 2048×2732 走零 copy scanout，翻頁從 14 fps 到 72 fps
 
