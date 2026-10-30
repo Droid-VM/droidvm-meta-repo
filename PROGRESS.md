@@ -1,7 +1,23 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-30（傍晚）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-10-30（晚上）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-10-30 晚上，Claude）：iPadOS 27 在 2048×2732 走零 copy scanout，翻頁從 14 fps 到 72 fps
+
+- **8-bit framebuffer＋virtio display 零 copy**：上游 9eca077（render server 裡把 QuartzCore 的「虛擬裝置」答案壓成 0）cherry-pick
+  回 plugin（本地分支 NativeMetal `exp-bgra`，還沒推），render server 改出 BGRA，virtio display 直接 scanout 它的 IOSurface。
+- **卡住的是 guest 的 MaxEntries**：27 核心是 4 KiB 頁（17 也是：UniXNU 在非 Apple SoC 都用 BCM2837 的 4 KiB 配置，8E5 沒有 16 KiB），
+  2048×2732 的 surface 22 MB＝5464 段，超過 display 的 4096 上限。改 16384（device b1908f8）。host 的 udmabuf 不是瓶頸：我們的
+  udmabuf_gki_6.12（override 模式）上限 65536。
+- **記憶體**：`gfxprobe wired`（device 3089d22）。2048×2732 下 guest 4.85 GB：wired 2.5 GB（IOKit＝GPU 1.4 GB、開機保留 676 MiB、
+  security 297、zone 230、頁表 200），active＋inactive 約 2 GB，compressor 在用。GPU 的 guest blob 原本只配實體連續塊，配不到就
+  直接拒絕（XNU 不會當成記憶體壓力），連續 respring 後一路 NoMemory、行程死掉；現在配不到 64 KiB 就退回一般頁，讓 pageout
+  回收／壓縮 inactive。
+- **結果**：首頁連續翻頁 71.8 fps（virtio display 實際送出的幀），每幀等 GPU 平均 5.3 ms、flush 給 host 6.1 ms，兩段串行。
+  要到 120 fps：讓 display worker 等下一幀 GPU 的同時 host 在 flush 上一幀，以及 host 端每幀一次 GPU blit 的成本。
+- **還沒解**：開機時 render server 會卡在 Turnip 的 `CREATE_BLOB_USER`（同時 7 個 GPU 提交沒完成），abort 一次 backboardd 後
+  就正常；rig 的 touch.py 在 27 上沒效果（量測改用 input.py）。
 
 ## 續報（2026-10-30 傍晚，Claude）：iPadOS 27 首頁版面修好（VM 螢幕 2048×2732、@2x），代價是幀率
 
