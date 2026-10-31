@@ -3,7 +3,7 @@
 更新：2026-10-31。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
-## 續報（2026-10-31，Claude）：iPadOS 27 翻頁 82 → 98 fps（同一次開機 A/B）；GPU blob 不再佔 kernel 位址空間
+## 續報（2026-10-31，Claude）：iPadOS 27 翻頁 82 → 98 → 101–107 fps；GPU 依 guest 的幀需求升頻；GPU blob 不再佔 kernel 位址空間
 
 - **手機發燙**：ArmCpu 的 IPI 用 SPI 1008+core，這些 SPI 共用一個 GICD_IGROUPR／ICFGR 字，read-modify-write 沒上鎖，
   有一顆核心被設成 level-triggered，每秒 150 萬次 IPI。ArmCpu 177a0d3（加鎖、回讀檢查、收到時清 ICPENDR），fork 4fb10c6。
@@ -35,6 +35,20 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - 首頁編輯模式（圖示抖動，純 render server 動畫）只有 58 fps：每幀 47 個 render pass、467 個 draw、6100 萬像素（螢幕的 11 倍），
     CA 編碼 9 ms、翻譯 8.5 ms、GPU 13.6 ms。
   - 拖曳時畫面跟著觸控：手機 120 Hz、app 每個 vsync 收到一批觸控，和 guest 的 tick 是兩個獨立時脈。
+- **直接量 GPU（晚上）**：plugin 的 `gpu-traces` 開關（NativeMetal exp-bgra fafb7fc，`/private/var/ngpu/debug/gpu-traces`）讓 Turnip 的
+  u_trace 把每個 render pass、tile 載入／存回、clear 的 GPU 時間戳寫到 backboardd 的暫存目錄；和 KGSL trace 對齊後（scratchpad
+  `utrace.py`、`utframe.py`、`utkgsl.py`、`utclk.py`）：每幀約 4.3 ms 在命令流裡，大空檔是 host blit（prio 5）在 IB 之間搶占（約 30%
+  的幀，多 1.5–2.4 ms）。**以 pass 為單位，GPU 工作明顯隨時脈變快**（主 pass 160 MHz 4.5 ms、1200 MHz 1.5 ms），之前用整個 batch 看
+  不出來是因為混了搶占和中途變頻。三分之一的重 pass 跑在 160 MHz：governor 只看使用率（55–65%），這就是「host 看到用得少、guest
+  不夠用」的錯位。已排除：IO-coherent（virglrenderer 82e81d2e 的 `DRM2KGSL_NONCOHERENT` 開關，GPU 時間不變）、m2v 的 inline
+  memoryless 切 pass（不變）、強制 sysmem（= 預設）；強制 GMEM 會黑畫面（待查）。
+- **錯位的修法（使用者選定）：per-frame KGSL power constraint**。guest Turnip 把 high/realtime 全域優先度的 queue（只有 render server）
+  用 `DWV_SUBMITQUEUE_DEADLINE` 重建（fork 1e49d86，`patches/mesa/turnip-darwin-deadline-queue.patch`）；host drm2kgsl
+  （virglrenderer e68e95d4）給這種 queue 的 KGSL context 加 `KGSL_CONTEXT_PWR_CONSTRAINT`，並在它以動畫速率提交時（100 ms 內 6 次，
+  低於 3 次才關）用 SETPROPERTY 設最高 power level，否則清掉。A840 不吃單筆 batch 的 constraint 旗標；constraint 常駐會讓閒置首頁也
+  鎖在 1200 MHz，所以要依速率切換。結果：翻頁時 GPU 在 1200 MHz、每幀 GPU 時間 p50 6.28 → 2.69 ms（p90 9.3 → 4.1）、幀間隔 p90
+  17 → 10.7 ms、101–107 fps；閒置首頁維持 160 MHz。手機上 `usr/lib/libvirglrenderer.so` 是這版（原檔 `.bak-098ce1c7`），還沒打包進
+  APK。現在瓶頸回到 CPU 端（CA 編碼＋m2v 翻譯每幀約 3.3 ms、SpringBoard）。
 - **下一步候選**：讓 GPU 的工作不留空檔（每幀 GPU 階段縮短，或提前送下一幀）；app 端 `requestUnbufferedDispatch`
   讓觸控不受手機 vsync 批次限制；毛玻璃類多 pass 內容的 GPU 成本（Turnip GMEM／sysmem 選擇）；CA 的 tick 對齊 host vsync。
 
