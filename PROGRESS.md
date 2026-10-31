@@ -1,7 +1,49 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-10-31。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-01。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-11-01，Claude）：CPU 端——guest 自己要效能（virtual cpufreq）、大小核（AMP）、翻頁 110–111 fps；為什麼 CPU 閒著幀卻做不完
+
+- **掉幀不是延遲問題**：一幀從 CA 開始到 GPU 做完 p50 7.7 ms（兩幀在途的預算 16.7 ms）；錯過 tick 時約 2/3 GPU 上沒有任何幀。
+  翻頁時一幀在 Metal 層只有 1 個 render pass（89 draw），所以「每個 pass 翻完先送」不適用，已放棄；m2v 在 commit 前送半個 pass
+  有 Metal 語意風險（commit 前 CPU 還能寫 buffer），也不做。
+- **錯位的根因（單核層級）**：掉幀的區間裡有一顆 vCPU 連續忙 12–35 ms（87–90% 在執行），但 host 只跑 0.9–1.5 GHz。WALT 用
+  「忙碌時間×目前頻率」算負載、每 16 ms 視窗只升約 25%：0.9 GHz 滿載只算 25%，從底爬到頂要 40–116 ms（手機上直接量，
+  `uclat`），guest 的短時間爆量做完了頻率還沒上來。
+- **vCPU 依需求 uclamp**（virglrenderer 0682b304，已推）：GPU constraint 開著（動畫中）時把 6 個 vCPU 執行緒的 uclamp.min 拉到 1024。
+  同一次開機 0-1-2-2-1-0 交替：104–105 → 108–110 fps，幀間隔 p90 16 → 9.4 ms，延遲 p50 8.4 → 6.0 ms。
+- **OPLUS 遊戲空間**：DroidVM 被手動加進遊戲空間（`com.oplus.games` 的 `user_mark_record_key`），`/proc/game_opt/cpu_max_freq` 會把
+  CPU 上限壓到 1.1／1.0 GHz（時高時低）。測試時用 root 的 `disable_cpufreq_limit=1` 暫時解除、測完還原；是否移出遊戲空間由使用者決定。
+- **guest 自己要效能（通用路線）**：crosvm 的 virtual cpufreq（`--virt-cpufreq-upstream`，與 Linux 上游 virtual-cpufreq 驅動同介面）：
+  guest 對每顆 vCPU 的 MMIO 寫入想要的頻率，crosvm 在該 vCPU 執行緒上設 uclamp（設下去 0.2–7 ms 生效）。
+  - crosvm 1a5592aa9（wip/virtio-mmio＋wip/hackintosh）：節流 worker 要綁一顆手機上不存在的 pCPU（expect() + panic=abort 會殺掉
+    crosvm）→ 沒有那顆就不節流；prime 核心頻率表頂（4.3968）低於 cpuinfo_max（4.608 GHz）時 uclamp.max 會跟著請求被壓低 → 維持 1024。
+  - DarwinBoot 6f5724f：FDT 的 `qemu,virtual-cpufreq` → `/arm-io/cpufreq`。
+  - device 5389c07 `package/DroidVMCpufreq.c`：註冊 XNU 的 perfcontrol callout（version 5，只用 csw）：UI／above-UI／realtime 執行緒
+    上 CPU 時要最高頻，其他類別 2 ms 後要最低頻。效果和上面的 uclamp 相同（107–108.5 fps），但通用、而且逐顆 vCPU。
+- **大小核（AMP），照通用硬體原則四層都由 host 拓撲推導**：app 74a167f（`CpuPlacementPlan` 在每顆 vCPU 都綁在同一頻率層時自動加
+  `--virt-cpufreq-upstream`，`cpu_perf_requests` 預設開，4 個單元測試）→ crosvm FDT（本來就有 `capacity-dmips-mhz`／`cpu-map`）→
+  DarwinBoot 284645c（每顆 CPU 依 capacity 寫 `cluster-type`：最高 P、其餘 E、全相同則全 P；開機印 `FDT CPUs: 6 (EEEEPP)`）→
+  device abd17ab（`droidvm-amp.patch` 定義 `__ARM_AMP__` → Edge 排程器；AMP 核心遇到沒有 cluster-type 的 CPU 會 panic；
+  DroidVMCpufreq 當極簡 CLPC：每個 thread group 第一次上 CPU 時設偏好：預設 E、UI 類 P）＋ 4d4462f（有 UI 執行緒的 thread group 算
+  互動中，它的 default／user-initiated 執行緒也要最高頻；否則 m2v 的送出執行緒落在不升頻的 E 核，commit→KGSL 3.8 ms）。
+  結果：AMP 110–112.6 fps vs SMP 106–109（同條件交替開機），延遲 p50 6.5 ms，UI 工作跑在 vCPU4/5（prime）。
+- **量測陷阱**：手機平放時 guest 開機是直向，舊的方向判斷誤判成橫向 → 往 y 滑會拉出 Spotlight＋鍵盤（每幀 GPU 12–14 ms），
+  曾誤以為「手機太熱、全部掉到 75 fps」。量之前一律 `shot.py` 看一眼；guest 裡的 spindump 會占掉一顆 vCPU、1 ms 取樣還會讓
+  SpringBoard 的檔案頁被換出（假的 1.5 秒 page-in），不能拿來判斷「誰在等 CPU」。
+- **VM 設定只存在 daemon 記憶體**：app 介面存檔會寫 `files/vms.json`＋`vm_modify`，rig 腳本只做了 `vm_modify`；daemon 重啟後回到
+  10-29 的舊設定（5120 MB、1024×1366、少了三顆磁碟）而開不了機。rig `vmpersist.py`（device 75ce85d）把 daemon 的設定依 id 寫回
+  `vms.json`（留備份），改設定的腳本都會呼叫它。
+- **為什麼 CPU 閒著、幀卻做不完**：做了不干擾 guest 的排程記錄（device 81def30：`droidvm-sched-trace.patch` 在 context switch 與
+  wakeup 掛鉤，寫入 12 MiB 實體連續 ring；host 用 `tools/rig/schedtrace.py` 直接讀 guest RAM，時間和 frames.trace 同一個 mach 時鐘）。
+  翻頁 6 秒：6 顆 vCPU 最忙 19%；CA 顯示執行緒每 8.3 ms 準時被 vsync 叫醒；掉幀時關鍵執行緒大多在 `port-recv` 等訊息。31 個掉幀：
+  13 個 SpringBoard 整段閒著（沒有觸控事件或 display link 觸發；428 幀被觸控停頓切成 25 段）、12 個做了一點事、6 個 SpringBoard
+  主執行緒連續忙 9–14 ms（真的算不完）。次要問題：guest GPU 驅動的輪詢（`IODelay(5)` 會阻塞再被叫醒，某次擷取 SpringBoard 主執行緒
+  6 秒內 8,824 次微阻塞）；host 的 CREATE_BLOB／GEM_CLOSE／CREATE_BLOB_USER 往返偶爾 10–33 ms（`droidvm_virtgpu_slow_ops`）。
+- **下一步**：（翻頁）固定 120 Hz 以上的觸控注入器，排除測試方法本身；抓那 1/5 主執行緒過重的幀在算什麼。
+  （使用者 11-01 指定先做）其他卡頓與閃退：打開設定並亂點選項、旋轉、拉出左側小工具、最右側 App 資料庫、下拉搜尋都有明顯卡頓，
+  而且容易觸發 SpringBoard 閃退重啟。
 
 ## 續報（2026-10-31，Claude）：iPadOS 27 翻頁 82 → 98 → 101–107 fps；GPU 依 guest 的幀需求升頻；GPU blob 不再佔 kernel 位址空間
 
