@@ -1,7 +1,45 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-01。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-01 下午。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-11-01 下午，Claude）：SpringBoard 閃退、iconservicesagent 閃退與空白圖示、guest panic；設定與 Spotlight 為何卡
+
+- **SpringBoard 閃退重啟（已修）**：backboardd 在 `CA::OGL::MetalContext::create_pipeline_state` abort（SpringBoard 跟著重啟）。CA 有
+  兩種 pipeline 讀取 pass 裡沒有的 attachment：`path_blit_frag_lph`／`_lpf`（讀 color 2 的遮罩，CA 在沒有遮罩的 pass 也會建）和
+  `fixed_frag_lph_cph`（讀 color 1）。Metal 接受，metal2vulkan 拒絕。fork 69f377a `patches/metal2vulkan/0015-unattached-color-reads`
+  （`LoweringInputs::unattached_reads`：讀取給 0，不宣告 input attachment）。用 guest 的 QuartzCore metallib 重放被拒的日誌行：修正前
+  被拒、修正後建成。之後的測試沒有再出現 backboardd 閃退。
+- **iconservicesagent 閃退、設定和 Spotlight 圖示空白（部分已修）**：CoreImage 在 `CI::ProgramNode::create_program_and_arguments`
+  寫 NULL+0x28（建 program 回傳 NULL）。兩個原因：
+  1. RenderBox 用 `newFunctionWithDescriptor:` 從 IconRendering 取 `clampedPlusL_v1`，`specializedName` 設成 `custom_blend`（片段函數
+     參照的名字）；plugin 忽略 `specializedName`。fork fdd21fe `0016-specialized-name-links`＋NativeMetal exp-bgra 6c17c82：已在機上
+     確認 clampedPlusL 的 pipeline 全部建成。
+  2. iPadOS 27 的 CoreImage 把 kernel 語言的 stdlib 做成 **Metal 動態函式庫**（`CoreImage.framework/CoreImage.metallib`，函數全部
+     exported），plugin 沒有任何動態函式庫支援：每次啟動都 `Failed to load 'ci_stdlib' Metal library.`（共六個）。exp-bgra f926107
+     加上 `newDynamicLibraryWithURL:`／`newDynamicLibrary:`、`supportsDynamicLibraries` 和各 stage 的 preloaded libraries（runtime 原本
+     就支援）。待部署驗證。
+- **guest kernel panic（已修）**：開機時 osanalyticshelper 取 stackshot，「Resuming from debugger synchronization failed」：
+  `debug_ack_timeout` 是 240000 個 timebase tick（12.5 ms），vCPU 被 host 排程延誤更久就 panic。device 71750ba 內建
+  `ml-timeout-debug-ack-scale=40`。
+- **除錯工具（平行 session debugtools 完成）**：判斷都在 XNU 的 MACF 呼叫點（`task_for_pid`、`mac_proc_check_debug`、vnode 讀取 hook），
+  拒絕的是閉源的 AMFI／Sandbox policy。fork `zzye-owner-debug-task-ports`、`zzyf-owner-debug-vnode-read` 只對帶
+  `com.apple.private.droidvm.debug` 的 owner 除錯 binary、且 `owner-debug=1` 時放行（讀取唯讀）。guest shell 已能讀 data vault，
+  debugserver 已能 attach 系統程序；ssh shell 的 PATH 有 ls/grep/find 等。rig 的 `export.py`（kernel 檔案信箱）一直都能讀任何檔案。
+- **為什麼卡**（frames.trace 逐幀＋u_trace；scratchpad gestframes.py、utgroups.py、gaps.py）：
+  | 情境 | 動畫中 fps | 每幀 pass／像素 | GPU p50／p90 |
+  |---|---|---|---|
+  | 翻頁 | 110 | 1／5.5 Mpx | 2.7 ms |
+  | 左側小工具 | 79 | | |
+  | App 資料庫 | 75 | | |
+  | 設定側欄 | ~60 | 34／41.6 Mpx | 15／25 ms（翻譯＋提交 7.7 ms） |
+  | 下拉搜尋 | 46 | 17／26 Mpx | 19／36 ms |
+  Liquid Glass（多層模糊、背景擷取）讓 pass 數和像素量暴增。Spotlight 最重的幀（約 58 ms GPU）大半是 metal2vulkan 模擬
+  **no-copy buffer**：CA 把 CPU 畫的圖層（鍵盤、搜尋結果）包成 buffer texture，每幀整塊拷進來（6–27 MB）再用一個 compute
+  （threads = bytes/4）合併回去，加上上千次小 image↔buffer 拷貝。u_trace（gpu-traces）本身會把 GPU 時間拉長數倍，量幀時要關掉。
+- **工具**：plugin 日誌改為公開（`NBLOG` 用 `os_log %{public}s`），被拒的 render／compute pipeline、缺少的 selector、Rust panic
+  都會寫進系統日誌；pipeline 日誌加上 `L`（library 來源）、`D`（動態函式庫）行。用 guest 實際的 metallib 在本機重放被拒的日誌行：
+  scratchpad m2v27 worktree 的 `examples/journal_replay.rs`。
 
 ## 續報（2026-11-01，Claude）：CPU 端——guest 自己要效能（virtual cpufreq）、大小核（AMP）、翻頁 110–111 fps；為什麼 CPU 閒著幀卻做不完
 
