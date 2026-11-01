@@ -3,7 +3,7 @@
 更新：2026-11-01（較晚）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
-## 續報（2026-11-01 較晚，Claude）：base 更新到上游 UniXNU 407db1a；render server 的 GPU 位址空間用完（每個 context 2 GiB → 6 GiB）
+## 續報（2026-11-01 較晚，Claude）：base 更新到上游 UniXNU 407db1a；render server 的 GPU 位址空間用完（每個 context 2 GiB → 6 GiB）；設定的行圖示（union 目錄只列得出上層）
 
 - **上游合併（merge，不是 rebase）**：fork `wip/droidvm` c4502e8（上游 main 407db1a 的 221 個 commit）。submodule：AdrenoMetal
   01a3721（上游 a0f0287b＋我們全部的 plugin 改動，包含原本只在本機的 exp-bgra）、GopFramebuffer ed08bd4（上游的 direct scanout 校正與
@@ -11,8 +11,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   core 的工作，且正好重寫了 device repo `build-droidvm-gpu.py` 要做文字替換的 `NativeAdrenoPublish.cpp`；已合併好的版本放在
   NativeAdreno `wip/merge-up-1101`（f57a9c6），等移植那個腳本。上游的兩個 Turnip patch（render-mode、gmem-mutable-swap）套不上
   Droid-VM/mesa，連同 bridge 0020 先不收。上游 AdrenoMetal 把診斷改成開關，板子命令列加了 `sheng-diag=1 log-gpu=1`（979/1023 bytes）。
-- **上游順便修好的**：iconservicesagent 不再閃退（上游的 `externFunctionNames`，CoreImage 的 DAG 不再拿到 null program）。設定的行
-  圖示大多仍空白：iconservicesagent 現在卡在 `custom_effect:displacementMap_v1` 的 `custom_fn` 連結（與 custom_blend 同類，下一步）。
+- **上游順便修好的**：CoreImage 的 `externFunctionNames`／kernel by name（AdrenoMetal 上游 commit）。但設定的行圖示要再修三層才出來
+  （見下）。
 - **render server 失去 GPU（已修）**：設定、Spotlight 來回操作後 backboardd DeviceLost，plugin 結束它，SpringBoard 跟著重啟（一次重啟後
   沒接回 GPU、畫面停住）。kernel 沒拒絕任何配置；guest 的 mesa-log 開關讓 Turnip 留下 `Failed to allocate BO for autotune rp_entry`
   （OUT_OF_DEVICE_MEMORY）。用 debugserver 取 libvulkan_freedreno 的載入位址、再用 `export.py mem` 讀 Turnip 的 `darwin_va`：
@@ -21,16 +21,28 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   （VBO 階梯加 192 GiB——KGSL 給得出 192，256 被拒；切 32 片，每片 6 GiB）；fork c4502e8 `turnip-darwin-va-exhausted-note.patch`
   （位址不夠時寫下大小與用量）＋ metal2vulkan `0017-spares-within-the-address-space`（上游 0021 的 spare 區塊沒有上限，改成不超過
   位址空間的 1/16）。驗證：5 輪設定＋三種手勢（約 25 分鐘）backboardd／SpringBoard 都沒重啟，VA 最高 2.2 GiB／6 GiB。
-- **設定的行圖示（進行中，三層原因）**：
+- **設定的行圖示（已修，三層原因）**：
   1. 已修：RenderBox 的 `custom_effect` pipeline 把 `displacementMap_v1`（帶 function constant 特化）以 `custom_fn` 連結，
      metal2vulkan 的 linker 拒絕任何宣告 constant 或有靜態初始化的模組。fork 6833c6a metal2vulkan `0018`：連結前在副本裡綁定
      constant、評估靜態初始化（離線重放：修正前被拒、修正後建成；機上 custom_effect pipeline 全部建成）。
   2. 已修：GPU blob 頁面放在行程裡之後（10-31），整份 GPU 記憶體都算進 footprint，iconservicesagent（76 MiB）一閒置就被
      jetsam 以 15 MB 上限殺掉，Preferences 收到 4097。device b846440：頁面改為 purgeable、在 kernel 執行緒上歸到 graphics
      帳本且不計 footprint（XNU 只允許 kernel_task 或有 entitlement 的呼叫者這樣做），系統層級的記憶體壓力照常計算。
-  3. 未解：iconservicesagent 仍在 CoreImage 崩潰（debugserver 抓到：CI 後端建 program 回傳 NULL，寫 NULL+0x28）。
-     CI 載不到 `ci_stdlib`／`ci_filters`／`ci_raw`（及 stitchable 版本），24A446 只帶 `CoreImage.metallib`，plugin 的
-     Metal 編譯器路徑也從未被呼叫；實機上這些 library 的來源還要查。
+  3. 已修：iconservicesagent 在 CoreImage 崩潰（CI 後端建 program 回傳 NULL，寫 NULL+0x28），因為 CI 載不到
+     `ci_stdlib`／`ci_filters`／`ci_raw`（及 stitchable 版本）。這些檔案都在，只是位在根卷上；SystemOS cryptex 以 union 掛在
+     `/` 上方，在 `CoreImage.framework` 只放了 `CoreImage.metallib`。kernel 的 `getdirentries` 讀完上層就回報 EOF
+     （`GETDIRENTRIES64_EOF`），Libc 的 readdir 因此停住，不會再做那次會切到下層的空讀，所以每個 union 目錄都只列得出上層：
+     `/` 只有 System 和 usr，`/System/Library/Frameworks` 只有 11 項，NSBundle 也就找不到 CI 的 kernel library
+     （`stat` 一直都找得到）。上游的組法和程式碼也一樣（只修了 `getattrlistbulk`）。fork 1a9a7fc
+     `native-union-getdirentries-eof.patch`（17 與 27 兩版）：union 上層讀完、這次又有讀到資料時不回報 EOF；
+     沒有下層時照舊結束。同一個 patch 也修了它帶出的 panic：讀完 `/` 後 fd 移到根卷的根，它沒有覆蓋任何 vnode
+     （`mnt_vnodecovered` 為 NULL），也不是 `rootvnode`，`ls -a` 的 `fstatat(fd, "..")` 會在 `vnode_getwithref(NULL)`
+     data abort；現在它的 `..` 停在原地。驗證：`/` 23 項、Frameworks 329 項、CoreImage.framework 142 項；
+     `Failed to load 'ci_…'` 消失，iconservicesagent 載入 Metal 編譯器縫合 CI kernel、不再崩潰，設定兩欄的行圖示全部畫出。
+     已知副作用：iPadOS 的 Libc 不替 union 去重，上下層同名的項目會列出兩次（`System`、`usr`、`CoreImage.metallib`），
+     上游 `getattrlistbulk` 的穿透本來就是這樣。另外：AdrenoMetal 334eeb8 在 library 檔打不開時寫 log；rig `panic.py`
+     改用 fileset 的 KernelCache slide 符號化（device 3804c57，原本每個 frame 都名稱錯位）；從 Mac 建磁碟時要換上
+     AMP 版 DarwinBoot（沒有 `cluster-type` 時，核心開機即 panic `recount: cannot map cluster type`）。
 - **效能**：翻頁 110.8–111.2 fps（合併前 110–111）；小工具頁 78、App 資料庫 75–95、Spotlight 45–56 fps（單次量測、大核被限 2.9 GHz）。
 
 ## 續報（2026-11-01 下午，Claude）：SpringBoard 閃退、iconservicesagent 閃退與空白圖示、guest panic；設定與 Spotlight 為何卡
