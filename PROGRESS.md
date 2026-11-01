@@ -22,6 +22,18 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   VirtioMmioBlock 是同步的：一把全域鎖、一次一個 64 KB 請求（queue 有 8 格只用 1 格）、`IODelay(1)` 忙等完成（不用中斷）、
   verified 模式每塊做雜湊並複製三次。冷讀 25.5 MB 檔案 0.30 s（約 85 MB/s，每個 64 KB 請求 0.77 ms）；手機 UFS 可到數 GB/s。
   shared cache 只有 6.5% 常駐，新介面第一次出現時都要走這條路徑。結論：不是 CPU 算力不夠，是區塊驅動的等待和串行化。
+- **區塊驅動改寫（device dbe2270，已推）**：`build-droidvm-source-storage.py` 會套用 `ipados27/patches/VirtioMmioBlock/`。
+  0001 加計數器 `native_virtio_time`，記錄裝置、驗證、複製、等鎖各花多少時間；0002 改成 16 個 slot 同時在途：鎖只保護 ring，
+  等待時不持有鎖（短暫 spin 後每 20 us 睡一下），同一筆讀取最多 8 個 chunk 一起送出，驗證方式不變；另有每顆磁碟的計數器。
+  量測（各開機兩次，從 crosvm 啟動到鎖定畫面）：176/187 s → 152/152 s；整個開機期間累計等鎖 1670–1760 s → 7–8 s；
+  沒有讀取或驗證失敗。量測過程中查到的事：每個請求的 host 往返約 0.2 ms，其中 host 端只占約 60 us
+  （block worker 喚醒 12 us、執行 45 us），磁碟映像走 /data/media、沒有用 O_DIRECT，host page cache 有效；
+  驗證每個請求只要 6–35 us，不是瓶頸。單一執行緒冷讀小檔仍然是每次 page fault 約 0.1–0.2 ms，改善有限。
+- **開機時讀了 12.7 GB（新發現，未修）**：開機期間從 6 GB 的 systemos.img 讀了 12.7 GB。來源是 xnu
+  `native-4k-signature-hash-cache.patch`：guest 用 4K page，16K 簽章的檔案在註冊簽章時會整個讀進來，先驗證 16K 雜湊再
+  推出 4K 雜湊；dyld shared cache 大約被處理了兩次（`cs_native4k_*`：121 個 blob、11.9 GB，讀取 44.7 s、雜湊 20.8 s）。
+  核心的 corecrypto 編成 `CC_USE_ASM=0`，SHA 是純 C。可能的方向：查清楚為什麼處理兩次；SHA 改用硬體指令；
+  把推出來的 4K 雜湊存起來，下次開機直接用。
 - **其他**：多工畫面的 app 快照是白的（另查）；一次開機 SpringBoard 沒起來（只畫了 3 格，重開即好，未重現）；
   rig 的 frame-burst.sh 讀的是開機 simplefb，virtio-gpu 之後量不到東西，改用 scratchpad rec.sh（screenrecord，每格時間戳）。
 
