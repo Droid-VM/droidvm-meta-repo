@@ -29,11 +29,15 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   沒有讀取或驗證失敗。量測過程中查到的事：每個請求的 host 往返約 0.2 ms，其中 host 端只占約 60 us
   （block worker 喚醒 12 us、執行 45 us），磁碟映像走 /data/media、沒有用 O_DIRECT，host page cache 有效；
   驗證每個請求只要 6–35 us，不是瓶頸。單一執行緒冷讀小檔仍然是每次 page fault 約 0.1–0.2 ms，改善有限。
-- **開機時讀了 12.7 GB（新發現，未修）**：開機期間從 6 GB 的 systemos.img 讀了 12.7 GB。來源是 xnu
-  `native-4k-signature-hash-cache.patch`：guest 用 4K page，16K 簽章的檔案在註冊簽章時會整個讀進來，先驗證 16K 雜湊再
-  推出 4K 雜湊；dyld shared cache 大約被處理了兩次（`cs_native4k_*`：121 個 blob、11.9 GB，讀取 44.7 s、雜湊 20.8 s）。
-  核心的 corecrypto 編成 `CC_USE_ASM=0`，SHA 是純 C。可能的方向：查清楚為什麼處理兩次；SHA 改用硬體指令；
-  把推出來的 4K 雜湊存起來，下次開機直接用。
+- **開機時讀了 12.7 GB（一半已修，device 1dc2f68）**：開機期間從 6 GB 的 systemos.img 讀了 12.7 GB。來源是 xnu
+  `native-4k-signature-hash-cache.patch`：guest 用 4K page，16K 簽章的檔案在 `ubc_cs_blob_add` 裡會整個讀進來，先驗證 16K
+  雜湊再推出 4K 雜湊，而且這一步排在「同一個簽章是否已經註冊過」的檢查之前。用 trace 查到：開機時兩個 shared region
+  同時建立，各自替每個 dyld subcache 加簽章，兩次都落在同一個 vnode，彼此都還沒發布 blob，所以 5.6 GB 的 cache
+  被讀、被雜湊了兩次。修正（device patch `droidvm-native4k-once.patch`）：同一個 vnode 同一時間只做一次預處理，第二次
+  加入時直接複製已發布 blob（cdhash、雜湊類型、offset 都相同）的 4K 雜湊。結果：讀取量 11.9 → 6.0 GB（79 個預處理、
+  78 個沿用），SystemOS 開機讀取量 12.7 → 7.4 GB，開機到鎖定畫面 152 → 141–145 s；20.7 萬次頁面驗證 0 次錯誤。
+  剩下的 6 GB（讀 21 s、雜湊 10.5 s）還在開機路徑上：核心的 corecrypto 編成 `CC_USE_ASM=0`，SHA 是純 C；可能的方向是
+  改用硬體 SHA 指令，或是把推出來的 4K 雜湊存起來，下次開機直接用。
 - **其他**：多工畫面的 app 快照是白的（另查）；一次開機 SpringBoard 沒起來（只畫了 3 格，重開即好，未重現）；
   rig 的 frame-burst.sh 讀的是開機 simplefb，virtio-gpu 之後量不到東西，改用 scratchpad rec.sh（screenrecord，每格時間戳）。
 
