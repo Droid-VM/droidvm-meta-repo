@@ -3,6 +3,38 @@
 更新：2026-11-02。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-11-02 稍晚，Claude）：多工畫面的白色卡片（已修）；locationd 一重啟就連帶 backboardd + SpringBoard 一起崩潰（已修）
+
+- **白色卡片，第 1 層：快照根本沒寫進去（device 59ec0a8、fork f0dafc4，已推）**。SplashBoard 要把快照檔標成 purgeable，APFS 對
+  壓縮檔只在卷宗有 expanded records（incompat 0x200）時才允許，而這個旗標只有在建立卷宗時才能設定。舊的 Data 是用 macOS 預設的
+  `newfs_apfs` 建的（不分大小寫、沒有 expanded records）。現在 Data seed 改用 `newfs_apfs -e -x` 建立
+  （`prepare-owner-data-fixture.py --case-sensitive --expanded-records`），新的 Data UUID 是 2EE158B3。
+- **白色卡片，第 2 層：快照讀不回來（device 824043f，已推）**。SplashBoard 在 MobileGestalt 的 DeviceSupportsASTC 為真時，
+  會把快照寫成 ATX（AGX GPU 專屬紋理排列的 ASTC）。ImageIO 解 ATX 時需要行程內的 Metal 裝置，還要 AGX 私有的
+  `newTextureLayoutWithDescriptor:isHeapOrBufferBacked:` 和紋理 watermark。我們的 Metal 沒有實作這兩個，SpringBoard 也
+  沒有 Metal 裝置，所以解碼回傳 -4，卡片就是白的。MobileGestalt 是從 `/product graphics-featureset-fallbacks` 裡有沒有
+  APPLE2 或 MTL2,2 來判斷的，所以 `make-droidvm-adt.py` 從 fallbacks 拿掉這兩項（class APPLE10 與其他 family 不動）。
+  之後快照改成 PNG、由 CPU 解碼，Files 和 Safari 的卡片都有內容。舊的 .ktx 快照要等 app 再開一次才會被換掉。
+- **試過、沒採用：讓 SpringBoard 當 GPU 客戶端**。加進 `droidvm-gpu-clients` 後，app 底部的 home 指示條消失，app 內的邊緣上滑
+  完全不被辨識（UIKit「magic hysteresis reached with no gestures still recognizing」），重開機 A/B 確認是這個改動造成的，已還原。
+  根因未查。
+- **locationd 一重啟，backboardd + SpringBoard 就一起崩潰（device e5009a5，已推）**。CoreMotion 的 CLOrientationNotifier
+  會透過 AppleSPULib（感測協處理器 SPU 的 plug-in）打開方向感測服務的祖父節點，送出設定。guest 沒有這個通道，介面一直是 NULL，
+  locationd 一重啟它就重送設定、在 `sendConfiguration` 解參考 NULL（CoreMotion+0x41e20）。結果每次 locationd 崩潰或被 jetsam
+  殺掉，UI 就連續重啟兩次，觸控和手勢也會跟著出問題。修法是在 guest 核心加上 SPU 的命令通道
+  （`package/DroidVMSensorProcessor.cpp`，接收 selector 0–6，全部不做事）。motion HID 類別改名為 `AppleSPUHIDDevice`，方向裝置
+  宣告 AppleSPULib 的 plug-in 類型和 user client。類別名必須用 Apple 的：平台 sandbox 政策只放行它列出的類別，所有行程的
+  `iokit-open-user-client` 和 SpringBoard 的 `iokit-open-service` 都受限。驗證：連續砍 locationd 兩次，backboardd 和
+  SpringBoard 都沒有重啟，方向事件照常送達。
+- **仍未解：locationd 每次開機約 10 秒後崩潰一次**（EXC_ARM_PAC_FAIL；那個 code 0xdac11a30 其實是
+  `_dispatch_lane_serial_drain` 裡 `autda` 指令的機器碼，代表 Cohort:0 佇列上的 dispatch 物件已被釋放）。重啟後的 locationd 就
+  正常，有了上面的修正後也不再波及 UI。
+- **仍未解：SpringBoard 重啟後的記憶體風暴**。PosterBoard 會讓各個桌布擴充（Kaleidoscope ×2、Emoji、Mercury、Rhizome、Hello…）
+  同時用 GPU 渲染，每個 200–340 MiB 的 wired blob，wired 衝到 4.65 GiB、free 87 MiB，jetsam 因此 proc-thrashing 殺掉幾十個行程。
+  blob 頁不算進行程的 footprint（`kIOMemoryLedgerFlagNoFootprint`，為了 iconservicesagent），所以 jetsam 看不到真正的大戶。
+- **工具**：`logarchive.py` 修正（device d7b279c），原本 `log show` 停在最後一筆 timesync（看起來像時間錯亂、開機兩分鐘後沒有日誌）。
+  gfxprobe 新增 `ktxdecode`、`pitchcheck`、`spuopen`。
+
 ## 續報（2026-11-02，Claude）：記憶體壓力永遠是 0（已修）；砍 render server 後停在轉圈 = dyld pager 的 16K ABBA 死鎖（已修）；metal2vulkan 的閒置 block
 
 - **記憶體壓力等級（device a60ed0e，已推）**：xnu 在 compressor 開啟時，壓力等級只看「可分頁記憶體裡被壓縮的比例」。
