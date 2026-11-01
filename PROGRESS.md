@@ -23,9 +23,11 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - **穩定性測試**：連開 30 個 App、連砍 backboardd 3 次、從切換器上滑關掉 App、連砍 locationd 2 次，都沒有卡死，也沒有連鎖 respring。
 - **前一段的記憶體風暴只在新 Data 第一次產生桌布圖庫時發生**：之後砍 SpringBoard，只會起 2 個桌布擴充，free 維持 1.1 GiB，
   沒有 jetsam。
-- **已知、未修：切到其他 Android App 再回來時，VM 畫面是黑的**，要等 guest 送出下一幀（點一下就好）。app 在 surface 重建後
-  `setSurface` 一律丟出 IllegalArgumentException（被當成良性忽略），存下的幀也沒有畫回去。這要動 DroidVM app 與 crosvm 的
-  顯示服務（app repo 不在推送清單內）。
+- **切到其他 Android App 再回來時，VM 畫面是黑的（Virtualization 72d325bc3，已推，crosvm 已重建並部署）**：app 會在 surface 重建時
+  請顯示服務（`crosvm_android_display_client.cpp`）存下並畫回最後一幀，但服務只會存 CPU 路徑的幀，iPadOS 27 走的是 Vulkan blit
+  （flip），所以沒有幀可畫，要等 guest 有東西變動才會重畫。現在每個 surface 記住最後一次 flip 的來源，沒有 CPU 幀時就在新的 surface
+  重新 flip 一次。重畫在 binder thread 上跑，所以 bridge 的建立、import、flip、release 和 fallback 都改由 context 的同一把遞迴鎖保護。
+  驗證：按手機的 Home 再回來、不碰螢幕，logcat 出現「display surface scanout redrew its last frame」，畫面在，之後 guest 的新幀照常顯示。
 
 ## 續報（2026-11-02 稍晚，Claude）：多工畫面的白色卡片（已修）；locationd 一重啟就連帶 backboardd + SpringBoard 一起崩潰（已修）
 
