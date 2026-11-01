@@ -3,6 +3,28 @@
 更新：2026-11-01（較晚）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-11-01 晚，Claude）：多工手勢叫不出來（兩個原因，已修）；設定點選項 0.5–1 s 是磁碟 page-in
+
+- **從畫面外滑進來（app 6171c80，已推 wip/hackintosh）**：TOUCH 模式原本只在 SurfaceView 上收觸控，而 Android 把整個手勢交給
+  第一下落點的 view：從 letterbox（畫面外的黑邊）起手滑進畫面，guest 完全收不到；滑出畫面則送出超出 ABS 範圍的座標。
+  現在整個顯示容器收觸控、換算到 surface 座標，EvdevEncoder 逐指判斷：畫面外按下先不算接觸；路徑進入畫面時在跨過邊框的點補
+  touchdown（像手指從邊框滑上玻璃）；之後到放開前都是接觸，出了畫面就夾在邊框上；從頭到尾沒進畫面的手指什麼都不送。
+  機上驗證：從畫面下方黑邊往上滑進來 → 回主畫面；只在黑邊上滑 → 沒有反應。
+- **停住叫不出多工（device f61a969，已推）**：Apple 的數位板以 120 Hz 回報每根手指、座標帶雜訊，SpringBoard 靠「停住時速度
+  降下來」分辨上滑停住（多工）和上滑（回主畫面）。手機觸控會濾掉靜止手指的抖動、app 的 keepalive 也重送同一點，同一位置對
+  iPadOS 不算移動，停住期間 SpringBoard 收不到樣本，放開時沿用停住前的上滑速度 → 每次都回主畫面。螢幕錄影對照：完全靜止的
+  合成手勢必回主畫面，加 2 px 抖動就進多工。DroidVMVirtioInput.c：有手指按著且 8 ms 沒有新 frame 時重新發布，x 交替偏 1 個
+  軸單位（約 0.07 px）。修正後同一個完全靜止的手勢會進多工。計數器 `droidvm_input_still`。
+- **設定點選項要等 0.5–1 s（量測，未修）**：手機端直接讀 guest 記憶體的計數器（觸控、HID 報告、畫面）＋ screenrecord：觸控
+  30–90 ms 內到達 guest；第一次開某個頁面，放開後 300–650 ms 才有第一格畫面，再開一次只要 40–240 ms。spindump：期間整台 guest
+  CPU 很閒（Preferences 7 s 內 0.86 s），切頁的主執行緒工作約一半是 page fault 讀磁碟
+  （`vm_fault → vnode_pagein → cluster_pagein → NativeVirtioBlock::doAsyncReadWrite → readSectors`）。上游的
+  VirtioMmioBlock 是同步的：一把全域鎖、一次一個 64 KB 請求（queue 有 8 格只用 1 格）、`IODelay(1)` 忙等完成（不用中斷）、
+  verified 模式每塊做雜湊並複製三次。冷讀 25.5 MB 檔案 0.30 s（約 85 MB/s，每個 64 KB 請求 0.77 ms）；手機 UFS 可到數 GB/s。
+  shared cache 只有 6.5% 常駐，新介面第一次出現時都要走這條路徑。結論：不是 CPU 算力不夠，是區塊驅動的等待和串行化。
+- **其他**：多工畫面的 app 快照是白的（另查）；一次開機 SpringBoard 沒起來（只畫了 3 格，重開即好，未重現）；
+  rig 的 frame-burst.sh 讀的是開機 simplefb，virtio-gpu 之後量不到東西，改用 scratchpad rec.sh（screenrecord，每格時間戳）。
+
 ## 續報（2026-11-01 較晚，Claude）：base 更新到上游 UniXNU 407db1a；render server 的 GPU 位址空間用完（每個 context 2 GiB → 6 GiB）；設定的行圖示（union 目錄只列得出上層）
 
 - **上游合併（merge，不是 rebase）**：fork `wip/droidvm` c4502e8（上游 main 407db1a 的 221 個 commit）。submodule：AdrenoMetal
