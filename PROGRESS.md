@@ -3,6 +3,30 @@
 更新：2026-11-02。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-11-02 傍晚，Claude）：純 arm64 程式一啟動就 PAC 崩潰（已修）；Games 開不起來（已修）；壓力測試結果
+
+- **純 arm64（非 arm64e）程式一律無法執行（device 8ea1e33，已推）**。UniXNU 的 native PAC（fork `native-pac-keys.patch`）
+  讓核心與所有行程共用同一組架構 key，而且永遠開啟。arm64 行程呼叫 shared cache 裡 arm64e 的程式時，它自己那些未簽章的指標
+  會被拿去驗證，結果就是 EXC_ARM_PAC_FAIL（報告裡的 code 0xdac11a30 其實是 `autda x16, x17` 的機器碼）。
+  實例：STExtractionService（arm64 的 XPC service）四天內在 libobjc `readClass` 崩潰 91 次。App Store 的 arm64 App 也會全部
+  遇到這個問題；先前「27 的除錯工具必須是 arm64e」的原因也是這個。
+  xnu 本來就會為這種 task 與 thread 打上旗標（`IMGPF_NOJOP`、`ARM_MACHINE_THREAD_DISABLE_USER_JOP`），Apple CPU 會據此關掉
+  它的 user JOP key。`droidvm-native-pac-user-jop.patch` 用 SCTLR_EL1 做同樣的事：
+  - 回到這類 thread 的 EL0 時，關掉 IA、DA、DB（返回位址用的 IB 保持開啟）；每次從 EL0 進核心，第一件事就是重新打開。
+  - 這類 task 的 shared cache auth mapping 用專屬的 pager key，裡面的指標不簽章。dyld pager 對這類 task 同樣不簽章。
+  - 陷阱：不能用「jop_key 為 0」當作停用的判斷。shared region 第一個 slide pager 的 key 就是 0，launchd 在 auth remap 之前
+    就會讀它，launchd 因此 PAC 崩潰，開機卡死。
+  驗證：STExtractionService 直接執行時，跑到「XPC Service cannot be run directly」才結束；15 個 App 的壓力測試沒有出現 PAC
+  報告，也沒有 respring。locationd 自己的 PAC 失敗（arm64e，Cohort:0 佇列上未簽章的物件）是另一個問題，仍未解。
+- **Games 開不起來（device af2be42，已推）**：它的 VFX 沒有 Metal 裝置就會結束（「failed to load Metal shaders library」）。
+  已加入 `droidvm-gpu-clients`，現在可以開到歡迎畫面。
+- **穩定性測試**：連開 30 個 App、連砍 backboardd 3 次、從切換器上滑關掉 App、連砍 locationd 2 次，都沒有卡死，也沒有連鎖 respring。
+- **前一段的記憶體風暴只在新 Data 第一次產生桌布圖庫時發生**：之後砍 SpringBoard，只會起 2 個桌布擴充，free 維持 1.1 GiB，
+  沒有 jetsam。
+- **已知、未修：切到其他 Android App 再回來時，VM 畫面是黑的**，要等 guest 送出下一幀（點一下就好）。app 在 surface 重建後
+  `setSurface` 一律丟出 IllegalArgumentException（被當成良性忽略），存下的幀也沒有畫回去。這要動 DroidVM app 與 crosvm 的
+  顯示服務（app repo 不在推送清單內）。
+
 ## 續報（2026-11-02 稍晚，Claude）：多工畫面的白色卡片（已修）；locationd 一重啟就連帶 backboardd + SpringBoard 一起崩潰（已修）
 
 - **白色卡片，第 1 層：快照根本沒寫進去（device 59ec0a8、fork f0dafc4，已推）**。SplashBoard 要把快照檔標成 purgeable，APFS 對
