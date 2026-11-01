@@ -38,6 +38,24 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   78 個沿用），SystemOS 開機讀取量 12.7 → 7.4 GB，開機到鎖定畫面 152 → 141–145 s；20.7 萬次頁面驗證 0 次錯誤。
   剩下的 6 GB（讀 21 s、雜湊 10.5 s）還在開機路徑上：核心的 corecrypto 編成 `CC_USE_ASM=0`，SHA 是純 C；可能的方向是
   改用硬體 SHA 指令，或是把推出來的 4K 雜湊存起來，下次開機直接用。
+- **單次傳輸 256 KB、完成偵測（device 7586bea，已推）**：0003 每個請求的 buffer 改成 256 KB，讀 139 MB 的請求數從 2463
+  降到 539；0004 等待時前 150 us 每 2 us 檢查一次，之後才每 20 us 睡一次。量測時用 root 暫時把
+  `/proc/game_opt/disable_cpufreq_limit` 設成 1（量完還原成 0），每種設定各自開機一次，等磁碟閒下來才量：
+  | 設定 | 4 KB 原始讀取（每次） | 139 MB 單一讀取 | 117 MB 三程序同時讀 |
+  |---|---|---|---|
+  | 64 KB、不 spin | 80–86 us | 0.477 s | 0.198 s |
+  | 64 KB、spin | 70–78 us | 0.465 s | 0.227 s |
+  | 256 KB、spin | 52–56 us | 0.429 s（325 MB/s） | 0.195 s（600 MB/s） |
+  4 KB 讀取的裝置往返現在是 26–40 us。crosvm 的 `virtio_blk` 執行緒被綁在 vCPU0 那顆核心上（virtio-mmio 裝置在
+  vCPU0 的 MMIO 寫入裡啟動，執行緒繼承了它的綁核）；把它們移到 CPU 0–1 後，每次都穩定在 26 us，留待 crosvm 修。
+  **量測陷阱**：OPLUS 遊戲空間常把所有核心壓在 1.0–1.1 GHz（`/proc/game_opt/cpu_max_freq`），這時同樣的 4 KB 讀取要
+  123–135 us；之前沒有記錄限頻狀態的數字都不可靠。使用者平常操作時多半也是在這個限頻下。
+- **當機（11-01 09:18 UTC）**：guest 的可用記憶體在 150 ms 內從約 1.5 GB 掉到 0.5 GB，系統開始強制軟性上限，
+  一秒內殺掉一百多個程序；09:18:50 backboardd 的 GPU context 遺失（DeviceLost），plugin 主動結束 backboardd 讓 launchd
+  重啟；09:18:54 guest 的 virtio-gpu 傳輸層在 `reap()` 收到一個對不上任何等待中指令的描述子，整個停擺（state 3）。
+  畫面從此不再更新，重啟後的 backboardd 拿不到 GPU；約 18 分鐘後它在 Turnip（`nmb_encoder_end` → libvulkan_freedreno）
+  SIGSEGV。待修：傳輸層要能撐過 client 的 GPU context 遺失（找出那個描述子的來源），以及是誰在一瞬間吃掉 1 GB
+  （同時 KaleidoscopePoster 回報 OutOfMemory）。
 - **其他**：多工畫面的 app 快照是白的（另查）；一次開機 SpringBoard 沒起來（只畫了 3 格，重開即好，未重現）；
   rig 的 frame-burst.sh 讀的是開機 simplefb，virtio-gpu 之後量不到東西，改用 scratchpad rec.sh（screenrecord，每格時間戳）。
 
