@@ -1,7 +1,46 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-01（較晚）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-02。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-11-02，Claude）：記憶體壓力永遠是 0（已修）；砍 render server 後停在轉圈 = dyld pager 的 16K ABBA 死鎖（已修）；metal2vulkan 的閒置 block
+
+- **記憶體壓力等級（device a60ed0e，已推）**：xnu 在 compressor 開啟時，壓力等級只看「可分頁記憶體裡被壓縮的比例」。
+  guest 的 GPU 記憶體全部是 wired（host GPU 映射的 blob），可分頁的部分掉到 0.5–1 GiB（低於 DT 給的 1280 MiB soft
+  threshold），等級仍是 0。所以沒有任何程序被要求還記憶體：render server 的 GPU 快取、Turnip 的 BO 快取都一樣，直到一個
+  尖峰把最後的記憶體吃光。`droidvm-pressure-pageable.patch` 把無 compressor 時用的 page-shortage 門檻也加進來（OR）。
+  15 個 app 的壓力測試：修正前 0 個樣本離開 0；修正後 108/122 個樣本在 Warning，Turnip BO 快取被清空，idle 後 render
+  server 的 GPU pages 從 1450 降到 946 MiB。
+- **free page 門檻（device 33fe95e，已推）**：`VM_PAGE_FREE_*_LIMIT` 是以 16K page 定的 page 數，在 native 4K 核心上只剩真機的
+  四分之一（free target 7.8 MiB）。改成乘上 16384/PAGE_SIZE：target 31.2、min 23.4、reserved 1.7 MiB。
+- **砍 backboardd 後永遠轉圈（device 32075d9，已推）**：根因在 `ipados27-bringup.patch` 為「4K 核心處理 16K fixup page」寫的
+  路徑。`dyld_pager_data_request` 在**還拿著**自己那一頁的來源頁、以及 backing object 上的 placeholder 時，去 peek 同一個 16K
+  fixup page 的另外 3 個 4K 頁。兩條 thread 各填同一個 16K 頁的不同部分時，就會各拿一頁、等對方那頁，永遠卡住（ABBA）。
+  render server 死掉時，locationd 的多條 worker 同時被喚醒、同時碰到同一批資料頁，於是卡住。之後所有碰到那些頁的 thread
+  都跟著睡下去，callservicesd → SpringBoard 註冊 display → 轉圈。實測卡住的是 `/usr/libexec/locationd` backing object 的
+  0x23e9000／0x23ea000 兩頁，paging 計數剛好等於 3 條睡著的 dyld thread × 2。修正：先 peek 兄弟頁（每次 peek 完都放掉），
+  再 fault 自己那頁。驗證：連續 SIGKILL backboardd 3 次、每次間隔 60 s，PageBusy 睡眠者都是 0；回到鎖定畫面，能解鎖、能開 app。
+  修正前是 4/4 卡住。
+- **找到它的工具（device dc66d13）**：檔案信箱 kind 8（`package/DroidVMPageInfo.c`，`export.py page CTX perm`）。stackshot 裡
+  PageBusy 等待（wait_type 22）的 context，就是 page 位址加上 `vm_kernel_addrperm`。由此印出 page 的 offset 和旗標、object 與
+  最多 4 層 shadow（各自的 refs、paging、activity、pager 狀態），pager 是 vnode 的話再印出檔名。guest 的 `vm_pages` 虛擬連續、
+  實體不連續，host 端讀不到，所以要在 guest 裡查。
+- **crosvm 裝置 worker 的 CPU（crosvm 47cd593ee，virglrenderer 899a4e17，已推）**：virtio-mmio 裝置在 guest 寫 DRIVER_OK 時
+  啟動 worker，這個寫入由 vCPU thread 處理。新 thread 會繼承建立者的 affinity，所以 virtio_blk、v_input、v_net、vu-*、
+  crosvm_resample 全都被綁在 vCPU0 的 core 2。現在 WorkerThread 改用主 thread 的 CPU 集合（0-7）。u_thread_create 也做了同樣
+  的修正，但 kgsl-sync、vrend-sync、Binder:crosvm 被 VM 設定的 GPU cgroup 放進 `/dev/cpuset/gpuworker`（cpu 7）。這是
+  10-27 vCPU 還在 2–5 時選的，現在 6 顆 vCPU 是 2–7，vCPU5 和 GPU thread 共用 core 7。這是設定問題，未改動。
+- **metal2vulkan 的閒置記憶體（分析，未修）**：plugin 的 MEM 列（核心 `native_adreno_metal_rows`，scratchpad mtrows.py）
+  顯示，壓力測試後 render server 有 547–616 MiB 的**空** pooled block（每個 pool 用 keep_room 預留一個 64 MiB 的 block，
+  `emptied=None`，所以 trim 永遠不會釋放）。開 FaceTime 時 pool block 長了 640 MiB，只放了 187 MiB，1 秒內多 wire 了
+  1.1 GiB。MA 列用 NativeAdrenoMetal.map 解出來：MA0 = `device::room::keep`。
+- **試過、沒採用：16 MiB block**（fork feefe53 的 metal2vulkan 0019 `METAL2VULKAN_BLOCK_MIB`；AdrenoMetal 8f735a2 只從
+  `/private/var/ngpu/debug/block-mib` 讀取，預設 64）。空 block 和 64+ MiB 的 blob 都消失了，但 render server 的 GPU context
+  會 hang（手機 kgsl「GPU hang detected」、crosvm「kgsl_ccmd_gem_submit GPU_COMMAND failed: Protocol error」→ DeviceLost →
+  plugin 結束 backboardd）。同一次開機 A/B，各開關 FaceTime 5 次：16 MiB 3 次 hang，64 MiB 0 次；16 MiB 加 noubwc 仍是 3 次，
+  所以不是 UBWC。fork 和 AdrenoMetal 這兩個 commit 還沒推，手機上的 plugin 是 1a47826（沒有除錯檔時預設 16），guest 已寫入 64。
+- **仍未解**：多工畫面的 app 快照是白的；16 MiB block 的 GPU hang 根因；keep_room 的閒置 block（下一步：壓力 ≥ Warning
+  時暫停 keep_room，或限制空 block 總量）。
 
 ## 續報（2026-11-01 晚，Claude）：多工手勢叫不出來（兩個原因，已修）；設定點選項 0.5–1 s 是磁碟 page-in
 
@@ -61,7 +100,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   每次讀 index 之後先下 barrier；對不上的 element 重讀一次，仍然對不上就略過並計數（`droidvm_virtio_gpu_stray`）；
   新增 `abandon(ticket)`，client 關閉時把 drain 沒等完的提交交還（以前每一筆都會永久佔住一個 slot）。驗證：繪圖中途
   SIGKILL backboardd 三次，傳輸層都維持 state 2，畫面持續更新，stray 為 0。
-- **另一個問題（未修，與區塊驅動無關）**：連續砍 backboardd 之後，其他程序會有一批 thread 卡在 `vm_page_sleep`，
+- **另一個問題（2026-11-02 已修：dyld pager 16K ABBA 死鎖，見上方續報）**：連續砍 backboardd 之後，其他程序會有一批 thread 卡在 `vm_page_sleep`，
   等一個永遠不會解除 busy 的 page，其中多數經由 `dyld_pager_data_request`，例如 locationd、contactsd、callservicesd、
   pkd。callservicesd 卡住時，SpringBoard 在註冊 display 時同步 XPC 等它（ShellSceneKit → TelephonyUtilities），畫面就
   停在轉圈。這段時間沒有任何 thread 在做磁碟 I/O；換回上游序列讀取的驅動再測兩次，同樣會發生（locationd 6 條、
