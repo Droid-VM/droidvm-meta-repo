@@ -1,7 +1,27 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-01 下午。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-01（較晚）。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+
+## 續報（2026-11-01 較晚，Claude）：base 更新到上游 UniXNU 407db1a；render server 的 GPU 位址空間用完（每個 context 2 GiB → 6 GiB）
+
+- **上游合併（merge，不是 rebase）**：fork `wip/droidvm` c4502e8（上游 main 407db1a 的 221 個 commit）。submodule：AdrenoMetal
+  01a3721（上游 a0f0287b＋我們全部的 plugin 改動，包含原本只在本機的 exp-bgra）、GopFramebuffer ed08bd4（上游的 direct scanout 校正與
+  診斷）、ArmCpu c85e084、DarwinBoot c936dc6（上游的改動我們本來就有，樹不變）。**Adreno740 留在 627836d**：上游這批是實體 Adreno
+  core 的工作，且正好重寫了 device repo `build-droidvm-gpu.py` 要做文字替換的 `NativeAdrenoPublish.cpp`；已合併好的版本放在
+  NativeAdreno `wip/merge-up-1101`（f57a9c6），等移植那個腳本。上游的兩個 Turnip patch（render-mode、gmem-mutable-swap）套不上
+  Droid-VM/mesa，連同 bridge 0020 先不收。上游 AdrenoMetal 把診斷改成開關，板子命令列加了 `sheng-diag=1 log-gpu=1`（979/1023 bytes）。
+- **上游順便修好的**：iconservicesagent 不再閃退（上游的 `externFunctionNames`，CoreImage 的 DAG 不再拿到 null program）。設定的行
+  圖示大多仍空白：iconservicesagent 現在卡在 `custom_effect:displacementMap_v1` 的 `custom_fn` 連結（與 custom_blend 同類，下一步）。
+- **render server 失去 GPU（已修）**：設定、Spotlight 來回操作後 backboardd DeviceLost，plugin 結束它，SpringBoard 跟著重啟（一次重啟後
+  沒接回 GPU、畫面停住）。kernel 沒拒絕任何配置；guest 的 mesa-log 開關讓 Turnip 留下 `Failed to allocate BO for autotune rp_entry`
+  （OUT_OF_DEVICE_MEMORY）。用 debugserver 取 libvulkan_freedreno 的載入位址、再用 `export.py mem` 讀 Turnip 的 `darwin_va`：
+  backboardd 在閒置首頁就用了 2 GiB 中的 1.8 GiB，設定與 Spotlight 中到 2.1–2.2 GiB。原因是 drm2kgsl 把 KGSL 給的 VBO（128 GiB）
+  平均切成 64 片、每個 guest context 2 GiB，而 compositor 要把所有 app 的 surface 映射進自己的位址空間。修正：virglrenderer 6536a4a8
+  （VBO 階梯加 192 GiB——KGSL 給得出 192，256 被拒；切 32 片，每片 6 GiB）；fork c4502e8 `turnip-darwin-va-exhausted-note.patch`
+  （位址不夠時寫下大小與用量）＋ metal2vulkan `0017-spares-within-the-address-space`（上游 0021 的 spare 區塊沒有上限，改成不超過
+  位址空間的 1/16）。驗證：5 輪設定＋三種手勢（約 25 分鐘）backboardd／SpringBoard 都沒重啟，VA 最高 2.2 GiB／6 GiB。
+- **效能**：翻頁 110.8–111.2 fps（合併前 110–111）；小工具頁 78、App 資料庫 75–95、Spotlight 45–56 fps（單次量測、大核被限 2.9 GHz）。
 
 ## 續報（2026-11-01 下午，Claude）：SpringBoard 閃退、iconservicesagent 閃退與空白圖示、guest panic；設定與 Spotlight 為何卡
 
