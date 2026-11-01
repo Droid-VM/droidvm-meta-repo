@@ -21,6 +21,16 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   （VBO 階梯加 192 GiB——KGSL 給得出 192，256 被拒；切 32 片，每片 6 GiB）；fork c4502e8 `turnip-darwin-va-exhausted-note.patch`
   （位址不夠時寫下大小與用量）＋ metal2vulkan `0017-spares-within-the-address-space`（上游 0021 的 spare 區塊沒有上限，改成不超過
   位址空間的 1/16）。驗證：5 輪設定＋三種手勢（約 25 分鐘）backboardd／SpringBoard 都沒重啟，VA 最高 2.2 GiB／6 GiB。
+- **設定的行圖示（進行中，三層原因）**：
+  1. 已修：RenderBox 的 `custom_effect` pipeline 把 `displacementMap_v1`（帶 function constant 特化）以 `custom_fn` 連結，
+     metal2vulkan 的 linker 拒絕任何宣告 constant 或有靜態初始化的模組。fork 6833c6a metal2vulkan `0018`：連結前在副本裡綁定
+     constant、評估靜態初始化（離線重放：修正前被拒、修正後建成；機上 custom_effect pipeline 全部建成）。
+  2. 已修：GPU blob 頁面放在行程裡之後（10-31），整份 GPU 記憶體都算進 footprint，iconservicesagent（76 MiB）一閒置就被
+     jetsam 以 15 MB 上限殺掉，Preferences 收到 4097。device b846440：頁面改為 purgeable、在 kernel 執行緒上歸到 graphics
+     帳本且不計 footprint（XNU 只允許 kernel_task 或有 entitlement 的呼叫者這樣做），系統層級的記憶體壓力照常計算。
+  3. 未解：iconservicesagent 仍在 CoreImage 崩潰（debugserver 抓到：CI 後端建 program 回傳 NULL，寫 NULL+0x28）。
+     CI 載不到 `ci_stdlib`／`ci_filters`／`ci_raw`（及 stitchable 版本），24A446 只帶 `CoreImage.metallib`，plugin 的
+     Metal 編譯器路徑也從未被呼叫；實機上這些 library 的來源還要查。
 - **效能**：翻頁 110.8–111.2 fps（合併前 110–111）；小工具頁 78、App 資料庫 75–95、Spotlight 45–56 fps（單次量測、大核被限 2.9 GHz）。
 
 ## 續報（2026-11-01 下午，Claude）：SpringBoard 閃退、iconservicesagent 閃退與空白圖示、guest panic；設定與 Spotlight 為何卡
