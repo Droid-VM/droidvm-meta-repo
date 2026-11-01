@@ -54,8 +54,18 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   一秒內殺掉一百多個程序；09:18:50 backboardd 的 GPU context 遺失（DeviceLost），plugin 主動結束 backboardd 讓 launchd
   重啟；09:18:54 guest 的 virtio-gpu 傳輸層在 `reap()` 收到一個對不上任何等待中指令的描述子，整個停擺（state 3）。
   畫面從此不再更新，重啟後的 backboardd 拿不到 GPU；約 18 分鐘後它在 Turnip（`nmb_encoder_end` → libvulkan_freedreno）
-  SIGSEGV。待修：傳輸層要能撐過 client 的 GPU context 遺失（找出那個描述子的來源），以及是誰在一瞬間吃掉 1 GB
-  （同時 KaleidoscopePoster 回報 OutOfMemory）。
+  SIGSEGV。待查：是誰在一瞬間吃掉 1 GB（同時 KaleidoscopePoster 回報 OutOfMemory）。
+- **virtio-gpu 傳輸層修正（device c23dda3，已推）**：根因是 `reap()` 讀到新的 used index 之後，沒有 barrier 就讀 used
+  element。ARM 會把這兩個讀取重排，所以可能讀到 ring 上一圈的舊 element，對應的 slot 早已釋放；讀到這種 element
+  就被判成裝置壞掉。這個 board 的其他 virtio 驅動（net、media、input、data store、OS 磁碟）都有加 barrier。修正內容：
+  每次讀 index 之後先下 barrier；對不上的 element 重讀一次，仍然對不上就略過並計數（`droidvm_virtio_gpu_stray`）；
+  新增 `abandon(ticket)`，client 關閉時把 drain 沒等完的提交交還（以前每一筆都會永久佔住一個 slot）。驗證：繪圖中途
+  SIGKILL backboardd 三次，傳輸層都維持 state 2，畫面持續更新，stray 為 0。
+- **另一個問題（未修，與區塊驅動無關）**：連續砍 backboardd 之後，其他程序會有一批 thread 卡在 `vm_page_sleep`，
+  等一個永遠不會解除 busy 的 page，其中多數經由 `dyld_pager_data_request`，例如 locationd、contactsd、callservicesd、
+  pkd。callservicesd 卡住時，SpringBoard 在註冊 display 時同步 XPC 等它（ShellSceneKit → TelephonyUtilities），畫面就
+  停在轉圈。這段時間沒有任何 thread 在做磁碟 I/O；換回上游序列讀取的驅動再測兩次，同樣會發生（locationd 6 條、
+  contactsd 6 條）。只開機、不操作則不會出現。
 - **其他**：多工畫面的 app 快照是白的（另查）；一次開機 SpringBoard 沒起來（只畫了 3 格，重開即好，未重現）；
   rig 的 frame-burst.sh 讀的是開機 simplefb，virtio-gpu 之後量不到東西，改用 scratchpad rec.sh（screenrecord，每格時間戳）。
 
