@@ -37,11 +37,38 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - 第一層（已修，AdrenoMetal 3a4afd3、fork bb654a0）：WebKit 把 `newLibraryWithSource:` 回傳的任何 error 都當失敗，
     而 plugin 的編譯前端（metal driver mode）會對 WebGPU 產生的 MSL 報「unused variable」警告。
     現在只有警告時不回報 error，警告寫進日誌。
-  - 第二層（未修）：plugin 沒有實作 `MTLArgumentEncoder`，也沒有 `newArgumentEncoderWithArguments:`、`gpuResourceID`。
-    WebGPU 的 BindGroupLayout 要靠它們建立，所以用到 bind group 的頁面都會得到「invalid BindGroupLayout」。
-    metal2vulkan 的執行期已經有完整的 `ArgumentEncoder`，缺的是 bridge 匯出和前端的 ObjC 包裝。
+  - 第二層（已修，AdrenoMetal 8841752、f4ce342，fork 667492a）：plugin 沒有 `MTLArgumentEncoder`、`gpuResourceID`，
+    encoder 的 `useResource:` 也是空的，所以用到 bind group 的頁面都得到「invalid BindGroupLayout」。
+    現在 bridge 包裝了 metal2vulkan 的 `ArgumentEncoder`、各物件的 resource ID 和 `use_resource`/`use_heap`。
+    同時補上 WebKit 會呼叫、但原本回 nil 的方法：
+    - `computeCommandEncoderWithDescriptor:`／`blitCommandEncoderWithDescriptor:`（computeBoids 報「encoder state is not valid」）
+    - indirect draw
+    - 帶 options 的 buffer↔texture blit（texturedCube 的貼圖原本是黑的）
+    - swizzle texture view
+  - 驗證：`gfxprobe argbuf`（descriptor／function 兩種 encoder × kernel／fragment，四組全對）。
+    Safari 的 rotatingCube、twoCubes、instancedCube、samplerParameters、computeBoids、texturedCube 都正常。
+  - 未修：renderBundles 要 `MTLIndirectCommandBuffer`（執行期有 API，plugin 還沒包裝）；cubemap、fractalCube 待查。
   - 抓 WebKit 被隱私遮蔽的錯誤：`dbgattach.py` 在 `WebGPU::Device::generateAValidationError(NSString*)` 設斷點，直接讀 NSString。
     同一次開機的 shared cache slide 可以從閒置的 daemon 量。
+- **藍牙（已可用，device 126487d）**：Settings 顯示 Bluetooth On、可被發現、正在掃描，跟真機一樣；userland 全 stock，沒有藍牙驅動。
+  - iPadOS 27 的 bluetoothd 內建 Apple 自家 VM 用的 virtual 傳輸（`transport-encoding` = 10）。
+    在 `kern.hv_vmm_present` 為 1 時，它會跳過晶片初始化（不跑 BlueTool），改用程序內的虛擬控制器（BTVC，Chip APPLE_VIRTUAL）。
+    ADT 只要一個根層 `bluetooth` 節點（`transport-encoding` 10、`local-mac-address`）。
+  - BTVC 的 LE 連線走 Bonjour（BTVCBonjourLink），也就是 Apple VM 之間透過網路互相看到對方。
+  - 其他專案（iOSPlus10、willowios，都是 iOS 16）是自己寫 H4 傳輸，再加上換掉 BlueTool；我們不需要。
+  - 要接真實硬體時，有兩條路：
+    - bluetoothd 的 "VIRT" driver 會開 `<裝置>-in`／`<裝置>-out` 兩個檔案收送封包，kernel 可以把 virtio 裝置轉成這一對。
+    - 或改用 H4 加 kernel control socket。
+- **keychain 寫入（已修）**：27 的 NativeKeyStoreEvents 少了 17 時期補的 aks_wrap_key/unwrap（selector 10/11），
+  所以每筆 keychain 新增都失敗（`ks_crypt e00002c7 'oe'`），所有 app 存的東西都會遺失。
+  現在由 `package/KeyStoreWrap.inc` 在 27 的建置裡補上。bluetoothd 原本就是因為存不了 LE identity root 而重啟（reason 130）。
+- **launchd 吃 90% CPU（已修）**：停用 bluetoothd 之後，它的 Mach 服務不存在，
+  audiomxd 的 BTAudioHALPlugin 在連線錯誤回呼裡立刻重連，每秒查找約 1900 次。
+  launchd 每次查找失敗都要讀一次 password 檔。現在不再停用 bluetoothd，launchd 降到 2%。
+  （17 時期就踩過同一個坑，註解寫在 DroidVMBootArgs.c。）
+- **Wi-Fi（調查中）**：上游 UniXNU-sheng 的 `package/WifiNet.cpp` 讓 stock wifid 透過 Apple80211 請求操作一個 en 介面，
+  registry 用 `IO80211Controller`/`IO80211Interface` 的名稱；無線電藏在 `nw_abi.h` 後面，可以換成 stub 或 virtio 後端。
+  27 的 wifid 還帶 `IO80211APIUserClient` entitlement，要先確認 27 用的是 ioctl 還是 user client。
 - **除錯工具**（scratchpad）：
   - `dbgbreak.py`：debugserver 斷點，自己處理跨過斷點；支援改暫存器、印 Swift 類別名稱，以及用 GOT 推算 shared cache slide 後設斷點。
   - `dyld` 還沒初始化完就查 image 清單會讓 debugserver 卡住，改用 `qMemoryRegionInfo` 找主程式。
