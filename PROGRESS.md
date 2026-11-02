@@ -3,6 +3,40 @@
 更新：2026-11-02。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-11-02 深夜，Claude）：Swift 的計時全部失效（已修，時基改成 24 MHz）；設定出現 Ethernet；藍牙／Wi-Fi 的 daemon
+
+- **根因：iPadOS 27 的 Swift Concurrency 把時基寫死成 Apple 的 24 MHz（device 5edbbfc，已推）**。
+  - `libswift_Concurrency` 的 `swift_dispatchEnqueueWithDeadline` 把 ContinuousClock／SuspendingClock 的 deadline
+    換成 mach tick 時，固定用 `ns × 3 ÷ 125`（125/3 = 24 MHz）。
+  - guest 的計數器是手機的 19.2 MHz（時基 625/12），所以每個 `Task.sleep`、debounce、timeout 的 deadline 都落在計數器值的
+    1.25 倍，也就是手機開機時間的四分之一之後（約 28 小時）。實際上永遠不會觸發。
+  - 設定的側欄是靠一個 debounce 過的 channel 接收更新，所以從來沒更新過。Ethernet（以及「Optimizing Search and Siri」、
+    General 裡的「TV Provider」）都因此沒出現。其他 App 和 daemon 裡的「卡住不動」很可能也有一部分是這個原因。
+  - 修法：新增核心補丁 `droidvm-timebase-24mhz.patch`，搭配內建參數 `droidvm-timebase-hz=24000000`。
+    - 核心讀計數器時一律乘上 target/hardware（5/4），decrementer 反向換算（向上取整），回報 125/3。
+    - 使用者空間改經由 `mach_absolute_time` trap 取得時間（`USER_TIMEBASE_NONE`）；EL0 仍保留讀暫存器的權限。
+    - 翻頁仍是 101–102 fps，沒有明顯退化。
+    - `gfxprobe clocks` 驗證：用 Swift 算法排的 1 秒計時器在 1.013 秒觸發（修正前不會觸發）。
+  - fileset 陷阱：核心改了內聯的時基讀取後，比對器靠「參考順序」對上的 33 個函式失去對應。
+    `microuptime` 對不上，開機時就 panic（"original component called an unmapped kernel function"）。
+    解法是重建一次沒有補丁的核心、產生舊版 `kernel.map.json` 比對差異，把這 33 個寫進 `fileset-reviewed.json`。
+    之後改到會被內聯的核心函式，都要這樣比對。
+- **設定的 Ethernet**：上面修好後就出現了。詳細頁能顯示 IPv4（自動）、IP、遮罩、路由器、DNS 和 HTTP Proxy。
+  追查過程中確認：
+  - 偵測本身沒問題。
+  - 側欄的延後初始化（`signpostedPerformDeferredSetupForProvider`）是逐一進行的，會卡在藍牙項目上。
+- **藍牙／Wi-Fi 的 daemon**：
+  - bluetoothd 找不到藍牙控制器就結束，launchd 每 10 秒重啟一次。客戶端看到的是連線「中斷」而不是「不存在」，
+    設定的藍牙項目就一直等。現在用 `droidvm-disable-jobs` 停用它，客戶端會立刻失敗返回。
+  - wifid 的 plist 有 `_LimitLoadToDeviceTree=wlan`。ADT 加了一個頂層 `wlan` 節點（不會有驅動去比對它），
+    讓 wifid 能啟動並回報「沒有 Wi-Fi 介面」；之前 WiFiKit 會不停重試查詢（設定一啟動就 338 次）。
+  - 評估過做 stub 藍牙或 Wi-Fi 的成本：
+    - Wi-Fi 要寫 IO80211 驅動來回應 wifid 的私有介面，還會讓 en0 變成 Wi-Fi，是數週的工作。
+    - 藍牙要一個假的 HCI 控制器，包括傳輸驅動、HCI 初始化和廠商命令，是數天的工作；而且要橋接到手機的藍牙才有實際用途。
+- **除錯工具**（scratchpad）：
+  - `dbgbreak.py`：debugserver 斷點，自己處理跨過斷點；支援改暫存器、印 Swift 類別名稱，以及用 GOT 推算 shared cache slide 後設斷點。
+  - `dyld` 還沒初始化完就查 image 清單會讓 debugserver 卡住，改用 `qMemoryRegionInfo` 找主程式。
+
 ## 續報（2026-11-02 晚，Claude）：Safari 的 WebGPU（已能用）；metal2vulkan 與 Apple4；設定沒有 Ethernet（根因已縮小）
 
 - **Safari 的 WebGPU 為什麼不工作：四道關卡，已全部打通（device 24a79b2、fork 3d8ef4d、AdrenoMetal 4089943，均已推）**。
