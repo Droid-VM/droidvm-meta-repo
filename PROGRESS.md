@@ -7,6 +7,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-02** VideoToolbox paravirt 預設開啟（內建開機參數 `droidvm-vt-paravirt=1`，有 virtio-media 編／解碼裝置才發布）；裝置做不到的（小於 96x96、非 4:2:0）在 `dsta` 就拒絕，VideoToolbox 改用軟體解碼；主畫面、HEIC、JPEG 不受影響（device 706338e）
 - ✅ **11-02** VideoToolbox 編碼走手機 VPU：guest 核心回 paravirtualized 編碼器（`encs`／`+enc`／`esta`／`efrm`→`Efds`／`Eemt`／`ecfr`），接 virtio-media 編碼器；App 的 IOSurface 經 videocodecd 自己的 client 建 port 再查（selector 0x23／0x22）。720p 60 幀：H.264 204 fps、HEVC 292 fps，0 失敗，ffmpeg 解得回來（Y PSNR 37–67 dB）（device 9d5a0ce）
 - ✅ **11-02** VideoToolbox 解碼走手機 VPU：guest 核心扮演 Apple VM 的 paravirtualization host，接 virtio-media 解碼器（MediaCodec）。720p 60 幀：H.264 135–151 fps、HEVC 159–170 fps，0 失敗，亮度正確（device 1479852）
 - ✅ **11-02** MSAA 在 Adreno 上降到單取樣成本：Turnip 對不儲存的多重取樣附件走 GMEM＋metal2vulkan 對 Turnip 交 DONT_CARE（`turnip-msaa-resolved-prefers-gmem.patch`、`0021-turnip-dont-care-stores.patch`；4x 64 draw 37.5→9.2 ms；fork 803a014）
@@ -559,8 +560,12 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
        `Ddpa`／`Dpba`／`Drpa` 屬性、`Dfub`。編碼器對稱（`encs`…）。
      - ✅ **解碼、編碼都通（11-02）**：`package/DroidVMVTParavirt.cpp`（傳輸、Apple 名字的 driver／user client）＋`DroidVMVTHost.cpp`
        （host：session 依 UUID，V4L2 session、worker thread、IOSurface 查詢）＋`DroidVMVTWire.h`（訊息格式）。device 1479852（解碼）、
-       9d5a0ce（編碼）。預設仍不發布：`droidvm-vt-paravirt=1` 或 root 寫 `kern.droidvm_vt_paravirt=1`（之後才啟動的行程才會用）。
-       測試：`gfxprobe vtdecode paravirt FILE N`、`gfxprobe vtencode paravirt [hevc] W H N`（輸出 `/private/var/ngpu/enc.h264|hevc`）。
+       9d5a0ce（編碼）、706338e（預設開啟）。開機就發布（關掉：命令列 `droidvm-vt-paravirt=0`）；執行中改 `kern.droidvm_vt_paravirt`
+       只影響之後才啟動的行程（videocodecd 若已啟動就不會換）。
+       測試：`gfxprobe vtdecode FILE N`、`gfxprobe vtencode [hevc] W H N`（輸出 `/private/var/ngpu/enc.h264|hevc`）、`gfxprobe imgdecode FILE N`。
+     - 「在 guest 裡」除了 codec 還改了什麼（24A446 shared cache）：VideoToolbox 隱藏非 paravirt 的硬體 codec（AVD、AVE，這裡本來就沒有）；
+       MediaToolbox 放寬防錄影檢查（外部保護不足時不遮畫面，FairPlay 這裡本來就沒有）；CMPhoto 問 paravirt JPEG（`jcap`），被拒後用軟體。
+       實測開／關對照：HEIC、JPEG 像素相同、速度相同；4:2:2 H.264 兩邊都解不了（軟體也不支援）；不開時 H.264 編碼是軟體 `anon-1`（720p 32 fps）。
        VM 要有 `--virtio-media kind=decoder` 與 `kind=encoder`（＋`--virtio-mmio-media`、`media-host-mb=160`）。
      - 格式怎麼來的：Mac（macOS 27）上 `tools/vtpv-oracle`：`hostonly` 把 guest 錄到的訊息餵給 VideoToolbox 自己的 host session，
        錄 host 的回覆（`Efds` 要回真的 format description，host 才會吐 `Eemt`）；編碼器在 macOS 是 out-of-process，loopback 跑不起來。
