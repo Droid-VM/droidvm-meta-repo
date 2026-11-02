@@ -3,924 +3,297 @@
 更新：2026-11-02。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
-## 續報（2026-11-02 深夜之二，Claude）：MSAA 在 Adreno 上的成本降到跟單取樣一樣（GMEM + DONT_CARE）
-
-- **誰在用 MSAA**：系統 UI 沒有用（backboardd 的 pipeline 裡 0 個多重取樣）。管線日誌 24603 條裡有 405 條是 MSAA，全部來自
-  動態桌布（Mercury「celosia」4x、Pride 2x/4x、Unity2025 4x、Hello 2x）和 Safari 的 WebGL／WebGPU（4x）。
-  所以「關 MSAA 讓 UI 變順」對這台不適用：UI 本來就不走 MSAA。
-- **高通的 MSAA 優化之前沒用上**：Adreno 的 MSAA 只有在 GMEM（tile 記憶體）模式才便宜，因為取樣留在晶片上，只寫出 resolve 結果。
-  原本 4x 是 1x 的 5 倍（2048x2732、64 個混合全螢幕三角形：37.5 ms 對 7.6 ms），兩個原因：
-  1. Turnip 的 autotune 把少於 5 個 draw 的 pass 一律送去 SYSMEM，每個取樣都寫進記憶體再讀回來 resolve。
-     修法：`patches/mesa/turnip-msaa-resolved-prefers-gmem.patch`，有不需要儲存的多重取樣附件的 pass 一律走 GMEM。
-  2. metal2vulkan 在沒量測過的驅動上，把 Metal 的 `DontCare`／`MultisampleResolve` 一律轉成 Vulkan `STORE`
-     （`DriverFact::DontCareStoreIsOneOfMetals`），所以就算走 GMEM，每個 tile 還是把取樣寫回去。所有 App 的 DontCare 深度緩衝也一樣。
-     修法：`patches/metal2vulkan/0021-turnip-dont-care-stores.patch`，給 Turnip（高通）這個 fact。
-- **量測**（device 3ad4a03 的 `gfxprobe dontcare`）：BGRA8 1x/4x（有無 resolve）、RGBA16Float、Depth32Float 1x/4x，
-  載入 Clear／Load／DontCare，不畫／畫一半／全畫，1024x1024 和 2048x2732。`TU_DEBUG=gmem` 下每個 texel 和取樣都是原本的值，
-  `TU_DEBUG=sysmem` 下都是 Store 會留下的值，從來沒有第三種答案，符合這個 fact 的條件。
-- **結果**（fork 803a014）：64 個 draw 的 4x 從 37.5 ms 降到 9.2 ms（等於 1x）；1 個 draw 從 4.5–5.0 ms 降到 2.0 ms。
-  鎖定畫面、主畫面、Safari 的 WebGPU 範例（helloTriangleMSAA、shadowMapping、deferredRendering）畫面正確。
-- **fence wait 逾時不是這次造成的**：gpu-3d 的「fence waits timed out」是 Turnip 每 100 ms 一段的等待到期。A/B（同樣開機與
-  同樣順序）：改之前 deferredRendering +52、shadowMapping +22；改之後 +58、+29；helloTriangleMSAA 兩邊都是 0。
-  這些逾時本來就有，只出現在較重的 WebGPU 範例，原因待查。
-- **陷阱**：`plugin-build-fam.sh` 不會重建 Turnip（log 顯示 `same libvulkan_freedreno.dylib`）。改 Mesa 後要先跑
-  `link-droidvm-gpu-sources.py`（補上 drivers/Adreno740），再跑 `build-turnip-darwin.py --target ios27`。
-
-## 續報（2026-11-02 深夜，Claude）：Swift 的計時全部失效（已修，時基改成 24 MHz）；設定出現 Ethernet；藍牙／Wi-Fi 的 daemon
-
-- **根因：iPadOS 27 的 Swift Concurrency 把時基寫死成 Apple 的 24 MHz（device 5edbbfc，已推）**。
-  - `libswift_Concurrency` 的 `swift_dispatchEnqueueWithDeadline` 把 ContinuousClock／SuspendingClock 的 deadline
-    換成 mach tick 時，固定用 `ns × 3 ÷ 125`（125/3 = 24 MHz）。
-  - guest 的計數器是手機的 19.2 MHz（時基 625/12），所以每個 `Task.sleep`、debounce、timeout 的 deadline 都落在計數器值的
-    1.25 倍，也就是手機開機時間的四分之一之後（約 28 小時）。實際上永遠不會觸發。
-  - 設定的側欄是靠一個 debounce 過的 channel 接收更新，所以從來沒更新過。Ethernet（以及「Optimizing Search and Siri」、
-    General 裡的「TV Provider」）都因此沒出現。其他 App 和 daemon 裡的「卡住不動」很可能也有一部分是這個原因。
-  - 修法：新增核心補丁 `droidvm-timebase-24mhz.patch`，搭配內建參數 `droidvm-timebase-hz=24000000`。
-    - 核心讀計數器時一律乘上 target/hardware（5/4），decrementer 反向換算（向上取整），回報 125/3。
-    - 使用者空間改經由 `mach_absolute_time` trap 取得時間（`USER_TIMEBASE_NONE`）；EL0 仍保留讀暫存器的權限。
-    - 翻頁仍是 101–102 fps，沒有明顯退化。
-    - `gfxprobe clocks` 驗證：用 Swift 算法排的 1 秒計時器在 1.013 秒觸發（修正前不會觸發）。
-  - fileset 陷阱：核心改了內聯的時基讀取後，比對器靠「參考順序」對上的 33 個函式失去對應。
-    `microuptime` 對不上，開機時就 panic（"original component called an unmapped kernel function"）。
-    解法是重建一次沒有補丁的核心、產生舊版 `kernel.map.json` 比對差異，把這 33 個寫進 `fileset-reviewed.json`。
-    之後改到會被內聯的核心函式，都要這樣比對。
-- **設定的 Ethernet**：上面修好後就出現了。詳細頁能顯示 IPv4（自動）、IP、遮罩、路由器、DNS 和 HTTP Proxy。
-  追查過程中確認：
-  - 偵測本身沒問題。
-  - 側欄的延後初始化（`signpostedPerformDeferredSetupForProvider`）是逐一進行的，會卡在藍牙項目上。
-- **藍牙／Wi-Fi 的 daemon**：
-  - bluetoothd 找不到藍牙控制器就結束，launchd 每 10 秒重啟一次。客戶端看到的是連線「中斷」而不是「不存在」，
-    設定的藍牙項目就一直等。現在用 `droidvm-disable-jobs` 停用它，客戶端會立刻失敗返回。
-  - wifid 的 plist 有 `_LimitLoadToDeviceTree=wlan`。ADT 加了一個頂層 `wlan` 節點（不會有驅動去比對它），
-    讓 wifid 能啟動並回報「沒有 Wi-Fi 介面」；之前 WiFiKit 會不停重試查詢（設定一啟動就 338 次）。
-  - 評估過做 stub 藍牙或 Wi-Fi 的成本：
-    - Wi-Fi 要寫 IO80211 驅動來回應 wifid 的私有介面，還會讓 en0 變成 Wi-Fi，是數週的工作。
-    - 藍牙要一個假的 HCI 控制器，包括傳輸驅動、HCI 初始化和廠商命令，是數天的工作；而且要橋接到手機的藍牙才有實際用途。
-- **WebGPU 的 rotatingCube（有 bind group 的頁面）**：追到兩層原因。
-  - 第一層（已修，AdrenoMetal 3a4afd3、fork bb654a0）：WebKit 把 `newLibraryWithSource:` 回傳的任何 error 都當失敗，
-    而 plugin 的編譯前端（metal driver mode）會對 WebGPU 產生的 MSL 報「unused variable」警告。
-    現在只有警告時不回報 error，警告寫進日誌。
-  - 第二層（已修，AdrenoMetal 8841752、f4ce342，fork 667492a）：plugin 沒有 `MTLArgumentEncoder`、`gpuResourceID`，
-    encoder 的 `useResource:` 也是空的，所以用到 bind group 的頁面都得到「invalid BindGroupLayout」。
-    現在 bridge 包裝了 metal2vulkan 的 `ArgumentEncoder`、各物件的 resource ID 和 `use_resource`/`use_heap`。
-    同時補上 WebKit 會呼叫、但原本回 nil 的方法：
-    - `computeCommandEncoderWithDescriptor:`／`blitCommandEncoderWithDescriptor:`（computeBoids 報「encoder state is not valid」）
-    - indirect draw
-    - 帶 options 的 buffer↔texture blit（texturedCube 的貼圖原本是黑的）
-    - swizzle texture view
-  - 驗證：`gfxprobe argbuf`（descriptor／function 兩種 encoder × kernel／fragment，四組全對）。
-    Safari 的 rotatingCube、twoCubes、instancedCube、samplerParameters、computeBoids、texturedCube 都正常。
-  - 未修：renderBundles 要 `MTLIndirectCommandBuffer`（執行期有 API，plugin 還沒包裝）；cubemap、fractalCube 待查。
-  - 抓 WebKit 被隱私遮蔽的錯誤：`dbgattach.py` 在 `WebGPU::Device::generateAValidationError(NSString*)` 設斷點，直接讀 NSString。
-    同一次開機的 shared cache slide 可以從閒置的 daemon 量。
-- **藍牙（已可用，device 126487d）**：Settings 顯示 Bluetooth On、可被發現、正在掃描，跟真機一樣；userland 全 stock，沒有藍牙驅動。
-  - iPadOS 27 的 bluetoothd 內建 Apple 自家 VM 用的 virtual 傳輸（`transport-encoding` = 10）。
-    在 `kern.hv_vmm_present` 為 1 時，它會跳過晶片初始化（不跑 BlueTool），改用程序內的虛擬控制器（BTVC，Chip APPLE_VIRTUAL）。
-    ADT 只要一個根層 `bluetooth` 節點（`transport-encoding` 10、`local-mac-address`）。
-  - BTVC 的 LE 連線走 Bonjour（BTVCBonjourLink），也就是 Apple VM 之間透過網路互相看到對方。
-  - 其他專案（iOSPlus10、willowios，都是 iOS 16）是自己寫 H4 傳輸，再加上換掉 BlueTool；我們不需要。
-  - 要接真實硬體時，有兩條路：
-    - bluetoothd 的 "VIRT" driver 會開 `<裝置>-in`／`<裝置>-out` 兩個檔案收送封包，kernel 可以把 virtio 裝置轉成這一對。
-    - 或改用 H4 加 kernel control socket。
-- **keychain 寫入（已修）**：27 的 NativeKeyStoreEvents 少了 17 時期補的 aks_wrap_key/unwrap（selector 10/11），
-  所以每筆 keychain 新增都失敗（`ks_crypt e00002c7 'oe'`），所有 app 存的東西都會遺失。
-  現在由 `package/KeyStoreWrap.inc` 在 27 的建置裡補上。bluetoothd 原本就是因為存不了 LE identity root 而重啟（reason 130）。
-- **launchd 吃 90% CPU（已修）**：停用 bluetoothd 之後，它的 Mach 服務不存在，
-  audiomxd 的 BTAudioHALPlugin 在連線錯誤回呼裡立刻重連，每秒查找約 1900 次。
-  launchd 每次查找失敗都要讀一次 password 檔。現在不再停用 bluetoothd，launchd 降到 2%。
-  （17 時期就踩過同一個坑，註解寫在 DroidVMBootArgs.c。）
-- **Wi-Fi（已可用，device 9bcff1a）**：Settings 跟接了 USB 網卡的 iPad 一樣，Wi-Fi（Not Connected，開關打開、正在掃描）、
-  Ethernet、Bluetooth（On）三者並存，上網走 Ethernet（en0）。
-  - 作法：`package/DroidVMWifi.inc`。在 IONetworkingFamily 的 Ethernet 類別上做 `IO80211Controller`/`IO80211Interface`，
-    再加一個沒有傳輸層的 `DroidVMVirtualWifi`（自己的 nub，en1）。
-    Apple80211 request 的格式和回答參考上游 UniXNU-sheng 的 `WifiNet.cpp`；station 沒有無線電，掃描結果為空。
-    `droidvm-wifi-ssid=NAME` 會出現一個可加入的開放網路，只用來測 UI。
-  - 27 的 stock Wi-Fi 堆疊實際需要的條件（逐一在 guest 上查到）：
-    - configd 靠 controller 類別判定 IEEE 802.11。
-    - IO80211.framework 靠 SIOCGIFTYPE 判定 Wi-Fi：IFT_ETHER 加 IFNET_SUBFAMILY_WIFI（`setInterfaceSubType`）。
-    - wifid 用 `IOPropertyMatch {IOInterfaceName: "en1"}` 找介面，IONetworkInterface 沒有這個屬性（在 `initIfnetParams` 補上）。
-    - `APPLE80211_IOC_FILTER_MONITOR_EVENTS` 被拒，wifid 就放棄排程裝置，WiFiKit 拿到 `devices (null)`。現在 set 一律接受，只拒絕熱點模式。
-    - MobileGestalt 的 `wifi` 看 `IODeviceTree:/arm-io/wlan`，所以 wlan 節點搬到 arm-io 底下，並加上 `/chosen/mac-address-wifi0`。
-  - 以後接真實硬體：在 station 換一個後端，例如把 host 的 Wi-Fi 掃描／連線經 virtio 轉進來，介面這層不用動。
-- **IOKit 永遠不安靜、mobileassetd 吃 40% CPU（已修，device a42261e）**：同一個原因。
-  - AppleImage4 掛在 `defaults` 節點，`start()` 會等 IOAESAccelerator，VM 沒有。結果 IOKit 的 config thread 永遠卡住，IOKit 不會安靜，
-    InterfaceNamer 每次命名新介面都要等 4 分鐘逾時；AppleImage4 的 nonce sysctl 也沒有回應，mobileassetd 一直重試。
-  - 修法：把上游的 SoftwareAES（軟體 AES-CBC）搬到 27，跟 17 一樣提供 IOAESAccelerator。
-    - 27 原始 `IOAESAccelerator` 的 ABI 跟 17 相同：vtable 181 槽，IOService 168 槽加上 13 個自有方法，物件 0x120。
-      位址從 fileset 讀出，寫在 `package/SoftwareAES-24A446.S`。
-    - 函式要經過帶絕對位址字面值的 stub 才能呼叫：fileset 會搬動 native kernel 的程式碼，直接 PC 相對呼叫會跳錯位置，曾經造成 instruction fetch abort。
-    - AppleImage4 用硬體金鑰 0x8a4 加密 nonce，回 unsupported 就會 panic。所以這把金鑰改由每台裝置的種子以軟體衍生（`package/SoftwareAESKeys.inc`）。
-- **待查**：有一次開機 gpu-3d 出現 3 次 fence wait 逾時。
-- **除錯工具**（scratchpad）：
-  - `dbgbreak.py`：debugserver 斷點，自己處理跨過斷點；支援改暫存器、印 Swift 類別名稱，以及用 GOT 推算 shared cache slide 後設斷點。
-  - `dyld` 還沒初始化完就查 image 清單會讓 debugserver 卡住，改用 `qMemoryRegionInfo` 找主程式。
-
-## 續報（2026-11-02 晚，Claude）：Safari 的 WebGPU（已能用）；metal2vulkan 與 Apple4；設定沒有 Ethernet（根因已縮小）
-
-- **Safari 的 WebGPU 為什麼不工作：四道關卡，已全部打通（device 24a79b2、fork 3d8ef4d、AdrenoMetal 4089943，均已推）**。
-  1. Safari 的 GPU 行程（`com.apple.WebKit.GPU`）不在 GPU 客戶端清單裡，沒有 Metal 裝置。已加入 `board.toml` 的
-     `droidvm-gpu-clients`。
-  2. 加入後，Metal 裝置在建立時被拒絕：`device: OutOfMemory(Device)`。原因是 GPU 行程的 sandbox 擋掉 `hw.physmem` 和
-     `hw.pagesize`（`hw.memsize` 沒擋），Mesa 的 `sysconf(_SC_PHYS_PAGES)` 因此回傳 -1，Turnip 算出 0 bytes 的 heap。
-     修法：新增 fork 的 Mesa 補丁 `mesa-darwin-total-memory-sysctl.patch`，這種情況改讀 `hw.memsize`。
-     影響範圍：所有 sandbox 擋這兩個 sysctl 的行程都會中這個問題，不只 WebKit。
-  3. iPadOS 27 的 WebGPU.framework 先讀 `kern.hv_vmm_present`；在 VM 裡，只有使用者預設值 `WebKitAllowWebGPUOnVMs` 為真時
-     才繼續。修法：核心內建的 `owner-hide-vmm` 加上 `com.apple.WebKit.GPU`（原本只有 audiomxd）。命令列已經到 1051 bytes，
-     超過 1023 的上限，所以改放核心內建參數。
-  4. WebGPU 只給 `MTLGPUFamilyApple4` 以上的裝置 adapter，我們的裝置只回報 Apple1–3。修法：plugin 的 `supportsFamily:`
-     依呼叫者所在的 framework 分類，只對 WebGPU.framework 回答 Apple4 = YES（比照原本 RenderBox 的特例）。
-  - 結果：webgpureport.org 列出 `adreno` adapter，`requestAdapter`／`requestDevice`／`getContext("webgpu")` 都成功；
-    webgpu-samples 的 helloTriangle 畫得出來。
-  - 尚未解決：rotatingCube 的 render pipeline 被拒（`createBindGroup: invalid BindGroupLayout`），WebKit 的錯誤訊息被隱私遮蔽，
-    plugin 端沒有拒絕紀錄。
-- **metal2vulkan 與 Apple4（`gfxprobe families`，透過新的 `droidvmFamilyBlockers:` 在裝置上跑 family 稽核）**。
-  - Adreno 840 回報 Apple1–3 和 Common1–2；Apple3 本來就是帶豁免宣告的。
-  - Apple4 多出的阻擋項目分兩類：
-    - Refused：raster order groups、imageblocks（Turnip 沒有 `fragment_shader_interlock`）、tile shaders、imageblock sample
-      coverage（Vulkan 沒有對應物）、post-depth coverage（沒有 `EXT_post_depth_coverage`）。
-    - Gap：indirect draw／ICB 的邊角情況、linear textures、depth/stencil resolve、counter sample buffers 等。
-  - 嚴格意義的 Apple4 做不到。Turnip 有 `rasterization_order_attachment_access` 和 `dynamic_rendering_local_read`，
-    以附件為對象的 ROG／imageblock 可以部分模擬；tile shaders 要拆 render pass。
-- **設定沒有 Ethernet 選單：偵測沒問題，是側欄沒有重新整理**。
-  - en0 符合 Preferences 的所有條件（type 6、family 2、subfamily 0、非 hidden、沒有 DIRECTLINK）。
-  - 用 debugserver 掛在 Settings 啟動上確認：`EthernetListItemProvider` 的初始非同步更新呼叫 `hasEthernetNetworkInterfaces`
-    得到 YES，並把旗標設成 1。但側欄的 items getter 在這之前就讀過一次（當時是 0），之後沒有再讀。
-  - 用除錯器在第一次讀取時把旗標改成 1，側欄就出現 Ethernet，所以項目、bundle 和 controller 都正常。
-  - 下一步：找出側欄重新查詢 provider 的觸發點。真機上推測是 Wi-Fi／藍牙等 provider 的狀態變化順帶觸發重繪，guest 沒有這些。
-- **對第三方 App 的影響**。
-  - 第三方 App 目前完全拿不到 Metal，因為 GPU 客戶端是白名單制；這是最大的影響。
-  - 若之後開放：Mesa heap 的修正已涵蓋擋 `hw.physmem` 的 sandbox。只問 Apple4 以上 family 的 App 一樣會被拒。
-
-## 續報（2026-11-02 傍晚，Claude）：純 arm64 程式一啟動就 PAC 崩潰（已修）；Games 開不起來（已修）；壓力測試結果
-
-- **純 arm64（非 arm64e）程式一律無法執行（device 8ea1e33，已推）**。UniXNU 的 native PAC（fork `native-pac-keys.patch`）
-  讓核心與所有行程共用同一組架構 key，而且永遠開啟。arm64 行程呼叫 shared cache 裡 arm64e 的程式時，它自己那些未簽章的指標
-  會被拿去驗證，結果就是 EXC_ARM_PAC_FAIL（報告裡的 code 0xdac11a30 其實是 `autda x16, x17` 的機器碼）。
-  實例：STExtractionService（arm64 的 XPC service）四天內在 libobjc `readClass` 崩潰 91 次。App Store 的 arm64 App 也會全部
-  遇到這個問題；先前「27 的除錯工具必須是 arm64e」的原因也是這個。
-  xnu 本來就會為這種 task 與 thread 打上旗標（`IMGPF_NOJOP`、`ARM_MACHINE_THREAD_DISABLE_USER_JOP`），Apple CPU 會據此關掉
-  它的 user JOP key。`droidvm-native-pac-user-jop.patch` 用 SCTLR_EL1 做同樣的事：
-  - 回到這類 thread 的 EL0 時，關掉 IA、DA、DB（返回位址用的 IB 保持開啟）；每次從 EL0 進核心，第一件事就是重新打開。
-  - 這類 task 的 shared cache auth mapping 用專屬的 pager key，裡面的指標不簽章。dyld pager 對這類 task 同樣不簽章。
-  - 陷阱：不能用「jop_key 為 0」當作停用的判斷。shared region 第一個 slide pager 的 key 就是 0，launchd 在 auth remap 之前
-    就會讀它，launchd 因此 PAC 崩潰，開機卡死。
-  驗證：STExtractionService 直接執行時，跑到「XPC Service cannot be run directly」才結束；15 個 App 的壓力測試沒有出現 PAC
-  報告，也沒有 respring。locationd 自己的 PAC 失敗（arm64e，Cohort:0 佇列上未簽章的物件）是另一個問題，仍未解。
-- **Games 開不起來（device af2be42，已推）**：它的 VFX 沒有 Metal 裝置就會結束（「failed to load Metal shaders library」）。
-  已加入 `droidvm-gpu-clients`，現在可以開到歡迎畫面。
-- **穩定性測試**：連開 30 個 App、連砍 backboardd 3 次、從切換器上滑關掉 App、連砍 locationd 2 次，都沒有卡死，也沒有連鎖 respring。
-- **前一段的記憶體風暴只在新 Data 第一次產生桌布圖庫時發生**：之後砍 SpringBoard，只會起 2 個桌布擴充，free 維持 1.1 GiB，
-  沒有 jetsam。
-- **切到其他 Android App 再回來時，VM 畫面是黑的（Virtualization 72d325bc3，已推，crosvm 已重建並部署）**：app 會在 surface 重建時
-  請顯示服務（`crosvm_android_display_client.cpp`）存下並畫回最後一幀，但服務只會存 CPU 路徑的幀，iPadOS 27 走的是 Vulkan blit
-  （flip），所以沒有幀可畫，要等 guest 有東西變動才會重畫。現在每個 surface 記住最後一次 flip 的來源，沒有 CPU 幀時就在新的 surface
-  重新 flip 一次。重畫在 binder thread 上跑，所以 bridge 的建立、import、flip、release 和 fallback 都改由 context 的同一把遞迴鎖保護。
-  驗證：按手機的 Home 再回來、不碰螢幕，logcat 出現「display surface scanout redrew its last frame」，畫面在，之後 guest 的新幀照常顯示。
-
-## 續報（2026-11-02 稍晚，Claude）：多工畫面的白色卡片（已修）；locationd 一重啟就連帶 backboardd + SpringBoard 一起崩潰（已修）
-
-- **白色卡片，第 1 層：快照根本沒寫進去（device 59ec0a8、fork f0dafc4，已推）**。SplashBoard 要把快照檔標成 purgeable，APFS 對
-  壓縮檔只在卷宗有 expanded records（incompat 0x200）時才允許，而這個旗標只有在建立卷宗時才能設定。舊的 Data 是用 macOS 預設的
-  `newfs_apfs` 建的（不分大小寫、沒有 expanded records）。現在 Data seed 改用 `newfs_apfs -e -x` 建立
-  （`prepare-owner-data-fixture.py --case-sensitive --expanded-records`），新的 Data UUID 是 2EE158B3。
-- **白色卡片，第 2 層：快照讀不回來（device 824043f，已推）**。SplashBoard 在 MobileGestalt 的 DeviceSupportsASTC 為真時，
-  會把快照寫成 ATX（AGX GPU 專屬紋理排列的 ASTC）。ImageIO 解 ATX 時需要行程內的 Metal 裝置，還要 AGX 私有的
-  `newTextureLayoutWithDescriptor:isHeapOrBufferBacked:` 和紋理 watermark。我們的 Metal 沒有實作這兩個，SpringBoard 也
-  沒有 Metal 裝置，所以解碼回傳 -4，卡片就是白的。MobileGestalt 是從 `/product graphics-featureset-fallbacks` 裡有沒有
-  APPLE2 或 MTL2,2 來判斷的，所以 `make-droidvm-adt.py` 從 fallbacks 拿掉這兩項（class APPLE10 與其他 family 不動）。
-  之後快照改成 PNG、由 CPU 解碼，Files 和 Safari 的卡片都有內容。舊的 .ktx 快照要等 app 再開一次才會被換掉。
-- **試過、沒採用：讓 SpringBoard 當 GPU 客戶端**。加進 `droidvm-gpu-clients` 後，app 底部的 home 指示條消失，app 內的邊緣上滑
-  完全不被辨識（UIKit「magic hysteresis reached with no gestures still recognizing」），重開機 A/B 確認是這個改動造成的，已還原。
-  根因未查。
-- **locationd 一重啟，backboardd + SpringBoard 就一起崩潰（device e5009a5，已推）**。CoreMotion 的 CLOrientationNotifier
-  會透過 AppleSPULib（感測協處理器 SPU 的 plug-in）打開方向感測服務的祖父節點，送出設定。guest 沒有這個通道，介面一直是 NULL，
-  locationd 一重啟它就重送設定、在 `sendConfiguration` 解參考 NULL（CoreMotion+0x41e20）。結果每次 locationd 崩潰或被 jetsam
-  殺掉，UI 就連續重啟兩次，觸控和手勢也會跟著出問題。修法是在 guest 核心加上 SPU 的命令通道
-  （`package/DroidVMSensorProcessor.cpp`，接收 selector 0–6，全部不做事）。motion HID 類別改名為 `AppleSPUHIDDevice`，方向裝置
-  宣告 AppleSPULib 的 plug-in 類型和 user client。類別名必須用 Apple 的：平台 sandbox 政策只放行它列出的類別，所有行程的
-  `iokit-open-user-client` 和 SpringBoard 的 `iokit-open-service` 都受限。驗證：連續砍 locationd 兩次，backboardd 和
-  SpringBoard 都沒有重啟，方向事件照常送達。
-- **仍未解：locationd 每次開機約 10 秒後崩潰一次**（EXC_ARM_PAC_FAIL；那個 code 0xdac11a30 其實是
-  `_dispatch_lane_serial_drain` 裡 `autda` 指令的機器碼，代表 Cohort:0 佇列上的 dispatch 物件已被釋放）。重啟後的 locationd 就
-  正常，有了上面的修正後也不再波及 UI。
-- **仍未解：SpringBoard 重啟後的記憶體風暴**。PosterBoard 會讓各個桌布擴充（Kaleidoscope ×2、Emoji、Mercury、Rhizome、Hello…）
-  同時用 GPU 渲染，每個 200–340 MiB 的 wired blob，wired 衝到 4.65 GiB、free 87 MiB，jetsam 因此 proc-thrashing 殺掉幾十個行程。
-  blob 頁不算進行程的 footprint（`kIOMemoryLedgerFlagNoFootprint`，為了 iconservicesagent），所以 jetsam 看不到真正的大戶。
-- **工具**：`logarchive.py` 修正（device d7b279c），原本 `log show` 停在最後一筆 timesync（看起來像時間錯亂、開機兩分鐘後沒有日誌）。
-  gfxprobe 新增 `ktxdecode`、`pitchcheck`、`spuopen`。
-
-## 續報（2026-11-02，Claude）：記憶體壓力永遠是 0（已修）；砍 render server 後停在轉圈 = dyld pager 的 16K ABBA 死鎖（已修）；metal2vulkan 的閒置 block
-
-- **記憶體壓力等級（device a60ed0e，已推）**：xnu 在 compressor 開啟時，壓力等級只看「可分頁記憶體裡被壓縮的比例」。
-  guest 的 GPU 記憶體全部是 wired（host GPU 映射的 blob），可分頁的部分掉到 0.5–1 GiB（低於 DT 給的 1280 MiB soft
-  threshold），等級仍是 0。所以沒有任何程序被要求還記憶體：render server 的 GPU 快取、Turnip 的 BO 快取都一樣，直到一個
-  尖峰把最後的記憶體吃光。`droidvm-pressure-pageable.patch` 把無 compressor 時用的 page-shortage 門檻也加進來（OR）。
-  15 個 app 的壓力測試：修正前 0 個樣本離開 0；修正後 108/122 個樣本在 Warning，Turnip BO 快取被清空，idle 後 render
-  server 的 GPU pages 從 1450 降到 946 MiB。
-- **free page 門檻（device 33fe95e，已推）**：`VM_PAGE_FREE_*_LIMIT` 是以 16K page 定的 page 數，在 native 4K 核心上只剩真機的
-  四分之一（free target 7.8 MiB）。改成乘上 16384/PAGE_SIZE：target 31.2、min 23.4、reserved 1.7 MiB。
-- **砍 backboardd 後永遠轉圈（device 32075d9，已推）**：根因在 `ipados27-bringup.patch` 為「4K 核心處理 16K fixup page」寫的
-  路徑。`dyld_pager_data_request` 在**還拿著**自己那一頁的來源頁、以及 backing object 上的 placeholder 時，去 peek 同一個 16K
-  fixup page 的另外 3 個 4K 頁。兩條 thread 各填同一個 16K 頁的不同部分時，就會各拿一頁、等對方那頁，永遠卡住（ABBA）。
-  render server 死掉時，locationd 的多條 worker 同時被喚醒、同時碰到同一批資料頁，於是卡住。之後所有碰到那些頁的 thread
-  都跟著睡下去，callservicesd → SpringBoard 註冊 display → 轉圈。實測卡住的是 `/usr/libexec/locationd` backing object 的
-  0x23e9000／0x23ea000 兩頁，paging 計數剛好等於 3 條睡著的 dyld thread × 2。修正：先 peek 兄弟頁（每次 peek 完都放掉），
-  再 fault 自己那頁。驗證：連續 SIGKILL backboardd 3 次、每次間隔 60 s，PageBusy 睡眠者都是 0；回到鎖定畫面，能解鎖、能開 app。
-  修正前是 4/4 卡住。
-- **找到它的工具（device dc66d13）**：檔案信箱 kind 8（`package/DroidVMPageInfo.c`，`export.py page CTX perm`）。stackshot 裡
-  PageBusy 等待（wait_type 22）的 context，就是 page 位址加上 `vm_kernel_addrperm`。由此印出 page 的 offset 和旗標、object 與
-  最多 4 層 shadow（各自的 refs、paging、activity、pager 狀態），pager 是 vnode 的話再印出檔名。guest 的 `vm_pages` 虛擬連續、
-  實體不連續，host 端讀不到，所以要在 guest 裡查。
-- **crosvm 裝置 worker 的 CPU（crosvm 47cd593ee，virglrenderer 899a4e17，已推）**：virtio-mmio 裝置在 guest 寫 DRIVER_OK 時
-  啟動 worker，這個寫入由 vCPU thread 處理。新 thread 會繼承建立者的 affinity，所以 virtio_blk、v_input、v_net、vu-*、
-  crosvm_resample 全都被綁在 vCPU0 的 core 2。現在 WorkerThread 改用主 thread 的 CPU 集合（0-7）。u_thread_create 也做了同樣
-  的修正，但 kgsl-sync、vrend-sync、Binder:crosvm 被 VM 設定的 GPU cgroup 放進 `/dev/cpuset/gpuworker`（cpu 7）。這是
-  10-27 vCPU 還在 2–5 時選的，現在 6 顆 vCPU 是 2–7，vCPU5 和 GPU thread 共用 core 7。這是設定問題，未改動。
-- **metal2vulkan 的閒置記憶體（分析，未修）**：plugin 的 MEM 列（核心 `native_adreno_metal_rows`，scratchpad mtrows.py）
-  顯示，壓力測試後 render server 有 547–616 MiB 的**空** pooled block（每個 pool 用 keep_room 預留一個 64 MiB 的 block，
-  `emptied=None`，所以 trim 永遠不會釋放）。開 FaceTime 時 pool block 長了 640 MiB，只放了 187 MiB，1 秒內多 wire 了
-  1.1 GiB。MA 列用 NativeAdrenoMetal.map 解出來：MA0 = `device::room::keep`。
-- **試過、沒採用：16 MiB block**（fork feefe53 的 metal2vulkan 0019 `METAL2VULKAN_BLOCK_MIB`；AdrenoMetal 8f735a2 只從
-  `/private/var/ngpu/debug/block-mib` 讀取，預設 64）。空 block 和 64+ MiB 的 blob 都消失了，但 render server 的 GPU context
-  會 hang（手機 kgsl「GPU hang detected」、crosvm「kgsl_ccmd_gem_submit GPU_COMMAND failed: Protocol error」→ DeviceLost →
-  plugin 結束 backboardd）。同一次開機 A/B，各開關 FaceTime 5 次：16 MiB 3 次 hang，64 MiB 0 次；16 MiB 加 noubwc 仍是 3 次，
-  所以不是 UBWC。fork 和 AdrenoMetal 這兩個 commit 還沒推，手機上的 plugin 是 1a47826（沒有除錯檔時預設 16），guest 已寫入 64。
-- **仍未解**：多工畫面的 app 快照是白的；16 MiB block 的 GPU hang 根因；keep_room 的閒置 block（下一步：壓力 ≥ Warning
-  時暫停 keep_room，或限制空 block 總量）。
-
-## 續報（2026-11-01 晚，Claude）：多工手勢叫不出來（兩個原因，已修）；設定點選項 0.5–1 s 是磁碟 page-in
-
-- **從畫面外滑進來（app 6171c80，已推 wip/hackintosh）**：TOUCH 模式原本只在 SurfaceView 上收觸控，而 Android 把整個手勢交給
-  第一下落點的 view：從 letterbox（畫面外的黑邊）起手滑進畫面，guest 完全收不到；滑出畫面則送出超出 ABS 範圍的座標。
-  現在整個顯示容器收觸控、換算到 surface 座標，EvdevEncoder 逐指判斷：畫面外按下先不算接觸；路徑進入畫面時在跨過邊框的點補
-  touchdown（像手指從邊框滑上玻璃）；之後到放開前都是接觸，出了畫面就夾在邊框上；從頭到尾沒進畫面的手指什麼都不送。
-  機上驗證：從畫面下方黑邊往上滑進來 → 回主畫面；只在黑邊上滑 → 沒有反應。
-- **停住叫不出多工（device f61a969，已推）**：Apple 的數位板以 120 Hz 回報每根手指、座標帶雜訊，SpringBoard 靠「停住時速度
-  降下來」分辨上滑停住（多工）和上滑（回主畫面）。手機觸控會濾掉靜止手指的抖動、app 的 keepalive 也重送同一點，同一位置對
-  iPadOS 不算移動，停住期間 SpringBoard 收不到樣本，放開時沿用停住前的上滑速度 → 每次都回主畫面。螢幕錄影對照：完全靜止的
-  合成手勢必回主畫面，加 2 px 抖動就進多工。DroidVMVirtioInput.c：有手指按著且 8 ms 沒有新 frame 時重新發布，x 交替偏 1 個
-  軸單位（約 0.07 px）。修正後同一個完全靜止的手勢會進多工。計數器 `droidvm_input_still`。
-- **設定點選項要等 0.5–1 s（量測，未修）**：手機端直接讀 guest 記憶體的計數器（觸控、HID 報告、畫面）＋ screenrecord：觸控
-  30–90 ms 內到達 guest；第一次開某個頁面，放開後 300–650 ms 才有第一格畫面，再開一次只要 40–240 ms。spindump：期間整台 guest
-  CPU 很閒（Preferences 7 s 內 0.86 s），切頁的主執行緒工作約一半是 page fault 讀磁碟
-  （`vm_fault → vnode_pagein → cluster_pagein → NativeVirtioBlock::doAsyncReadWrite → readSectors`）。上游的
-  VirtioMmioBlock 是同步的：一把全域鎖、一次一個 64 KB 請求（queue 有 8 格只用 1 格）、`IODelay(1)` 忙等完成（不用中斷）、
-  verified 模式每塊做雜湊並複製三次。冷讀 25.5 MB 檔案 0.30 s（約 85 MB/s，每個 64 KB 請求 0.77 ms）；手機 UFS 可到數 GB/s。
-  shared cache 只有 6.5% 常駐，新介面第一次出現時都要走這條路徑。結論：不是 CPU 算力不夠，是區塊驅動的等待和串行化。
-- **區塊驅動改寫（device dbe2270，已推）**：`build-droidvm-source-storage.py` 會套用 `ipados27/patches/VirtioMmioBlock/`。
-  0001 加計數器 `native_virtio_time`，記錄裝置、驗證、複製、等鎖各花多少時間；0002 改成 16 個 slot 同時在途：鎖只保護 ring，
-  等待時不持有鎖（短暫 spin 後每 20 us 睡一下），同一筆讀取最多 8 個 chunk 一起送出，驗證方式不變；另有每顆磁碟的計數器。
-  量測（各開機兩次，從 crosvm 啟動到鎖定畫面）：176/187 s → 152/152 s；整個開機期間累計等鎖 1670–1760 s → 7–8 s；
-  沒有讀取或驗證失敗。量測過程中查到的事：每個請求的 host 往返約 0.2 ms，其中 host 端只占約 60 us
-  （block worker 喚醒 12 us、執行 45 us），磁碟映像走 /data/media、沒有用 O_DIRECT，host page cache 有效；
-  驗證每個請求只要 6–35 us，不是瓶頸。單一執行緒冷讀小檔仍然是每次 page fault 約 0.1–0.2 ms，改善有限。
-- **開機時讀了 12.7 GB（一半已修，device 1dc2f68）**：開機期間從 6 GB 的 systemos.img 讀了 12.7 GB。來源是 xnu
-  `native-4k-signature-hash-cache.patch`：guest 用 4K page，16K 簽章的檔案在 `ubc_cs_blob_add` 裡會整個讀進來，先驗證 16K
-  雜湊再推出 4K 雜湊，而且這一步排在「同一個簽章是否已經註冊過」的檢查之前。用 trace 查到：開機時兩個 shared region
-  同時建立，各自替每個 dyld subcache 加簽章，兩次都落在同一個 vnode，彼此都還沒發布 blob，所以 5.6 GB 的 cache
-  被讀、被雜湊了兩次。修正（device patch `droidvm-native4k-once.patch`）：同一個 vnode 同一時間只做一次預處理，第二次
-  加入時直接複製已發布 blob（cdhash、雜湊類型、offset 都相同）的 4K 雜湊。結果：讀取量 11.9 → 6.0 GB（79 個預處理、
-  78 個沿用），SystemOS 開機讀取量 12.7 → 7.4 GB，開機到鎖定畫面 152 → 141–145 s；20.7 萬次頁面驗證 0 次錯誤。
-  剩下的 6 GB（讀 21 s、雜湊 10.5 s）還在開機路徑上：核心的 corecrypto 編成 `CC_USE_ASM=0`，SHA 是純 C；可能的方向是
-  改用硬體 SHA 指令，或是把推出來的 4K 雜湊存起來，下次開機直接用。
-- **單次傳輸 256 KB、完成偵測（device 7586bea，已推）**：0003 每個請求的 buffer 改成 256 KB，讀 139 MB 的請求數從 2463
-  降到 539；0004 等待時前 150 us 每 2 us 檢查一次，之後才每 20 us 睡一次。量測時用 root 暫時把
-  `/proc/game_opt/disable_cpufreq_limit` 設成 1（量完還原成 0），每種設定各自開機一次，等磁碟閒下來才量：
-  | 設定 | 4 KB 原始讀取（每次） | 139 MB 單一讀取 | 117 MB 三程序同時讀 |
-  |---|---|---|---|
-  | 64 KB、不 spin | 80–86 us | 0.477 s | 0.198 s |
-  | 64 KB、spin | 70–78 us | 0.465 s | 0.227 s |
-  | 256 KB、spin | 52–56 us | 0.429 s（325 MB/s） | 0.195 s（600 MB/s） |
-  4 KB 讀取的裝置往返現在是 26–40 us。crosvm 的 `virtio_blk` 執行緒被綁在 vCPU0 那顆核心上（virtio-mmio 裝置在
-  vCPU0 的 MMIO 寫入裡啟動，執行緒繼承了它的綁核）；把它們移到 CPU 0–1 後，每次都穩定在 26 us，留待 crosvm 修。
-  **量測陷阱**：OPLUS 遊戲空間常把所有核心壓在 1.0–1.1 GHz（`/proc/game_opt/cpu_max_freq`），這時同樣的 4 KB 讀取要
-  123–135 us；之前沒有記錄限頻狀態的數字都不可靠。使用者平常操作時多半也是在這個限頻下。
-- **當機（11-01 09:18 UTC）**：guest 的可用記憶體在 150 ms 內從約 1.5 GB 掉到 0.5 GB，系統開始強制軟性上限，
-  一秒內殺掉一百多個程序；09:18:50 backboardd 的 GPU context 遺失（DeviceLost），plugin 主動結束 backboardd 讓 launchd
-  重啟；09:18:54 guest 的 virtio-gpu 傳輸層在 `reap()` 收到一個對不上任何等待中指令的描述子，整個停擺（state 3）。
-  畫面從此不再更新，重啟後的 backboardd 拿不到 GPU；約 18 分鐘後它在 Turnip（`nmb_encoder_end` → libvulkan_freedreno）
-  SIGSEGV。待查：是誰在一瞬間吃掉 1 GB（同時 KaleidoscopePoster 回報 OutOfMemory）。
-- **virtio-gpu 傳輸層修正（device c23dda3，已推）**：根因是 `reap()` 讀到新的 used index 之後，沒有 barrier 就讀 used
-  element。ARM 會把這兩個讀取重排，所以可能讀到 ring 上一圈的舊 element，對應的 slot 早已釋放；讀到這種 element
-  就被判成裝置壞掉。這個 board 的其他 virtio 驅動（net、media、input、data store、OS 磁碟）都有加 barrier。修正內容：
-  每次讀 index 之後先下 barrier；對不上的 element 重讀一次，仍然對不上就略過並計數（`droidvm_virtio_gpu_stray`）；
-  新增 `abandon(ticket)`，client 關閉時把 drain 沒等完的提交交還（以前每一筆都會永久佔住一個 slot）。驗證：繪圖中途
-  SIGKILL backboardd 三次，傳輸層都維持 state 2，畫面持續更新，stray 為 0。
-- **另一個問題（2026-11-02 已修：dyld pager 16K ABBA 死鎖，見上方續報）**：連續砍 backboardd 之後，其他程序會有一批 thread 卡在 `vm_page_sleep`，
-  等一個永遠不會解除 busy 的 page，其中多數經由 `dyld_pager_data_request`，例如 locationd、contactsd、callservicesd、
-  pkd。callservicesd 卡住時，SpringBoard 在註冊 display 時同步 XPC 等它（ShellSceneKit → TelephonyUtilities），畫面就
-  停在轉圈。這段時間沒有任何 thread 在做磁碟 I/O；換回上游序列讀取的驅動再測兩次，同樣會發生（locationd 6 條、
-  contactsd 6 條）。只開機、不操作則不會出現。
-- **其他**：多工畫面的 app 快照是白的（另查）；一次開機 SpringBoard 沒起來（只畫了 3 格，重開即好，未重現）；
-  rig 的 frame-burst.sh 讀的是開機 simplefb，virtio-gpu 之後量不到東西，改用 scratchpad rec.sh（screenrecord，每格時間戳）。
-
-## 續報（2026-11-01 較晚，Claude）：base 更新到上游 UniXNU 407db1a；render server 的 GPU 位址空間用完（每個 context 2 GiB → 6 GiB）；設定的行圖示（union 目錄只列得出上層）
-
-- **上游合併（merge，不是 rebase）**：fork `wip/droidvm` c4502e8（上游 main 407db1a 的 221 個 commit）。submodule：AdrenoMetal
-  01a3721（上游 a0f0287b＋我們全部的 plugin 改動，包含原本只在本機的 exp-bgra）、GopFramebuffer ed08bd4（上游的 direct scanout 校正與
-  診斷）、ArmCpu c85e084、DarwinBoot c936dc6（上游的改動我們本來就有，樹不變）。**Adreno740 留在 627836d**：上游這批是實體 Adreno
-  core 的工作，且正好重寫了 device repo `build-droidvm-gpu.py` 要做文字替換的 `NativeAdrenoPublish.cpp`；已合併好的版本放在
-  NativeAdreno `wip/merge-up-1101`（f57a9c6），等移植那個腳本。上游的兩個 Turnip patch（render-mode、gmem-mutable-swap）套不上
-  Droid-VM/mesa，連同 bridge 0020 先不收。上游 AdrenoMetal 把診斷改成開關，板子命令列加了 `sheng-diag=1 log-gpu=1`（979/1023 bytes）。
-- **上游順便修好的**：CoreImage 的 `externFunctionNames`／kernel by name（AdrenoMetal 上游 commit）。但設定的行圖示要再修三層才出來
-  （見下）。
-- **render server 失去 GPU（已修）**：設定、Spotlight 來回操作後 backboardd DeviceLost，plugin 結束它，SpringBoard 跟著重啟（一次重啟後
-  沒接回 GPU、畫面停住）。kernel 沒拒絕任何配置；guest 的 mesa-log 開關讓 Turnip 留下 `Failed to allocate BO for autotune rp_entry`
-  （OUT_OF_DEVICE_MEMORY）。用 debugserver 取 libvulkan_freedreno 的載入位址、再用 `export.py mem` 讀 Turnip 的 `darwin_va`：
-  backboardd 在閒置首頁就用了 2 GiB 中的 1.8 GiB，設定與 Spotlight 中到 2.1–2.2 GiB。原因是 drm2kgsl 把 KGSL 給的 VBO（128 GiB）
-  平均切成 64 片、每個 guest context 2 GiB，而 compositor 要把所有 app 的 surface 映射進自己的位址空間。修正：virglrenderer 6536a4a8
-  （VBO 階梯加 192 GiB——KGSL 給得出 192，256 被拒；切 32 片，每片 6 GiB）；fork c4502e8 `turnip-darwin-va-exhausted-note.patch`
-  （位址不夠時寫下大小與用量）＋ metal2vulkan `0017-spares-within-the-address-space`（上游 0021 的 spare 區塊沒有上限，改成不超過
-  位址空間的 1/16）。驗證：5 輪設定＋三種手勢（約 25 分鐘）backboardd／SpringBoard 都沒重啟，VA 最高 2.2 GiB／6 GiB。
-- **設定的行圖示（已修，三層原因）**：
-  1. 已修：RenderBox 的 `custom_effect` pipeline 把 `displacementMap_v1`（帶 function constant 特化）以 `custom_fn` 連結，
-     metal2vulkan 的 linker 拒絕任何宣告 constant 或有靜態初始化的模組。fork 6833c6a metal2vulkan `0018`：連結前在副本裡綁定
-     constant、評估靜態初始化（離線重放：修正前被拒、修正後建成；機上 custom_effect pipeline 全部建成）。
-  2. 已修：GPU blob 頁面放在行程裡之後（10-31），整份 GPU 記憶體都算進 footprint，iconservicesagent（76 MiB）一閒置就被
-     jetsam 以 15 MB 上限殺掉，Preferences 收到 4097。device b846440：頁面改為 purgeable、在 kernel 執行緒上歸到 graphics
-     帳本且不計 footprint（XNU 只允許 kernel_task 或有 entitlement 的呼叫者這樣做），系統層級的記憶體壓力照常計算。
-  3. 已修：iconservicesagent 在 CoreImage 崩潰（CI 後端建 program 回傳 NULL，寫 NULL+0x28），因為 CI 載不到
-     `ci_stdlib`／`ci_filters`／`ci_raw`（及 stitchable 版本）。這些檔案都在，只是位在根卷上；SystemOS cryptex 以 union 掛在
-     `/` 上方，在 `CoreImage.framework` 只放了 `CoreImage.metallib`。kernel 的 `getdirentries` 讀完上層就回報 EOF
-     （`GETDIRENTRIES64_EOF`），Libc 的 readdir 因此停住，不會再做那次會切到下層的空讀，所以每個 union 目錄都只列得出上層：
-     `/` 只有 System 和 usr，`/System/Library/Frameworks` 只有 11 項，NSBundle 也就找不到 CI 的 kernel library
-     （`stat` 一直都找得到）。上游的組法和程式碼也一樣（只修了 `getattrlistbulk`）。fork 1a9a7fc
-     `native-union-getdirentries-eof.patch`（17 與 27 兩版）：union 上層讀完、這次又有讀到資料時不回報 EOF；
-     沒有下層時照舊結束。同一個 patch 也修了它帶出的 panic：讀完 `/` 後 fd 移到根卷的根，它沒有覆蓋任何 vnode
-     （`mnt_vnodecovered` 為 NULL），也不是 `rootvnode`，`ls -a` 的 `fstatat(fd, "..")` 會在 `vnode_getwithref(NULL)`
-     data abort；現在它的 `..` 停在原地。驗證：`/` 23 項、Frameworks 329 項、CoreImage.framework 142 項；
-     `Failed to load 'ci_…'` 消失，iconservicesagent 載入 Metal 編譯器縫合 CI kernel、不再崩潰，設定兩欄的行圖示全部畫出。
-     已知副作用：iPadOS 的 Libc 不替 union 去重，上下層同名的項目會列出兩次（`System`、`usr`、`CoreImage.metallib`），
-     上游 `getattrlistbulk` 的穿透本來就是這樣。另外：AdrenoMetal 334eeb8 在 library 檔打不開時寫 log；rig `panic.py`
-     改用 fileset 的 KernelCache slide 符號化（device 3804c57，原本每個 frame 都名稱錯位）；從 Mac 建磁碟時要換上
-     AMP 版 DarwinBoot（沒有 `cluster-type` 時，核心開機即 panic `recount: cannot map cluster type`）。
-- **效能**：翻頁 110.8–111.2 fps（合併前 110–111）；小工具頁 78、App 資料庫 75–95、Spotlight 45–56 fps（單次量測、大核被限 2.9 GHz）。
-
-## 續報（2026-11-01 下午，Claude）：SpringBoard 閃退、iconservicesagent 閃退與空白圖示、guest panic；設定與 Spotlight 為何卡
-
-- **SpringBoard 閃退重啟（已修）**：backboardd 在 `CA::OGL::MetalContext::create_pipeline_state` abort（SpringBoard 跟著重啟）。CA 有
-  兩種 pipeline 讀取 pass 裡沒有的 attachment：`path_blit_frag_lph`／`_lpf`（讀 color 2 的遮罩，CA 在沒有遮罩的 pass 也會建）和
-  `fixed_frag_lph_cph`（讀 color 1）。Metal 接受，metal2vulkan 拒絕。fork 69f377a `patches/metal2vulkan/0015-unattached-color-reads`
-  （`LoweringInputs::unattached_reads`：讀取給 0，不宣告 input attachment）。用 guest 的 QuartzCore metallib 重放被拒的日誌行：修正前
-  被拒、修正後建成。之後的測試沒有再出現 backboardd 閃退。
-- **iconservicesagent 閃退、設定和 Spotlight 圖示空白（部分已修）**：CoreImage 在 `CI::ProgramNode::create_program_and_arguments`
-  寫 NULL+0x28（建 program 回傳 NULL）。兩個原因：
-  1. RenderBox 用 `newFunctionWithDescriptor:` 從 IconRendering 取 `clampedPlusL_v1`，`specializedName` 設成 `custom_blend`（片段函數
-     參照的名字）；plugin 忽略 `specializedName`。fork fdd21fe `0016-specialized-name-links`＋NativeMetal exp-bgra 6c17c82：已在機上
-     確認 clampedPlusL 的 pipeline 全部建成。
-  2. iPadOS 27 的 CoreImage 把 kernel 語言的 stdlib 做成 **Metal 動態函式庫**（`CoreImage.framework/CoreImage.metallib`，函數全部
-     exported），plugin 沒有任何動態函式庫支援：每次啟動都 `Failed to load 'ci_stdlib' Metal library.`（共六個）。exp-bgra f926107
-     加上 `newDynamicLibraryWithURL:`／`newDynamicLibrary:`、`supportsDynamicLibraries` 和各 stage 的 preloaded libraries（runtime 原本
-     就支援）。待部署驗證。
-- **guest kernel panic（已修）**：開機時 osanalyticshelper 取 stackshot，「Resuming from debugger synchronization failed」：
-  `debug_ack_timeout` 是 240000 個 timebase tick（12.5 ms），vCPU 被 host 排程延誤更久就 panic。device 71750ba 內建
-  `ml-timeout-debug-ack-scale=40`。
-- **除錯工具（平行 session debugtools 完成）**：判斷都在 XNU 的 MACF 呼叫點（`task_for_pid`、`mac_proc_check_debug`、vnode 讀取 hook），
-  拒絕的是閉源的 AMFI／Sandbox policy。fork `zzye-owner-debug-task-ports`、`zzyf-owner-debug-vnode-read` 只對帶
-  `com.apple.private.droidvm.debug` 的 owner 除錯 binary、且 `owner-debug=1` 時放行（讀取唯讀）。guest shell 已能讀 data vault，
-  debugserver 已能 attach 系統程序；ssh shell 的 PATH 有 ls/grep/find 等。rig 的 `export.py`（kernel 檔案信箱）一直都能讀任何檔案。
-- **為什麼卡**（frames.trace 逐幀＋u_trace；scratchpad gestframes.py、utgroups.py、gaps.py）：
-  | 情境 | 動畫中 fps | 每幀 pass／像素 | GPU p50／p90 |
-  |---|---|---|---|
-  | 翻頁 | 110 | 1／5.5 Mpx | 2.7 ms |
-  | 左側小工具 | 79 | | |
-  | App 資料庫 | 75 | | |
-  | 設定側欄 | ~60 | 34／41.6 Mpx | 15／25 ms（翻譯＋提交 7.7 ms） |
-  | 下拉搜尋 | 46 | 17／26 Mpx | 19／36 ms |
-  Liquid Glass（多層模糊、背景擷取）讓 pass 數和像素量暴增。Spotlight 最重的幀（約 58 ms GPU）大半是 metal2vulkan 模擬
-  **no-copy buffer**：CA 把 CPU 畫的圖層（鍵盤、搜尋結果）包成 buffer texture，每幀整塊拷進來（6–27 MB）再用一個 compute
-  （threads = bytes/4）合併回去，加上上千次小 image↔buffer 拷貝。u_trace（gpu-traces）本身會把 GPU 時間拉長數倍，量幀時要關掉。
-- **工具**：plugin 日誌改為公開（`NBLOG` 用 `os_log %{public}s`），被拒的 render／compute pipeline、缺少的 selector、Rust panic
-  都會寫進系統日誌；pipeline 日誌加上 `L`（library 來源）、`D`（動態函式庫）行。用 guest 實際的 metallib 在本機重放被拒的日誌行：
-  scratchpad m2v27 worktree 的 `examples/journal_replay.rs`。
-
-## 續報（2026-11-01，Claude）：CPU 端——guest 自己要效能（virtual cpufreq）、大小核（AMP）、翻頁 110–111 fps；為什麼 CPU 閒著幀卻做不完
-
-- **掉幀不是延遲問題**：一幀從 CA 開始到 GPU 做完 p50 7.7 ms（兩幀在途的預算 16.7 ms）；錯過 tick 時約 2/3 GPU 上沒有任何幀。
-  翻頁時一幀在 Metal 層只有 1 個 render pass（89 draw），所以「每個 pass 翻完先送」不適用，已放棄；m2v 在 commit 前送半個 pass
-  有 Metal 語意風險（commit 前 CPU 還能寫 buffer），也不做。
-- **錯位的根因（單核層級）**：掉幀的區間裡有一顆 vCPU 連續忙 12–35 ms（87–90% 在執行），但 host 只跑 0.9–1.5 GHz。WALT 用
-  「忙碌時間×目前頻率」算負載、每 16 ms 視窗只升約 25%：0.9 GHz 滿載只算 25%，從底爬到頂要 40–116 ms（手機上直接量，
-  `uclat`），guest 的短時間爆量做完了頻率還沒上來。
-- **vCPU 依需求 uclamp**（virglrenderer 0682b304，已推）：GPU constraint 開著（動畫中）時把 6 個 vCPU 執行緒的 uclamp.min 拉到 1024。
-  同一次開機 0-1-2-2-1-0 交替：104–105 → 108–110 fps，幀間隔 p90 16 → 9.4 ms，延遲 p50 8.4 → 6.0 ms。
-- **OPLUS 遊戲空間**：DroidVM 被手動加進遊戲空間（`com.oplus.games` 的 `user_mark_record_key`），`/proc/game_opt/cpu_max_freq` 會把
-  CPU 上限壓到 1.1／1.0 GHz（時高時低）。測試時用 root 的 `disable_cpufreq_limit=1` 暫時解除、測完還原；是否移出遊戲空間由使用者決定。
-- **guest 自己要效能（通用路線）**：crosvm 的 virtual cpufreq（`--virt-cpufreq-upstream`，與 Linux 上游 virtual-cpufreq 驅動同介面）：
-  guest 對每顆 vCPU 的 MMIO 寫入想要的頻率，crosvm 在該 vCPU 執行緒上設 uclamp（設下去 0.2–7 ms 生效）。
-  - crosvm 1a5592aa9（wip/virtio-mmio＋wip/hackintosh）：節流 worker 要綁一顆手機上不存在的 pCPU（expect() + panic=abort 會殺掉
-    crosvm）→ 沒有那顆就不節流；prime 核心頻率表頂（4.3968）低於 cpuinfo_max（4.608 GHz）時 uclamp.max 會跟著請求被壓低 → 維持 1024。
-  - DarwinBoot 6f5724f：FDT 的 `qemu,virtual-cpufreq` → `/arm-io/cpufreq`。
-  - device 5389c07 `package/DroidVMCpufreq.c`：註冊 XNU 的 perfcontrol callout（version 5，只用 csw）：UI／above-UI／realtime 執行緒
-    上 CPU 時要最高頻，其他類別 2 ms 後要最低頻。效果和上面的 uclamp 相同（107–108.5 fps），但通用、而且逐顆 vCPU。
-- **大小核（AMP），照通用硬體原則四層都由 host 拓撲推導**：app 74a167f（`CpuPlacementPlan` 在每顆 vCPU 都綁在同一頻率層時自動加
-  `--virt-cpufreq-upstream`，`cpu_perf_requests` 預設開，4 個單元測試）→ crosvm FDT（本來就有 `capacity-dmips-mhz`／`cpu-map`）→
-  DarwinBoot 284645c（每顆 CPU 依 capacity 寫 `cluster-type`：最高 P、其餘 E、全相同則全 P；開機印 `FDT CPUs: 6 (EEEEPP)`）→
-  device abd17ab（`droidvm-amp.patch` 定義 `__ARM_AMP__` → Edge 排程器；AMP 核心遇到沒有 cluster-type 的 CPU 會 panic；
-  DroidVMCpufreq 當極簡 CLPC：每個 thread group 第一次上 CPU 時設偏好：預設 E、UI 類 P）＋ 4d4462f（有 UI 執行緒的 thread group 算
-  互動中，它的 default／user-initiated 執行緒也要最高頻；否則 m2v 的送出執行緒落在不升頻的 E 核，commit→KGSL 3.8 ms）。
-  結果：AMP 110–112.6 fps vs SMP 106–109（同條件交替開機），延遲 p50 6.5 ms，UI 工作跑在 vCPU4/5（prime）。
-- **量測陷阱**：手機平放時 guest 開機是直向，舊的方向判斷誤判成橫向 → 往 y 滑會拉出 Spotlight＋鍵盤（每幀 GPU 12–14 ms），
-  曾誤以為「手機太熱、全部掉到 75 fps」。量之前一律 `shot.py` 看一眼；guest 裡的 spindump 會占掉一顆 vCPU、1 ms 取樣還會讓
-  SpringBoard 的檔案頁被換出（假的 1.5 秒 page-in），不能拿來判斷「誰在等 CPU」。
-- **VM 設定只存在 daemon 記憶體**：app 介面存檔會寫 `files/vms.json`＋`vm_modify`，rig 腳本只做了 `vm_modify`；daemon 重啟後回到
-  10-29 的舊設定（5120 MB、1024×1366、少了三顆磁碟）而開不了機。rig `vmpersist.py`（device 75ce85d）把 daemon 的設定依 id 寫回
-  `vms.json`（留備份），改設定的腳本都會呼叫它。
-- **為什麼 CPU 閒著、幀卻做不完**：做了不干擾 guest 的排程記錄（device 81def30：`droidvm-sched-trace.patch` 在 context switch 與
-  wakeup 掛鉤，寫入 12 MiB 實體連續 ring；host 用 `tools/rig/schedtrace.py` 直接讀 guest RAM，時間和 frames.trace 同一個 mach 時鐘）。
-  翻頁 6 秒：6 顆 vCPU 最忙 19%；CA 顯示執行緒每 8.3 ms 準時被 vsync 叫醒；掉幀時關鍵執行緒大多在 `port-recv` 等訊息。31 個掉幀：
-  13 個 SpringBoard 整段閒著（沒有觸控事件或 display link 觸發；428 幀被觸控停頓切成 25 段）、12 個做了一點事、6 個 SpringBoard
-  主執行緒連續忙 9–14 ms（真的算不完）。次要問題：guest GPU 驅動的輪詢（`IODelay(5)` 會阻塞再被叫醒，某次擷取 SpringBoard 主執行緒
-  6 秒內 8,824 次微阻塞）；host 的 CREATE_BLOB／GEM_CLOSE／CREATE_BLOB_USER 往返偶爾 10–33 ms（`droidvm_virtgpu_slow_ops`）。
-- **下一步**：（翻頁）固定 120 Hz 以上的觸控注入器，排除測試方法本身；抓那 1/5 主執行緒過重的幀在算什麼。
-  （使用者 11-01 指定先做）其他卡頓與閃退：打開設定並亂點選項、旋轉、拉出左側小工具、最右側 App 資料庫、下拉搜尋都有明顯卡頓，
-  而且容易觸發 SpringBoard 閃退重啟。
-
-## 續報（2026-10-31，Claude）：iPadOS 27 翻頁 82 → 98 → 101–107 fps；GPU 依 guest 的幀需求升頻；GPU blob 不再佔 kernel 位址空間
-
-- **手機發燙**：ArmCpu 的 IPI 用 SPI 1008+core，這些 SPI 共用一個 GICD_IGROUPR／ICFGR 字，read-modify-write 沒上鎖，
-  有一顆核心被設成 level-triggered，每秒 150 萬次 IPI。ArmCpu 177a0d3（加鎖、回讀檢查、收到時清 ICPENDR），fork 4fb10c6。
-  另外停用手機上 crash loop 的 com.qti.qcc（使用者同意）。
-- **guest 記憶體用盡（畫面凍結、ssh 很慢）**：VM RAM 6 GiB；memorystatus 門檻 1280 MiB（device 65d9d21：XNU 把 inactive
-  檔案頁算成可用，一直到不了壓力警告）；Turnip 的 freed-BO cache 上限 96 MiB（fork b612590，`TU_DARWIN_BO_CACHE_MB`）；
-  metal2vulkan 空 block 回收（fork 32defe3＋NativeMetal exp-bgra，實測幾乎回收不到：空 block 是每幀的工作集）。
-- **host blit 走 KGSL 高優先**：手機 app 的 `libvulkan_freedreno.so` 換成帶 priority patch 的版本（備份 `.bak-sep3`），
-  blit 的 queue 等待 p90 6.4 → 2.3 ms。
-- **120 Hz 設定**（照 macOS 板子）：`droidvm-display-hz=120`、`ca-triple-buffer=1`（device 1ab7fdf）。display hold
-  （讓 commit 提早回傳）沒有可量到的收益。encode 執行緒提高優先度（SCHED_RR 54）也沒有收益：commit → 送出的 3.3 ms 是翻譯本身。
-- **流水線（主要收穫）**：5 ms 取樣的 spindump 時間線顯示 CA 顯示執行緒卡在 `IOMFBDisplay::can_update_ → swap_wait_timeout`：
-  CA 最多 2 個 swap 在途，第 3 個要等最舊的完成；而 swap 要等 host 回覆 blit 做完（post 後 2.8 ms，p90 9.5 ms）才算完成。
-  改成 scanout＋flush 一送出就完成 swap（device 905ee57，`droidvm_virtio_complete_on_post`，可在執行中切換）：
-  同一次開機交替 4 輪，開 101.5／98.2／95.8／98.7 fps，關 82.8／84.2／78.4／83.0；8130 幀 flush 失敗 0。安全性：CA 三幀後才會
-  再畫進同一張 framebuffer；1400 次 host blit 裡，沒有一次在 guest 開始畫第二個之後的幀之後才開始（blit 在該幀 GPU 完成後
-  p50 2 ms、最多 12 ms 開始，且優先度較高）。工具：scratchpad `tlrow.py`、`tlcap.sh`、`cop-ab.sh`、`blitrace.py`、`inflight.py`。
-- **kernel panic（已修）**：`bindfs_pagein: ubc_upl_map() failed with (3)`（KERN_NO_SPACE），開機 14 分鐘後。所有 guest blob 的頁
-  都是 kernel buffer，佔 kernel 的 buffer 位址範圍；2048×2732 下 blob 共 1.8 GB（render server 1.3 GB），先是整塊配置在還有
-  400 MiB 空閒時失敗，最後檔案 pagein 映射不到 UPL。改成配在呼叫端行程的位址空間（pageable，prepare() 固定，和 CREATE_BLOB_USER
-  一樣），kernel 不映射（device 0b73c2a，`droidvm_virtgpu_in_task`）。soak：3045 個 blob 全在行程裡、0 退回、0 panic，
-  強制結束 WidgetRenderer 兩次記憶體都正常收回。
-- **還沒到 120 的原因（量到的）**：
-  - metal2vulkan 的排程器從不扣住批次（NativeMetal exp-bgra 94b6c57 加的 Q 列：host step／gate／event／grouping 全 0），
-    73% 的提交送出時 GPU 佇列是空的。
-  - complete-on-post 之後，CA 錯過 tick 的當下大多只有 1 幀在 GPU 上，和準時的幀一樣：不再是 swap 上限。
-  - **錯位的量化**：翻頁時 KGSL 平均 busy 27%，時脈在 160–1200 MHz 之間跳（82 次取樣有 18 次在 160 MHz），但每幀 GPU
-    start→retire 6.4 ms。每幀都在關鍵路徑上，GPU 做完就閒著等下一幀，governor 看到低使用率就不升頻。
-  - 首頁編輯模式（圖示抖動，純 render server 動畫）只有 58 fps：每幀 47 個 render pass、467 個 draw、6100 萬像素（螢幕的 11 倍），
-    CA 編碼 9 ms、翻譯 8.5 ms、GPU 13.6 ms。
-  - 拖曳時畫面跟著觸控：手機 120 Hz、app 每個 vsync 收到一批觸控，和 guest 的 tick 是兩個獨立時脈。
-- **直接量 GPU（晚上）**：plugin 的 `gpu-traces` 開關（NativeMetal exp-bgra fafb7fc，`/private/var/ngpu/debug/gpu-traces`）讓 Turnip 的
-  u_trace 把每個 render pass、tile 載入／存回、clear 的 GPU 時間戳寫到 backboardd 的暫存目錄；和 KGSL trace 對齊後（scratchpad
-  `utrace.py`、`utframe.py`、`utkgsl.py`、`utclk.py`）：每幀約 4.3 ms 在命令流裡，大空檔是 host blit（prio 5）在 IB 之間搶占（約 30%
-  的幀，多 1.5–2.4 ms）。**以 pass 為單位，GPU 工作明顯隨時脈變快**（主 pass 160 MHz 4.5 ms、1200 MHz 1.5 ms），之前用整個 batch 看
-  不出來是因為混了搶占和中途變頻。三分之一的重 pass 跑在 160 MHz：governor 只看使用率（55–65%），這就是「host 看到用得少、guest
-  不夠用」的錯位。已排除：IO-coherent（virglrenderer 82e81d2e 的 `DRM2KGSL_NONCOHERENT` 開關，GPU 時間不變）、m2v 的 inline
-  memoryless 切 pass（不變）、強制 sysmem（= 預設）；強制 GMEM 會黑畫面（待查）。
-- **錯位的修法（使用者選定）：per-frame KGSL power constraint**。guest Turnip 把 high/realtime 全域優先度的 queue（只有 render server）
-  用 `DWV_SUBMITQUEUE_DEADLINE` 重建（fork 1e49d86，`patches/mesa/turnip-darwin-deadline-queue.patch`）；host drm2kgsl
-  （virglrenderer e68e95d4）給這種 queue 的 KGSL context 加 `KGSL_CONTEXT_PWR_CONSTRAINT`，並在它以動畫速率提交時（100 ms 內 6 次，
-  低於 3 次才關）用 SETPROPERTY 設最高 power level，否則清掉。A840 不吃單筆 batch 的 constraint 旗標；constraint 常駐會讓閒置首頁也
-  鎖在 1200 MHz，所以要依速率切換。結果：翻頁時 GPU 在 1200 MHz、每幀 GPU 時間 p50 6.28 → 2.69 ms（p90 9.3 → 4.1）、幀間隔 p90
-  17 → 10.7 ms、101–107 fps；閒置首頁維持 160 MHz。手機上 `usr/lib/libvirglrenderer.so` 是這版（原檔 `.bak-098ce1c7`），還沒打包進
-  APK。現在瓶頸回到 CPU 端（CA 編碼＋m2v 翻譯每幀約 3.3 ms、SpringBoard）。
-- **下一步候選**：讓 GPU 的工作不留空檔（每幀 GPU 階段縮短，或提前送下一幀）；app 端 `requestUnbufferedDispatch`
-  讓觸控不受手機 vsync 批次限制；毛玻璃類多 pass 內容的 GPU 成本（Turnip GMEM／sysmem 選擇）；CA 的 tick 對齊 host vsync。
-
-## 續報（2026-10-30 晚上，Claude）：iPadOS 27 在 2048×2732 走零 copy scanout，翻頁從 14 fps 到 72 fps
-
-- **8-bit framebuffer＋virtio display 零 copy**：上游 9eca077（render server 裡把 QuartzCore 的「虛擬裝置」答案壓成 0）cherry-pick
-  回 plugin（本地分支 NativeMetal `exp-bgra`，還沒推），render server 改出 BGRA，virtio display 直接 scanout 它的 IOSurface。
-- **卡住的是 guest 的 MaxEntries**：27 核心是 4 KiB 頁（17 也是：UniXNU 在非 Apple SoC 都用 BCM2837 的 4 KiB 配置，8E5 沒有 16 KiB），
-  2048×2732 的 surface 22 MB＝5464 段，超過 display 的 4096 上限。改 16384（device b1908f8）。host 的 udmabuf 不是瓶頸：我們的
-  udmabuf_gki_6.12（override 模式）上限 65536。
-- **記憶體**：`gfxprobe wired`（device 3089d22）。2048×2732 下 guest 4.85 GB：wired 2.5 GB（IOKit＝GPU 1.4 GB、開機保留 676 MiB、
-  security 297、zone 230、頁表 200），active＋inactive 約 2 GB，compressor 在用。GPU 的 guest blob 原本只配實體連續塊，配不到就
-  直接拒絕（XNU 不會當成記憶體壓力），連續 respring 後一路 NoMemory、行程死掉；現在配不到 64 KiB 就退回一般頁，讓 pageout
-  回收／壓縮 inactive。
-- **結果**：首頁連續翻頁 71.8 fps（virtio display 實際送出的幀），每幀等 GPU 平均 5.3 ms、flush 給 host 6.1 ms，兩段串行。
-  要到 120 fps：讓 display worker 等下一幀 GPU 的同時 host 在 flush 上一幀，以及 host 端每幀一次 GPU blit 的成本。
-- **還沒解**：開機時 render server 會卡在 Turnip 的 `CREATE_BLOB_USER`（同時 7 個 GPU 提交沒完成），abort 一次 backboardd 後
-  就正常；rig 的 touch.py 在 27 上沒效果（量測改用 input.py）。
-
-## 續報（2026-10-30 傍晚，Claude）：iPadOS 27 首頁版面修好（VM 螢幕 2048×2732、@2x），代價是幀率
-
-- **做法跟上游一樣**：上游的板子（sheng 的 Xiaomi Pad 6S Pro 3048×2032、ishtar、sirius）都是高解析 panel 加
-  `offline-legacy-unit-scale=2`，本來就跑 @2x，所以沒遇到這個問題；只有我們的 VM 是 1024×1366＋unit-scale=1。27 的 board 改成
-  unit-scale=2、VM 螢幕 2048×2732（＝12.9" 的 1024×1366 point），DarwinBoot 的開機畫面保留區 8→24 MiB。device 34c42ef。
-  VM 設定在 rig 的 `unixnu27-vm.2048.config.json`（daemon IPC `vm_modify`；手機上的 vms.json 沒有這台 VM 的磁碟，要用 rig 的檔）。
-- **結果**：UIScreen 1024×1366 @2x，SpringBoard 選 J320（iPad Pro 12.9"，screen type 110），widget 排在格子裡、圖示大小正常。
-- **代價**：render server 交的是 half-float（RGhA）幀，由 CPU 轉成 BGRA：每幀 22 MB、平均 33 ms，所以只有每秒 14–15 次 swap
-  （待機 15.3、連續翻頁 13.8）。要拿回幀率，得讓 render server 出 8-bit BGRA 幀交給 virtio display 直接 scanout（零 copy）——
-  27 選 RGhA 是因為「虛擬裝置」那個位元組（上游 9eca077 在 render server 裡把它壓成 0，後來上游拿掉了）；之前合 9eca077 那版卡住，
-  很可能就是 27 上第一次走 BGRA → virtio display 這條路，要另外追。
-
-## 續報（2026-10-30 下午，Claude）：iPadOS 27 的圖示、widget、桌布（首頁與鎖定畫面）都畫出來了
-
-- **GPU userland 升到上游最新**：上游 UniXNU/NativeMetal 的 feat/ipados27-gpu-parity 改寫了分支，拿掉 9eca077（把 QuartzCore 的
-  「虛擬裝置」答案壓成 0），換成 7183e58。之前合 9eca077 那版會讓 27 的 render server 交出一張空白幀就停住；合 7183e58 這版
-  （Droid-VM/NativeMetal wip/hackintosh a188974）不會。fork 的 AdrenoMetal pin 跟著升，metal2vulkan 從 0dfdbcd 升到 development
-  624bab39，bridge 吃上游 0017–0019（不含 0020：它要上游 Turnip 的 render-mode patch，我們的 Turnip 還沒有）。fork 476204c。
-  **iPadOS 17 也用同一個 pin，但還沒用這版跑過。**
-- **結果（5566 實機，24A446）**：render server 正常出幀；IconRendering／CoreImage 好了，首頁和 Settings 的圖示都有圖；widget
-  有內容（時鐘、行事曆、Notes、News）。
-- **桌布**：桌布要自己的 process 有 GPU：poster extension（`*Poster*`，跟 17 一樣）和 PaperBoardUI 的 `SBRendererService`。
-  後者沒有 Metal device 時 NeutrinoCore 會在 `-[NUDevice_iOS _newRendererWithOptions:error:]` assert 然後 abort。cmdline 的
-  GPU client 清單改成 `WidgetRenderer_Default,*Poster*,iconservicesagent,SBRendererService`（4 個；內建清單也加了
-  SBRendererService）。首頁和鎖定畫面（27 的大時鐘）都有桌布了。手機可用記憶體維持在 2.7–2.8 GB，沒有掉進 swap。device 8277f55。
-- **首頁版面（根因已找到，修法待決定）**：widget 疊在圖示上、圖示大一倍，是因為 27 的 UI 跑在 **@2x**：UIScreen 512×683 point、
-  scale 2（FrontBoard 的顯示模式「512x683@2x (1024x1366/2)」），MobileGestalt 的 main-screen-scale 其實是 1。24A446 的 QuartzCore
-  `-[CADisplayMode preferredScale]`：模式沒帶 preferredUIScale 時，虛擬裝置一律 ≥2，非虛擬裝置只要高度 >1080 也是 2——所以 27 上
-  任何 1366 高的 @1x panel 都會被當成 @2x（17 的 QuartzCore 沒有這段，17 是 @1x）。SpringBoardHome 拿 512×683 去比它的螢幕表，
-  只配得上最小的 iPad mini（screen type 104 = J310），J820 的 widget 尺寸就疊上去了。排除過的：螢幕尺寸（1032×1376 一樣）、
-  ADT artwork-scale-factor（改 1 一樣，已改回）、MobileGestalt 快取（27 上根本沒寫出來）。新工具：`gfxprobe mg`、`gfxprobe sbscreen`
-  （device 343ea40）。修法選項：panel 改 2048×2732@2x（像素 4 倍）、1536×2048@2x（768×1024 point，像素 2.25 倍），或在 render
-  server 的 plugin 裡把 QuartzCore 的 preferred UI scale 壓成 1（像上游改 QuartzCore 全域值那樣，不算 stock）。
-- **觸控**：手機觸控螢幕（virtio-input）照常能解鎖；rig 的 `touch.py`（直接寫 guest RAM）有送進 NativeHidInput（HID report 會增加），
-  但這次鎖定畫面和首頁翻頁都沒反應，待查。
-- **ADT 與 FDT**：動態 ADT 在 27 有開（`--dynamic`；DarwinBoot `FdtAdt.c` 從 crosvm 的 FDT 補 RAM／panic 區／boot video 保留、
-  /arm-io 裝置、CPU／GIC）。`/product` 的機種身分是從 J820 device tree 靜態複製的，螢幕尺寸不在 FDT 裡（走 virtio-gpu／GOP）。
-
-## 續報（2026-10-30 中午，Claude）：17 的功能搬到 iPadOS 27——網路、電池、App cryptex、ssh 除錯 shell、音訊
-
-- **已搬上 27 並實機驗過**：launch policy（停用 5 個 job、GPU client 清單、lsd 首次開機標記）、內建 boot-arg
-  （`package/DroidVMBootArgs27.c`）、en0（IONetworkingFamily-188 從原始碼＋virtio-net，DHCP 拿到 IPv4／IPv6）、電池（手機電量與
-  充電狀態）、時鐘、Data store、觸控／Home、動作感測、App cryptex（Safari 的 daemon；27 要 `sheng-no-lc=1` 跳過 launch
-  constraint，17 的 `owner-skip-launch-constraints` 在 27 不讀）。
-- **ssh 除錯 shell**：iPadOS 27 會在 exec 時殺掉 arm64 的 platform binary（ownertest 每次重生都被 signal 9；ownervisor 連 main
-  都到不了），所以整套工具改編 arm64e：`DROIDVM_IOS_TARGET=arm64e-apple-ios27.0`（ownervisor c6c8b2a、applebox 6e3b471、裝置
-  repo 的 toybox／gfxprobe／lsdiag／ipatool 腳本；預設仍是 17 的 arm64）。ownervisor、dropbear、自我測試都在跑，ssh 能登入；
-  root 的 `~/.zshenv` 把 `/private/var/ngpu/bin` 放進 PATH（27 的 zsh 會重設 login shell 的 PATH）。裝置 08db257、70839e1。
-- **音訊**：原本 VirtualAudio 只發布 Null_Device，HAL 雖然看到 Speaker／Mic 卻從不開。原因是 ADT 的 `/defaults vmm-present`
-  → `kern.hv_vmm_present` → MobileGestalt `IsVirtualDevice`，27 的 VirtualAudio 因此當成 Apple 的研究用 VM（裝置過濾停在
-  AllowOnlyNull、routing 設定找 `Tunings/J820/VAD/v201_*` 失敗）。解法：fork 新 patch `zzyd-owner-hide-vmm`（7c8d2f6），
-  `owner-hide-vmm=audiomxd` 只對音訊 server 隱藏 hypervisor；另外 `/product/audio` 帶上原機的 `acoustic-id`（2029）。不能整個拿掉
-  vmm-present（AMFI panic「No PMGR?」），也不能對所有 process 隱藏（SpringBoard 的背光 watchdog 會殺 SpringBoard、畫面全黑）。
-  現在 audiomxd 開了兩個裝置、拿到 hog mode，鎖定／解鎖音效經 virtio-snd 播出。裝置 0bce497。
-- **還沒搬**：桌布／Poster（extension 還在 crash）、圖示與 CoreImage（等 AdrenoMetal 9eca077 合併的 render server 卡住問題）、
-  GPU client 清單擴回 17 的範圍（14 個時手機進 swap，現在 cmdline 只給 3 個）、tools overlay、virtio-media 解碼、麥克風錄音驗收。
-- 一次開機在開機動畫後就沒再出 frame（沒有 GPU fault），同一映像再開一次正常，先當偶發。
-
-## 續報（2026-10-30 早上，Claude）：iPadOS 27 能觸控、解鎖、開 Settings；時鐘、log、信箱都接上了
-
-- **HID**：`ipados27/scripts/build-droidvm-hid-input.py` 用 sheng 的 27 版 ShengHidInput（24f1f3f，等於 17 用的 5f3a37c 再加 arm64e
-  的邊緣觸控），對 profile 釘的 IOHIDFamily 公開 header 編（`NATIVE_HID_SOURCE_API`），每個 IOHIDDevice virtual 都保有真名與
-  discriminator，再照 sheng 審過的 `hid-device-24A446.json` 按 slot 綁回原廠（53 個 binding，兩個 owned vtable 的 diversity 全對）；
-  17 的鍵盤 sink 與動作感測照搬。原廠 IOHIDFamily／IOStorageFamily 用到三個 IIG `*_Invoke`（IOService Start／Stop／SetProperties），
-  靠它們常數裡的 64-bit message ID 認出來、補進 reviewed pairing（Start_Invoke 的 stub 一啟動 NativeHidInput 就 panic）。
-- **觸控要獨立的 digitizer 裝置**（`sheng-touch-split=1`）：27 的 HID event service 是 AppleUserHIDEventService（DriverKit），
-  合併裝置的 primary usage 留在 Keyboard（1/6），probe 事後改寫無效，backboardd 只收 Digitizer/Touch Screen 的事件 → 觸控全被丟。
-  分開後：Home 叫醒、往上滑解鎖、點開 Settings 都可以（圖示空白，見下）。
-- **native `__DATA` 槽位**：fileset emitter 把 native `__DATA` 固定在 collection `__DATA` 開頭，後面緊接保留的 kext data（Libm），
-  只剩 16 KiB。virtio-input 的 queue、display 的 scratch、信箱 buffer 改成執行期配置（`DROIDVM_INPUT_DYNAMIC`、
-  `DROIDVM_VIRTIO_GPU_DYNAMIC`、`DROIDVM_EXPORT_DYNAMIC`），現在剩 336 KiB。
-- **信箱 4 MiB**：資料 buffer 在第一次 poll 時配連續記憶體並公布實體位址，`export.py` 改讀公布的位址：75 KB/s → 1.8 MB/s。
-- **時鐘**：27 也從 crosvm 的 PL030 設日曆（`DroidVMClock.c`，在 `native_touch_probe` 裡、launchd 之前）。
-- **unified log**：macOS 27 的 `log show` 要 archive 的 Info.plist 帶時間參考（各 store 的 oldest、end），`logarchive.py` 現在從
-  timesync 記錄算出來寫進去；整份 249 MB 約 6 分鐘，之後增量。Metal plugin 的訊息多半是 `<private>`，要開 private data 才看得到。
-- **Settings 圖示空白的原因**（log）：IconRendering 讀到 device 的最大 texture 是 0（`too large MTLTexture (max: 0x0)`）、
-  CoreImage 的 metallib（ci_stdlib、ci_filters…）全部載入失敗，接著在 `CI::ProgramNode::create_program_and_arguments` 當掉；
-  還有 heap texture 被拒。上游 AdrenoMetal 9eca077（metal2vulkan 624bab39、heap texture 大小、render server 8-bit framebuffer）
-  有相關修正：本機已合成 `merge-9eca077`（0d55f46，衝突一處、取上游等價修法），但換上後 render server 初始化完就停住、只送一格
-  blank，已還原到 7da9d3d（fork 的 bridge patch 清單與 m2v pin 也還原，diff 留在 scratchpad）。要開 private log 再查。
-- **陷阱**：(1) 換 plugin 時原地覆寫正在用的檔案，kernel 快取的簽章 blob 對不上（`CODE SIGNING: rejecting invalid page ...
-  cs_mtime != mtime`），只 respring 不夠，要重開 VM。(2) `deploy27.sh` 會把 `out/kernel.nm` 換回 native 位址，每次都要重跑
-  `fileset-syms.py`，否則 rig 讀到的全是錯的（還會誤報 panic）。(3) 叫醒後約 2 秒就熄屏（J820 是 Face ID 機型）；probe 在
-  transfer 少於 2 次時不受理 Home，熄屏的 respring 後要先用 `touch.py`（寫 guest RAM，不碰手機畫面）點一下。
-- **下一步**：查合併版 plugin 卡住的原因（private log）→ 換上後應能修好圖示／CoreImage、frame 變 8-bit 直接給 virtio display；
-  iconservicesagent 的 inactive 上限 15 MB（J820 的 jetsam 設定）；Liquid Glass 的重影；網路、音訊、電池、App cryptex。
-
-## 續報（2026-10-30 清晨，Claude）：iPadOS 27 的鎖定畫面用 Metal 畫出來了（AdrenoMetal＋Turnip，virtio-gpu＋drm2kgsl）
-
-- **kernel**：17 的 virtio GPU（傳輸、3D、display）和 NativeAdreno 給 Metal 的那面（`build-droidvm-gpu.py`）放進 27 的 display
-  archive；staged AGXAccelerator 掛在 24A446 原廠 IOGPUFamily 下（IOAcceleratorES 136 bytes 對得上，publish stage 5）。Adreno740／
-  AdrenoMetal 不當 component（會連 sheng 的整個 GPU driver 一起編），改由 `ipados27/scripts/link-droidvm-gpu-sources.py` 把 checkout
-  連進 tree。virtio GPU 那 9 MiB 的 queue／command buffer 改成開機時配一塊連續記憶體（`DROIDVM_VIRTIO_GPU_DYNAMIC`），因為 native
-  `__DATA` 要塞進原 kernel 的槽位。fork 的 accelerator stub 也改成 `ldr x16 / br x16` 絕對位址。
-- **userland**：fork 的 ios27 target 直接能編（Mac 上 Xcode 27.1；rust 1.98.0 要先 `rustup component add rust-src`）：Turnip 36 秒、
-  plugin（含 Rust bridge 的 PAC trampoline）4 分鐘。Data seed builder 加 `--plugin build/adreno-metal-plugin27`（fork 的
-  add-gpu-plugin-data.py 加 `--plugin`、`--clients`），trust 用 `build-droidvm-trust.py --owner .../trust.json`（owner module＋三個
-  原版 module），boot-arg `sheng-gpu-addon=1`、`droidvm-gpu-clients=` 同 17。backboardd 載入 plugin，CA 的 RGhA render pipeline 49 個成功。
-- **記憶體**：揮發性 2 GiB Data 一次開機就吃掉 781 MiB guest RAM，GPU 要的連續 blob 頁配不到（64 MiB blob 被拒，
-  `vm_page_find_contiguous` 掃完 112 萬頁沒有 256 KiB 空段）。改走 17 的 data-store：`droidvm-data-persist=2`、VM 加第三顆
-  `--virtio-mmio-block .../UniXNU27/data-store.img`（`make-data-store.sh 16`）、seed 放大到 12 GiB。**換 seed 就要重建 data-store。**
-- **黑畫面的原因**：27 的 render server swap 的是 half-float（'RGhA'）frame，virtio display 只吃 BGRA，所以走 NativeLegacyDisplay
-  的 CPU 轉換寫進 GOP framebuffer，而那份複製在 GPU 畫完之前就讀 surface（每一格都黑）。`LegacyDisplayProbe.cpp` 現在在這種
-  複製前等 GPU 做完（同 virtio display worker 的作法，最多 200 ms）；BGRA 但 virtio display 忙著拒收的不等。之後鎖定畫面（日期、
-  時鐘、Swipe up to open，黑桌布＝@1x 已知問題）出現，約 10 秒後照 iOS 行為熄屏——27 board 還沒有 HID 輸入，叫不醒。
-- **陷阱**：每次建 seed 都是新的 Data volume UUID；改 defconfig 之後要 `unixnu defconfig -D <board> droidvm_ipados27_defconfig`
-  重新合併 work dir 的 `.config`，再刪 `kern_exec.o`（XNU 的 make 不追 define），不然 kernel 還是舊 UUID → `offline scratch Data
-  mount failed: 2`。seed builder 現在會提示。
-- **下一步**：HID 輸入（觸控、按鍵）讓畫面能叫醒、解鎖；half-float frame 直接給 virtio display（GPU 轉換，免掉 CPU 轉換）；
-  App cryptex、DroidVMBootArgs.c、關機卸載的 vnode_rele_ext panic。
-
-## 續報（2026-10-30 凌晨，Claude）：iPadOS 27 的 SpringBoard 起來了；顯示接上但沒有 GPU，畫不出畫面
-
-- **SpringBoard 的兩個 crash**：(1) 沒有顯示器 → `-[FBSDisplayMonitor _initWithDisplays:...]` 自己 trap（sheng 的 `sheng-exc-name`
-  讓例外進 kernel log，Mac 上掛 SystemOS cryptex 用 `ipsw dyld a2s` 符號化；slide 從 pc 附近 8 個指令字在 cache 裡找、要 16K 對齊）；
-  (2) 接上顯示後 `CASecureIndicatorLayerInvalidName`（J820 是 Medina 機型，SpringBoard 的指示燈圖層沒有名字）→ Data seed 寫入
-  `com.apple.coreanimation CAEnableMedina=false`（`ipados27/scripts/seed-data-prefs.py`）。之後 SpringBoard 停在 UIApplicationMain 待機。
-- **顯示**：`ipados27/scripts/build-droidvm-legacy-display.py` = sheng 的 27 legacy display（GopFramebuffer 的後端掛在原廠
-  IOMobileFramebufferLegacy 底下，ABI 用 sheng 審過的 legacy-display-24A446.json），畫到 DarwinBoot 的 GOP framebuffer。stub 改用
-  `ldr x16 / br x16` 讀絕對位址，不需要 sheng 的 native-slide。backboardd 的 CA 有 primary display，但只送一張黑 frame：27 kernel 沒有
-  GPU，CA 的 render server 用 Metal 合成（QuartzCore 有 SWContext，但只用在 external update）。**下一步：把 17 的 virtio-gpu +
-  drm2kgsl GPU 堆疊搬到 27**（kernel：DroidVMGpu／VirtioGpu 3D／display 與 24A446 IOGPUFamily 上的 accelerator，要換上游 Adreno740
-  的 27 驅動；userland：Data seed 的 GPU plugin、ios27 Turnip／metal2vulkan）。
-- **檔案信箱**：DroidVMFileExport.c 進 27 的 archive（buffer 256 KiB，因為 native `__DATA` 要塞進原 kernel 的槽位），rig 的
-  `export.py ps/ls/get`、`crashes.py` 可用；`stacks+*.ips`（stackshot）含所有行程的 thread 堆疊，是看 userland 卡在哪的好工具。
-- **fork**：RELEASE 參考 kernel 也替 `__zone_site_register` 補 stub（DEVELOPMENT 編的 archive 用了 kalloc_data）。
-
-## 續報（2026-10-29 近午夜，Claude）：iPadOS 27 的 launchd 起來了，userland 開到 SpringBoard
-
-- **Data seed**：`ipados27/scripts/build-droidvm-data-seed.py` 用 24A446 自己的 /private/var 做新的 APFS volume（fork 的
-  prepare-owner-data-fixture.py 改成由呼叫端釘 launchd 雜湊），打包、放大成 2 GiB 揮發性 container、跳過 Setup（`--build=24A446`）。
-  在 Mac 的系統碟做（ssh 進來的行程不能在外接 DATA volume 上 attach 映像），約 20 秒。defconfig 的 Data UUID 換成 seed 的。
-  還沒加 App cryptex、GPU plugin、ownervisor；Data 沒有 data-store，重開就回到 seed。
-- **Trust cache**：`ipados27/scripts/build-droidvm-trust.py` 把 IPSW 原版的 static／SystemOS／App 三個 version-2 trust module
-  原封不動包成 DarwinBoot 的 TrustCache bundle（3711 筆）。沒有它 AMFI 會拒絕 /sbin/launchd（adhoc、CT policy 0）。
-- **boot-arg**：`interrupt-masked-debug-mode=0`、`sched_preemption_disable_debug_mode=0`（DEVELOPMENT kernel 的 625 µs 看門狗，
-  vCPU 被 host 搶占就觸發）。
-- **現況（P4 進行中）**：Data（OwnerData）掛上，launchd 跑完 boot task（「Early boot complete」），上百個 daemon 起來，backboardd、
-  SpringBoard 都有啟動；SpringBoard 跑約兩分鐘後 crash、反覆重啟，launchd 進入關機，卸載時 kernel 在 vnode_rele_ext panic
-  （usecount 變負）。下一步：拿到 SpringBoard 的 crash 原因（這台還沒有顯示器：27 的 MOBILE_DISPLAY／GPU 都還沒接），以及關機
-  卸載的 vnode 參照問題。
-
-## 續報（2026-10-29 更晚，Claude）：上游 bump 到最新；iPadOS 27 kernel 掛上 root（OS＋SystemOS），停在 Data
-
-- **上游 bump**：fork 併入 UniXNU `feat/ipados27-gpu-parity` 6ad1297（ArmSmmu4K 的修正、刪掉 host pipeline cache）；GPU userland
-  （AdrenoMetal、Adreno740、bridge patch、Mesa）與 RamBlock 留在我們的版本：上游 metal2vulkan patch 重新編號、Turnip 換了 render
-  mode patch，跟 board 自己的旋轉／佇列優先權 patch 衝突，要量過才換；RamBlock 4be2d7e 只在 Install（sheng-data-reset）時才建
-  Data store，DroidVM 新 VM 的空白 data-store.img 會永遠存不進去。sheng 6ed0ba4 的 kernel 改動（每次開機丟掉 LaunchServices 資料庫）
-  已移植到 27 board。
-- **AppleImage4 那個壞指標是我自己的錯**：先前手動補的配對把 `read_random`（0xfffffe000ae9bd20）認成 `SHA512_Init`（字串掃描
-  跑過了函式結尾）。AppleImage4 取亂數時拿到 SHA-512 context，把它 `__bss` 裡的介面指標蓋掉。改正後，其餘 stub 逐一對照原廠
-  反組譯與 xnu-12377 原始碼一次補 28 個（cs_blob／bufattr／proc／thread／task accessor、mach_vm_region、OSAction 等），stub
-  呼叫點 65 → 24（剩下的都在這台不會載入的 kext 或 DriverKit RPC 路徑）。
-- **資料參照**：emitter 對沒配上的 kext→kernel 資料參照會原地加 slide 留著，落在 native 的某個物件上（kernel.json `missing`）。
-  APFS 的 vnode op 表因此把 3 個 named-stream vnop desc 指到 native zone 資料，vfs_fsadd 當掉；sandbox 的 sysctl `audio_active`
-  也是。`fileset-reviewed.json` 新增 `data` 清單補上。IOHIDFamily 還有一個只讀不寫的 32 位元旗標沒配（落在 0 上），先不動。
-- **其他修正**：lockdown 時 PTE contiguous hint 的 assert（emitter 把 4K kernel 的 `__TEXT` 放在 16K 邊界）→ 暫用
-  `use_contiguous_hint=0`，正解是 emitter 對齊 64 KiB；ArmCpu 52454a2 在 xnu-12377 上 IRQ handler 還沒裝就收到中斷 → 27 需要
-  ArmCpu fe98808（目前只在 Mac 的 27 樹用 ignored `ipados27/local.toml` 覆寫，fork 的 pin 沒動，等 17 量過再釘）；sheng 的
-  SIGPdisabled recovery 在第一顆 secondary 啟動時搶先清旗標 → 預設關閉（`sheng-sigp-recover=1` 才開）；ADT 補
-  `/chosen/kernel-ctrr-to-be-enabled = 0`（12377 在 bsd_init 的 DTrace SDT 前要它）。
-- **現況（P3 達成）**：6 顆 CPU 都起來，BSD、Skywalk、APFS、IOSurface 起來；VM 接上 24A446 原版 OS／SystemOS raw 磁碟（唯讀
-  virtio-mmio）後，OS volume 以 root 掛載（APFS ARV 啟用），owner chain 掛上 SystemCryptex，停在「offline scratch Data mount
-  failed: 2」：還沒有 iPadOS 27 的 Data seed，這是 P4 的下一步。
-- **rig**：`kcdiff.py`（guest 記憶體對照映像）；panic.py 在 fileset kernel 上的符號是錯的，改用 scratchpad 的 kcsym.py 對
-  out/kernel.nm。
-
-## 續報（2026-10-29 深夜，Claude）：iPadOS 27 arm64e kernel 在 8 Elite Gen 5 上開到 AppleImage4
-
-- **P2 完成**：裝置 repo 新增第二個 board `ipados27/`（schema 2，iPadOS 17 的 board 不動），XNU series = 上游 sheng 的
-  iPadOS 27 bring-up（扣掉 SoC 專屬的部分；它已含上游移植的我們大部分 17 patch）＋我們只有 Gunyah 才需要的（不用 WFE、
-  idle 一律 WFI、early trace、pmap write-back、GPU grant pattern、launch policy hook、早期 panic 記錄）。arm64e kernel 連結成功，
-  並 prelink 進 24A446 的 fileset kernelcache（為此在 fork 補上上游沒公開的 RELEASE+LTO 比對用 kernel 建置）。
-- **儲存（步驟 2）**：照 sheng 的 source storage 做法：IOBlockStorageDevice 從公開原始碼編譯，原廠 storage family 載入後才註冊、
-  掛在原廠類別底下，再用 17 的 personality 經 IOCatalogue 配上 NativeVirtioBlock、NativeRamBlock 和 Data store。24A446 的
-  OS／SystemOS raw image 與簽章 root policy 都已產生，雜湊與 OS profile 的 pin 完全相符（policy 117 MiB，上限 128 MiB）。
-- **開機（P3）**：手機上另開一台「UniXNU 27」VM（17 的 VM 保留）。DarwinBoot 交接成功（ADT 補 RootPolicies 欄位）。kernel
-  依序修掉：random-seed 要 256 bytes（12377 少了會在 console 出來前 panic）、fileset 裡原廠元件呼叫到沒配對的 kernel 函式
-  （`ipados27/fileset-reviewed.json` 逐一附證據補配對，stub 呼叫點 162 → 65）。目前跑完 corecrypto FIPS POST（全過）、IOKit、
-  NVRAM、lockdown mode，停在 AppleImage4 建介面表時讀到壞指標：kernel 與 24A446 原廠 kext 之間 image4／code-signing 介面的
-  ABI 差異，是下一步。
-- **待處理**：5566 上的 iPadOS 17 VM 在我停／開它、重啟 daemon 之後開機 panic「offline scratch Data mount failed: 2」，
-  Data 的 RAM disk 沒出現；開機碟沒動過。沒修（重建 Data seed 會清掉 Data），等使用者決定。
-
-## 續報（2026-10-29 晚，Claude）：卡頓與閃退修掉、上游 GPU parity 合進來（約 1.7 倍幀數）、arm64e 可行性、iPadOS 27 計畫
-
-### 隨機卡頓（Today／App Library／Spotlight／設定，0.2–1.8 s）
-兩層根因，裝置 repo 1d8a612：display worker 判斷「這幀的 GPU 工作做完了沒」時 TryLock 每個 client 的 `c->lock`，client 正在任何
-method 裡就當成沒做完 → 改成 per-client `fenceLock`；backboardd 的 64 MiB CREATE_BLOB 以 4 MiB 實體連續塊取頁，VM 跑久了要 0.5–1.8 s →
-改 256 KiB 塊（40–70 ms）。同一次開機老化後 A/B：舊版 4 輪 4–5 幀 >200 ms，新版 0。
-
-### 設定桌布、Stage Manager 閃退（整個 UI 重啟）與設定 App 崩潰
-- respring：NativeAdreno 判斷 OOL 輸入的條件錯（XNU 對 OOL 呼叫照樣把 `structureInput` 指向空的 inband buffer）→ 超過 4096 bytes 的
-  EXECBUFFER 全被拒 → Turnip DeviceLost → backboardd 被結束（NativeAdreno 32e864a）；另一個 44.5 MiB 分散頁 blob 被拒（裝置 4161a9a，1 MiB 大請求 buffer）。
-- 設定 App：mimalloc v3 在 Apple 平台用固定 TSD 108/109，正是 Swift 的 slot（fork 88675ae 改 v2；之後上游改回系統 allocator）。
-- 找 Turnip device loss 的方法：guest 開關 `/private/var/ngpu/debug/mesa-log`（NativeMetal c9f76cf）→ MESA_VK_ABORT_ON_DEVICE_LOSS → crash report。
-
-### 上游 `feat/ipados27-gpu-parity` 的 GPU 那一半
-合進：metal2vulkan 0dfdbcd＋AdrenoMetal 17 個 bridge patch（收了我們 5 個；我們的 2D 引擎旋轉、佇列優先權 rebase 上去）、Turnip 的
-紅黑樹 GPU 位址配置與 size-class BO 快取（我們另加 PROC_LIMIT 記憶體壓力釋放）、AdrenoMetal／GopFramebuffer 直接 merge。
-沒合：iPadOS 27/arm64e 移植、Adreno740 的實機驅動（本板 3D 走 virtio-gpu）、「每個行程都給 native device」（保留 clients 名單）。
-抓到並修掉上游一個 bug：surface import 保留在 cache 命中時存了呼叫者的 IOSurfaceRef → backboardd 約每 30 s 崩一次（NativeMetal 7da9d3d）。
-8 Elite Gen 5 上剛開機各 4 輪同樣手勢：100 s 內幀數 1572–2071 → 3283–3523，backboardd 每幀 CPU 21–31 → 9.5–9.7 ms，>40 ms 的幀 1–5 → 0–1。
-推上：fork 82744fe、裝置 b8e5279、NativeMetal 7da9d3d、NativeAdreno 627836d、NativeMobileDisplay 364ce27；三支手機中兩支已部署。
-**未解**：8 Gen 3 那支開機後一次 backboardd NULL deref（`tu_CmdCopyImageToBuffer2` ← metal2vulkan `ShadowCopy::record_gated` 的
-`ShadowTarget::Rotated` 分支＝我們的 0011 旋轉 patch；只有橫向畫面走這條路，8 Elite Gen 5 的測試都是直向）。
-
-### arm64e 可行性與 iPadOS 27
-三支手機在 Gunyah pseudo-unprotected 下 PAC 都可用（EL1／EL0、五組 key、FPAC），細節與 8 Gen 3 那支的一次手機重開見
-`plans/IPADOS27_BUMP.md`。使用者決定直接 bump 到 iPadOS 27，參考 Droid-VM/macOS-DroidVM（macOS 27 arm64e 已在 DroidVM 開到桌面）。
-
-## 續報（2026-10-29，Claude）：從零建置自動化——`build-droidvm-all.py`＋`fresh-deploy.sh`；applebox 獨立成倉庫
-
-使用者要求「跑通目前的 build 流程、做成自動化腳本」，並在 8 Gen 3 那支手機上刪掉原本的 UniXNU、部署新的。以前的 build 環境是一路手動補出來的
-（reference candidate、mesa-work、Data seed 鏈、plugin 與工具事後 stage 進 guest），全新 checkout 根本跑不起來；現在全部收進腳本。
-
-### 建置（build Mac）：裝置 repo `scripts/build-droidvm-all.py`
-從全新 clone（fork `wip/droidvm`＋裝置 repo `wip/hackintosh`）一路做到 `out/droidvm/release/`（`droidvm-disk.img`、`os.img`、`systemos.img`、
-`kernel.macho`、`release.json`）。步驟：setup → volumes → policies → data-base → reference → kernel → package → tools → plugin → data →
-trust → payload → images；每步一個 stamp（`--from`／`--only`／`--list`），log 在 `out/droidvm/build-all/logs/`。
-一路修掉的斷點（都在腳本裡處理）：
-- **hdiutil 在 ssh 下不能掛外接卷**（映像檔或掛載點在 `/Volumes/DATA` 都被拒）：OS 映像複製到 `/tmp/droidvm-build-$USER` 並掛在那裡，
-  tree 內 `target-volumes/{dmg,os-mount}` 是 symlink；seed 腳本從 `/tmp` 下的腳本副本跑（它們的暫存映像在 `ROOT/build`）。
-- **Data 卷 UUID**：新 fixture 的 APFS 卷 UUID 每次不同，kernel 靠它掛 Data → build kernel 前寫進 `.config` 的 `CONFIG_XNU_OWNER_DATA_VOLUME_UUID`。
-- **reference candidate**（storage／display audit 要讀「沒有 storage/display driver 的本板 kernel」）：以前是 10-21 手動留下的；現在在
-  `out-reference/` 用裝置 repo 副本＋關掉 storage/display/owner-root 的 defconfig＋精簡 archive 清單自動 build。
-- **DarwinBoot.efi** 要用 unixnu 準備的 LLVM toolchain（`CLANG_BIN=out/droidvm/toolchain/`；Apple clang 沒有 llvm-lib）。
-- **Mesa**：上游沒有準備腳本 → 腳本自建 `.cache/mesa-venv`（meson 1.12.1、Mako 1.4.3）、bison/flex 連結、`mesa-work` 依 pin sparse clone＋依序套
-  patch；metal2vulkan 依 pin 淺取。plugin 另外需要 host Turnip（錄 Turnip 第一個 submission 給 plugin replay）。
-- NativeAdreno 的 hostsim 缺 `proc_selfpid`（上游 4fed9a1 加了呼叫）→ fork 修（NativeAdreno 7b61139）。hostsim 的 **deferred-pressure 檢查失敗**
-  （上游 Turnip patch 與測試不一致，舊 tree 從未重跑）→ 記在 `release.json` 的 `checks`，不擋 build；待查。
-- kernel link 失敗後會留下 `startup.o.json` 沒有 `startup.o` → 腳本自動刪 record 讓 bootstrap pass 重跑。
-- IPSW 的 OS／SystemOS 卷遠端只有約 1.5 MB/s：`--ipsw-cache` 從別的 checkout 的 `out/ipsw/<build>` clone（仍照 board.toml 的 sha256 驗）。
-
-### 動態 ADT 接進正式流程
-`board.toml` `[payload.adt]` 改 `--dynamic`，fork 的 `drivers/DarwinBoot` pin bump 到 b2ad902：同一個 payload 能開帶 snd／battery／media 的 VM，
-不再手動 swap ADT、手動換 DarwinBoot.efi。owner 工具（applebox、ipatool、debugserver、lsdiag）也直接烤進 Data seed，不再開機後 stage。
-
-### 部署（rig）：`tools/rig/fresh-deploy.sh [--build] [--yes]`
-停舊 VM、從 daemon 與 app 的 `vms.json` 刪掉（留備份）、清掉 VM 目錄，推 release 的 OS／SystemOS／開機碟與 edk2 firmware、建空 Data store、
-裝 `CROSVM_BIN`，用 `tools/rig/unixnu-vm.template.json`（新 id、手機的 br-wifi 與 app uid）建新 VM，開機、放 ssh key。
-
-### applebox 獨立倉庫
-`github.com/Droid-VM/applebox`（使用者 10-29 指示）：`build.py OUT [--entitlements PLIST]`。裝置 repo 以 `feeds.toml` 釘 commit（kit → tree 的
-`kits/applebox`），`build-droidvm-applebox.py` 只剩包裝（簽 `package/debug-entitlements.plist`、寫 owner trust）。
-
-### 實機驗證（10-29，8 Gen 3 那支手機）
-- 舊的 UniXNU VM（daemon、app 的 `vms.json`）已不在，只剩它的目錄（映像、Data store 與 5 份 16 GiB 的 store 備份）→ 全部刪除；新 VM 由
-  `fresh-deploy.sh` 建立，crosvm 換成 wip/hackintosh 的 d5c13c494（舊的留 `crosvm.bak-63b2de59`）。
-- 開機：DarwinBoot 從 FDT 補出「2 disk + data store、5 input、net、gpu、snd、1 media」；新 seed 的 Data（新 UUID）掛上；**首次開機約 5 分鐘**
-  才出第一張圖（新 Data 要建所有 app／extension 的 container），之後鎖定畫面、主畫面（時鐘／備忘錄／行事曆小工具）正常，經 virtio-gpu＋Metal
-  （2 個 GPU client、53 次 fenced submission、0 timeout、0 refusal）。en0 拿到 IPv4／IPv6。狀態列電量＝手機電量。
-- virtio-media：found／up、9 個 command、0 timeout；virtio-snd：stage 3、2 streams、0 error；電池 IOPMPowerSource 已發布。
-- debug shell 全部從 seed 出來就能用：applebox（34 個指令，新倉庫建的）、ipatool、debugserver（lldb-19.1.7）、ownervisor（`ctl.sock`＋`app.sock`）、
-  dropbear（ssh）——不再需要開機後 stage。
-- 仍開著：桌布黑（Poster 問題，見 memory）；兩格小工具首開空白；hostsim 的 deferred-pressure 檢查失敗（不擋 build）。
-- **libimobiledevice 也進了流程**（使用者 10-29）：`scripts/build-droidvm-libimobiledevice.py` 把 10-28 的手工建置寫成腳本（libplist 2.6.0、glue 1.3.1、libusbmuxd 2.1.0、OpenSSL 3.0.15、libimobiledevice 1.3.0，release tarball 依 SHA-256 釘死）。21 個工具各自連一份 OpenSSL 共 70 MB，payload 放不下 → 做成**一顆 4 MB 的 multicall binary**（每個工具的 object `ld -r -alias _main _<tool>_main` 後只匯出它；工具是 hidden visibility，改名的 main 會留 hidden，所以用 alias），seed 裡每個工具名是連到它的 link。實機：21 個工具、plistutil XML↔binary 往返正確，ideviceinfo 乾淨回報 No device found（guest 沒有 usbmuxd／配對）。乾淨 clone（a746e1b）從零重跑全流程（含 OpenSSL 等相依）通過，17 分鐘。順手修兩個流程 bug：重跑的 data 步驟會重做 seed（否則新工具進不了 seed）；每次執行先重組 tree（tree 裡是 scripts 的副本，會過期）。
-- **ownervisor 獨立成 debug shell 倉庫**（使用者 10-29 選「整個 debug shell」）：`github.com/Droid-VM/ownervisor` 包含 manager（ownervisor、ownerctl、ownertest）、它提供的 shell（applebox〔釘 Droid-VM/applebox〕、dropbear、zsh、debugserver、libimobiledevice 的 build 腳本）、debug entitlement 集、內建服務（dropbear＝ssh、selftest 開機啟動；serial-shell 有定義但不啟動——本板 /dev/console 還沒接到 UART）。`build.py OUT` 產出照 guest 擺放的 `bin/`、`services.d/`、`enabled/` 和一份 `debug-shell.json`（全部 CDHash）。裝置 repo 只留板子自己的：kernel 拉起 ownervisor 的 hook、seed 擺放、GPU probe 服務、toybox／gfxprobe／ipatool／lsdiag；`build-droidvm-ownervisor.py` 從 `kits/ownervisor` 建、一份信任紀錄取代六份。實機（8 Gen 3）驗過：服務、兩個 socket、所有工具，ssh shell 裡 LaunchServices 可用（bootstrap port 修正正常）。流程修正：本板格式下本機 `unixnu.lock` 會蓋過 feeds.toml 的 pin，`build-droidvm-all.py` 每次以 `fetch --update` 跟上 pin。
-- **推上去之後再從乾淨 clone 跑一次全流程**（不帶任何手動同步）：fork 1c8e709＋裝置 312cb4a，`build-droidvm-all.py` 從 clone 到 release 一次跑完、約 16 分鐘（有 `--ipsw-cache`），`release.json` 的來源都是乾淨 commit。
-- 已推（後續）：裝置 repo `wip/hackintosh` ..b0fe9c8、Droid-VM/ownervisor `main` 65fc2c7。
-- 已推：裝置 repo `wip/hackintosh` b3ec07b..312cb4a、fork `wip/droidvm` ca1aaf9..1c8e709（DarwinBoot b2ad902、Adreno740 7b61139）、
-  Droid-VM/NativeAdreno `wip/hackintosh` 7b61139、新倉庫 Droid-VM/applebox `main` 2307bb9。
-
----
-
-## 續報（2026-10-28 晚，Claude，手機 5566）：TODO 6 電池完成；TODO 3 音訊整條原廠堆疊通；TODO 5 GPS 調查完、暫停
-
-這條線在 5566（rig `/root/gitrs/UniXNU/droidvm-5566`，裝置 repo worktree `UniXNU-droidvm-audio`，branch `wip/audio`）上做，
-和 5567 的 TODO 2 分開。分工原則（使用者 10-28）：**crosvm 提供通用設備（Windows／Linux 也能用）；XNU 讀通用設備、翻譯成
-userspace 看得懂的介面；userspace 只負責呈現到 app**。
-
-### TODO 6 電池：完成（實機驗過放電與充電）
-- host：crosvm `--battery type=goldfish`，新的通用 backend `power_monitor/src/sysfs.rs` 讀手機 `/sys/class/power_supply`
-  （`PowerClient` 要同時實作 `get_power_data` 與 `last_request_timestamp`，否則編不過——曾因 wrapper 吃掉退出碼而部署到舊 binary，
-  畫面一直顯示 goldfish 預設 50%）。
-- guest：`package/DroidVMBattery.cpp`，直接繼承 `IOPMPowerSource`（開源 IOKit，不必像音訊那樣改 metaclass），~2 s 輪詢 goldfish
-  暫存器 → powerd → SpringBoard。**陷阱：先 `init()` 再 `attach()`**，順序反了會在 `attachToParent` data abort。
-  ADT：`make-droidvm-adt.py --battery` 從 FDT 的 `google,goldfish-battery` 節點產生 `/arm-io/battery`。
-- 驗收：狀態列顯示手機真實電量，放電（1%／未充電）與充電（12%＋閃電圖示）都對。memory [[droidvm-battery]]。
-
-### TODO 3 音訊：原廠堆疊整條通，剩真實 app 播放／錄音的驗收
-- guest `IOAudio2Device`（類別名另取、metaclass 掛到原廠 family 下）以 **UID 分裝置**：`Speaker`（→ Device_Speaker_Aspen，可路由
-  port，載入 J120 喇叭 DSP）與麥克風；HAL 兩個都開（clients=2）。transport＝guest virtio-snd 驅動 → crosvm vhost-user AAudio
-  helper（以 app uid 跑）。
-- crosvm 兩個通用修正（virtio-mmio 上的 vhost-user 原本不能用）：activate 不再強求 MSI-X；frontend 尊重
-  `VIRTQ_AVAIL_F_NO_INTERRUPT`（輪詢的 guest 不會被一條沒人 ack 的 SPI 灌爆，否則 launchd 卡死）。
-- PCM 以 kernel self-test（`droidvm-snd-selftest=N`）＋ crosvm `backend=file` 驗到**逐位元正確**。
-- **實際播放已驗（10-28 晚）**：Safari 播一個 MP3，guest 以即時速率送出 period（約 5 s 1100 個），手機 AudioFlinger 上 app uid 的 AAudio
-  track 為 active。手機原本沒聲音是因為**手機自己的媒體音量是 0**（`STREAM_MUSIC` speaker index 0，`mutedState: streamVolume`），不是我們的問題；
-  經使用者同意用音量鍵調到 40/160 後 `mutedState: none`、`PortMuted false`，track 位置以 48 kHz 前進，**手機喇叭實際播出 guest 的音樂**，之後音量調回 0。
-  （`cmd media_session volume --set` 在這支手機上設不進去，要用 `KEYCODE_VOLUME_UP/DOWN`。）
-- **錄音還沒在 app 裡驗到**：host 端的 capture stream 一直開著且未被靜音，但 guest 沒收到 input 的 StartIO。Voice Memos 按錄音沒反應（log 裡
-  tccd 處理 `voicememod` 時 LaunchServices 回 -10814，麥克風權限可能卡在 app 登記）；改用 Safari 的錄音頁時被下面的 backboardd crash 打斷。
-- **已 push（10-28 晚）**：裝置 repo `wip/hackintosh` 8d4d493..3e0d34c（音訊、電池、rig `load-modules.sh`；從 worktree `UniXNU-droidvm-land`
-  的 branch `wip/peripherals` 推，**接在原本的遠端 tip 上**，不含 5567 那邊 `main` 上 4 個「not for push」的實驗 commit——已通知那個 session
-  下次 push 前先 rebase）；crosvm `wip/virtio-mmio` 與 `wip/hackintosh` 0f2db62ae..8d587f266（vhost-user on mmio＋NO_INTERRUPT、
-  `--virtio-mmio-snd`、sysfs 電池）。`board.toml` 的 trust pin 是 5566 rig 自己的，沒 commit。memory [[droidvm-audio]]。
-- **5566 的 Metal（Adreno 840）已修好（10-29）**，不用改程式：開機參數改 `vgpu-3d=1` 後 backboardd 仍拿不到 Metal device，原因是
-  AMFI 拒絕 `NativeAdrenoMetal.bundle/libvulkan_freedreno.dylib`——5566 的 Data seed 帶的是**舊版 Turnip（cdhash `fe53f4fe`），不在開機
-  trust cache 裡**。把 Mac 上目前 build、已被 trust 的 bundle（NativeAdrenoMetal `49ae0dfe`、Turnip `93f89c29`）放進 guest Data 後重開：
-  `gpu-3d` 3 個 client、8600+ 次 fenced submission、0 timeout、0 refusal，手機 KGSL 沒有 fault；主畫面、Safari、設定、Notes 都走 Metal。
-  下面兩個問題都是軟體 fallback 的症狀，已一起消失。**seed 也換了（10-29）**：audio tree 的 `build/droidvm-data/data-12g-skip-ov.dbr`
-  改成只換掉 plugin bundle 的新版（sha `5bd07045`；舊的留在 `data-12g-skip-ov.pre-plugin2.dbr`）。下一次 5566 的 `payload-redeploy.sh`
-  會看到 seed 變了，要 `ALLOW_CHANGE=seed`，而且**會重置 5566 的 Data**（先備份 `/private/var/ngpu`）。5567 main tree 的 seed 還是舊的
-  （同樣帶未 trust 的舊 Turnip），沒動。memory [[gpu-8e5-support]]。
-- （已解決，見上）5566 當時沒有 Metal（`vgpu-3d=0`）時的兩個問題：(a) **backboardd 反覆 SIGBUS**：`CA::OGL::SWContext::set_surface` →
-  `__bzero`，多半發生在開 app 的動畫，畫面停住，等 launchd 重啟 backboardd／SpringBoard；(b) **設定 app 開起來一片空白**：主執行緒卡在
-  `dispatch_sync`，另外兩條執行緒在等某個 daemon 的同步 XPC 回覆。
-
-### TODO 5 GPS：調查完、**暫停**（使用者 10-28：晚點回來做）
-結論都在 memory [[droidvm-gps-plan]]，scratchpad `gnss/`、`ipsw-j121/`。
-- 原廠流程：CoreLocation → locationd → gpsd（on-demand）→ 晶片廠 dylib → GNSS 晶片。gpsd 的 `ForceGnssDeviceLibraryName`
-  （`/private/var/Managed Preferences/mobile/gpsd.plist`）可讓它 `dlopen` 任意 plugin；plugin 放 `/private/var/ngpu/addons`
-  就會出現在 `/System/Library/Extensions`。gpsd 以 `_gpsd` 跑，sandbox 允許讀該 plist、讀寫 `/dev/cu.gps`。
-- 已還原的 ABI：`gnss::Device` vtable 59 格、`getGnssDeviceVersion()` 必須回 2502、`gnss::Result::kSuccess=1`、gpsd 在
-  `newGnssDevice` 後同步等建構 callback；`gnss::Fix` 0xc8 bytes 的欄位位置與 gpsd 丟棄 fix 的檢查規則（gpsd 內嵌了
-  `GnssTypes.proto` descriptor 可對照欄位名）。
-- **擋住的地方（L1）**：locationd 只在 `CLPlatformInfo::getProviders() & 0x8`（GPS）成立時建立 GNSS provider，**所有 WiFi 版
-  iPad 都沒有這個 bit**，J120 上 GNSS 永遠不會啟動。要換成蜂窩版 **J121AP／iPad7,2**：值已從同一份官方 IPSW 的
-  `DeviceTree.j121ap.im4p` 取得（`product-id 61792bce…1a67`、`/product/gps-capable=1`、`compatible-device-fallback iPad6,8`…，
-  `/baseband` 節點不加）。
-- **未解的風險**：J121 的 GNSS 在 Qualcomm 基頻（`mav16`）裡；locationd 有 gpsd（`CLGnssDaemonDevice`）與基頻 QMI
-  （`CLEurekaController`）兩條後端，還不知道 J121 會選哪條。回來時第一步：只換 ADT 身分開機實測（清 MobileGestalt cache；
-  注意 CoreMotion 的機型表、CommCenter 雜訊、「無服務」）。
-- 設計定案：host＝virtio-console 具名 port 傳 NMEA 0183（RMC/GGA/GSA/GST），資料由 app（Java LocationManager，app uid）寫進
-  crosvm 的 console socket；XNU＝virtio-console 驅動，解析 NMEA、在 `/dev/cu.gps` 提供整理好的 fix；userspace 只多一個很薄的
-  vendor plugin（GNSS 晶片 plugin 在 Apple 的設計裡本來就在 userspace）。陀螺儀維持 virtio-input。
-
-### 其他
-- 5566 在 1% 時手機重開過：模組與 hugepage 池會消失。`gh_hugepage_reserve.ko` 在使用者的 KernelSU 目錄（請使用者 insmod），
-  `load-modules.sh` 改成依 `uname -r` 選模組目錄。memory [[droidvm-host-reboot-recovery]]。
-- 曾嘗試搬到 5568 後中止（使用者把 5566 接上充電）：5568 留下 app r312、我的 crosvm（備份 `crosvm.bak-579d1a5b`）、UniXNU 映像與
-  VM 項目（data-store 已失效）。**教訓：複製 data-store 前一定先停來源 VM**，否則 guest panic「libSystem.B.dylib not loaded」。
-  memory [[droidvm-5568-state]]。
-- 以上都已 commit 並 push（commit hash 見各項）。這條線的詳細計畫與狀態總表：`plans/TODO3-6_PERIPHERALS_PLAN.md`。
-
----
-
-## 續報（2026-10-28 下午，Claude）：entitlement 全集盤點（stock 21H461）；UniXNUSetting 改做特權 app（同日晚上再修訂：改為 ownervisor 的 in-app GUI，見下方「決定」）
-
-接續下方 TODO 2 續報。使用者問「entitlement 全集的 list 型別是不是很難枚舉」、並提議「UniXNU 做成特權 app 更好」。從 build Mac 已掛載的 stock 21H461 rootfs（`/private/tmp/dmg.*`，rootfs dmg `044-76040-038.dmg`）＋ cryptex（`044-76034-038.dmg`）用 `scratchpad/entdump.py` 解出全部簽章 binary 的 entitlement。
-
-### 數據
-- 2,505 顆簽章 binary，1,595 顆帶 entitlement，**3,658 個不同 key**；其中 **3,309 個是純 bool**（設 true 即可，無枚舉問題）。
-- **247 個 list 型 key、8,185 個不同值**，分三類：
-  - **sandbox 例外**（`security.exception.*`／`temporary-exception.*`／`seatbelt-profiles`／`sandbox.profile*`）：81 key／4,618 值。**整類丟掉**——no-sandbox 行程不讀；最大的 `mach-lookup.global-name`（1,368 值）就在此類。
-  - **身分／行為設定**（`application-identifier`、`container-required`、`application-groups`、`pac.shared_region_id`、`web-browser-engine.*`、`security.message-filter`、`UIKit.vends-view-services`、iCloud／aps…）：74 key／533 值。**絕不能聯集**——這些決定「行程是誰、進哪個 sandbox」，塞進去反而關進 sandbox 或改行為。
-  - **權限清單**：175 key／3,034 值。**只有這類需要人工盤點。**
-- 權限清單再分：**值域封閉、可從檢查方找齊**（`tcc.allow`、`iokit-user-client-class`＝kernelcache 全部 UC 類別＋我們的 driver、`mobileinstall.allowedSPI`、`lockdown.finegrained-*`、CommCenter、MobileGestalt）；**值域開放、找不齊**（`trial.client` 數字 ID、biome stream、IDS topic、asset type、通知 bundle id、keychain group）——但 stock 聯集已涵蓋所有原廠 consumer，第三方值我們用不到。
-- **陷阱**：(a) 有檢查方吃萬用字元（stock 自己用 `com.apple.MobileAsset.*`、`geoservices.map-subscriptions` 的 `*`），但比對規則各異，不可當通則；keychain `*` 需 Security 源碼查證，未驗。(b) 同一 key 型別不一致（`iokit-user-client-class` 有人寫字串、`tcc.allow` 有巢狀陣列），給錯型別＝沒給。(c) 有雜訊（Apple 自己的錯字 `no-sandbox\n`、誤入的 `CFBundleIdentifier`／`MachServices`），所以**聯集 ≠ 真全集**。
-- 只取權限類、bool 設 true、清單取聯集 → 候選全集 **3,430 key、約 360 KB XML**（對照「設定」app 585 個）。AMFI／XPC 收不收這麼大一包**未驗**。
-- 對 `cap.sys_admin` 計畫的影響：userspace daemon 是自己拿整包、自己查清單裡有沒有某值，所以 kernel 注入那份**仍要逐一列值**；「任何值都算有」只能用在 kernel 端檢查（`IOTaskHasEntitlement`／sandbox）。
-
-### 決定（10-28 晚修訂）：UniXNUSetting＝ownervisor 的 in-app GUI，root 操作交 ownervisor
-UniXNUSetting 本質上是幫 ownervisor 做的 app 內 GUI，所以用 ownervisor 不違反「ownervisor 只除錯」。**不做特權 app**：先前「no-sandbox＋bundle 內 persona helper」的方案撤回（persona 提權實測 mobile→root EPERM，見下方驗證結果 1）。
-- **要 root 的操作**：交給 kernel 以 root spawn 的 ownervisor（app 經本機 socket 呼叫）。app 本身以 mobile 跑，不簽大 entitlement 集。
-- **真正要守的兩件事**（使用者 10-28）：(a) **未經使用者授權的第三方 app 碰不到 ownervisor 和底下的 debug 工具**；(b) **使用中不會不小心把 UniXNUSetting 刪掉**。
-- 機制（待實作／驗證，細節 `plans/UNIXNUSETTING.md` §3.1）：(a) app 專用 socket，ownervisor 用對端 audit token 取 cdhash，只認 payload 內建的 UniXNUSetting——**不能只查 entitlement**（AMFI 把任何 entitlement 授予任何 cdhash-trusted binary，含之後 runtime 信任的使用者 IPA）；現有 `ctl.sock`／`control/` spool 沒有對端驗證且 `add` 能以 root 跑任何 trusted binary，維持 root-only；debug 工具目錄 root-only。(b) 當 staged 系統 app 放在唯讀 os.img，不在可刪除清單，SpringBoard 不給刪。
-- **TODO 2 (3) 要改**：「開機時 ownervisor 服務重載信任清單」違反原則；改成 **Data 掛上時由 kernel 直接讀已存 cdhash 清單**（`DroidVMTrustCache.c` 已有載入碼）。
-
-### 驗證結果（2026-10-28 實機；細節＋captest 原始輸出見 `plans/UNIXNUSETTING.md` §3/§5）
-1. **persona 以 root 啟動 helper → 只在呼叫者已是 root 時可行。** root→root persona override spawn 成功（子 uid=0）；但 euid 降 501、以及純 mobile（ruid=euid=svuid=501）→ spawn root persona **皆 EPERM**。→ **mobile app 無法靠 persona 自力提權**；要 root 的操作改交 **kernel 以 root spawn 的 ownervisor root helper**（app 經 socket 呼叫），persona 只用於「已是 root 的 daemon 要降成特定 uid 跑子行程」。
-2. no-sandbox staged app 從主畫面啟動：launch-constraint 半邊已由 `owner-skip-launch-constraints=1` 解除；app-launch 半邊要等 runtime 安裝器（`staged_system_apps` 在唯讀 os.img 上）。**本輪未端到端跑**，仍待安裝器就緒。
-3. **~360 KB 全集 AMFI 不收**（實測 SIGKILL「entitlements too large」）；實務上限約 256 KB XML。**改走 curated：109-key 全 lockdownd 除錯集（17 KB）實測 AMFI 100% 授予（109/109）**，遠在限內。→ 不簽 360 KB 全集，curate 即可。
-
-產物：`scratchpad/fullset-candidate.plist`（候選全集）、`scratchpad/ents-21H461.jsonl`＋`ents-21H461-cryptex.jsonl`（逐 binary 原始 entitlement）、`scratchpad/entdump.py`／`entclass.py`（擷取／分類腳本）。memory [[entitlement-fullset]]。
-
----
-
-## 續報（2026-10-28，Claude）：TODO 2 調查——runtime 信任快取可行、entitlement 可任意授予、機內配對卡在結構阻擋；applebox／UniXNUSetting 設計
-
-**TODO 1（陀螺儀原廠路線）已完成**（見「已完成里程碑」）。本輪主力是 TODO 2（iPadOS 內的 IPA 安裝器／UniXNUSetting）的可行性調查。
-
-### 關鍵實驗結果（實機）
-- **runtime 信任快取：可行（path A 成立）。** XNU patch `zzyd-owner-runtime-trust-cache.patch` + 開機參數 `owner-runtime-trust-cache=1`
-  讓 `load_legacy_trust_cache` 在 runtime 可用。self-test（`package/DroidVMTrustCache.c`，`owner-tc-selftest=1`）實測：載入前該 cdhash
-  `KERN_NOT_FOUND`，載入 version-2 模組 `KERN_SUCCESS`，載入後立即被信任。→ **裝完 app 可當場信任、不用重開機、不用主機。**
-- **entitlement 可任意授予。** AMFI 把任何 entitlement（含 `com.apple.private.iamlockdown`、`PairingManager.Write` 等私有）授予
-  我們 cdhash-trusted 的 binary（實測 gfxprobe 帶這些 entitlement 正常啟動）。→「動態／萬能 entitlement」= 在一顆 trusted binary 塞
-  entitlement 全集 + 一個 `grant`（re-sign + runtime-trust）util。沒有單一萬能字串，但我們能授予任意集合。
-- **機內 lockdownd 配對：卡在結構阻擋（不是 entitlement）。** `/var/run/lockdown.sock` 服務 GetValue/SetValue，但 QueryType/
-  StartSession/Pair 一律被關（value-only 端點）；TCP 62078 在聽但是 TLS/wireless 閘（「Wireless pairing requires a passcode」，VM 沒設密碼）。
-  加再多 entitlement 也一樣。→ **「不碰 USB、走協定」的配對 OUT。** 剩下的配對路：USB-mux 模擬 / 無線（設密碼）/ 直接寫 pair record
-  （吃我們的 kernel 控制，待逆向 `/var/db/lockdown` 的 record 格式 + crypto）。
-
-### 設計（討論定案，未實作）
-- **UniXNUSetting** = GUI app（普通 SpringBoard，category 0，sandbox）+ **unixnusettingd**（owner daemon，category 3），本機 socket + JSON。
-  功能：裝普通 IPA（移除走 SpringBoard 長按）、裝/移除特權 IPA、SSH（開關 + auth_keys）、serial-shell（zsh 掛到指定 serial）、
-  服務管理（新增/刪除/列表/狀態；ssh 與 serial-shell 是 protected，可停不可刪）、lockdownd pairing + debug bridge。持久化裝好的 cdhash
-  到 Data，開機由一個 trust-loader 服務重載（撐過重開機、不用主機）。
-- **applebox** = 單一 multicall binary，取代現在的 toybox-only shell 環境：Apple OSS 的 `_cmds`（file/text/shell/adv/network…）優先、
-  toybox 補缺口（xz、timeout、watch、od…）、+ libimobiledevice（靜態 OpenSSL）+ dropbear + zsh，全部用 `ld -r` + exported-symbols-list
-  把符號 localize 併成一顆（一個 cdhash、一組 entitlement）。研究報告在 scratchpad `applebox-research.md`、`libimobiledevice-path-research.md`。
-- **debug bridge / USB**：ACM = serial only；要 host 經 USB 碰 VM，走 **NCM（USB Ethernet gadget）** 把 PC 橋到 guest en0；真 usbmux 要 FunctionFS。
-
-### 狀態（全部本機 WIP，未 push）
-- XNU fork 的 `zzyd` patch；裝置 repo 的 `DroidVMTrustCache.c`/`DroidVMStubs.c`/`DroidVMBootArgs.c`（`owner-runtime-trust-cache=1` +
-  暫時的 `owner-tc-selftest=1`）；gfxprobe 的 `lockdown` 探測子命令 + 一堆實驗 entitlement。**定案前要把 self-test 的 boot arg 和實驗 entitlement 收掉。**
-- 下一步待使用者定：(1) 起 build-applebox 骨架 /(2) 試無線配對 /(3) 逆 pair record 格式（走 kernel 注入）。
-
----
-
-## 已完成里程碑（2026-10-24 ~ 10-29，根因與細節見各 memory 檔與下方參考章節）
-
-- **10-24**：GFXBench 第一次出分；GPU 記憶體 2 GB → 590 MB；發現手機 OPLUS daemon 把大核限頻（跑分要記 `scaling_max_freq`）。
-- **10-25**：**drm2kgsl 遷移**——iOS 的 3D 預設改走 virtio-gpu + drm2kgsl（`vgpu-3d=1`），ALU2 22→50 fps；重型 GFXBench（Aztec/Car Chase/T-Rex）都出分；兩種手機 watchdog 當機修好（guest WFE + secondaries 讀 stale boot data）。
-- **10-26**：**隨機記憶體破壞根因**——8 位元 ASID + Gunyah vCPU 遷移，改 16 位元 ASID（fork `zzxa-16bit-asid.patch`）後 GFXBench 10/10；GFXBench 破圖修好（Aztec 全黑 = pipeline reflection；T-Rex/Car Chase）；**host 端只剩通用裝置**——droidvm-gpu 退役、drm2kgsl 不再辨識 guest。
-- **10-27**：整套 iOS hackintosh 推上 GitHub；開機參數內建進 kernel（`DroidVMBootArgs.c`）；畫面旋轉 + 動作感測器（host 全通用，crosvm `--input motion`）；GFXBench IPA 改用 UIScene 修實機閃退；guest 的 droidvm-gpu 驅動拆除；fps 調校（送出畫面前等 GPU 畫完，修破圖）。
-- **10-28**：
-  - **介面 fps 22 → 64~92**（旋轉改走 2D 引擎、答案快取、編碼執行緒、mimalloc）；**GFXBench 拉伸修好**（開機 framebuffer blob 補白頁；切換 producer 後重套 transform）。
-  - **上游 UniXNU rebase 進來**（元件改名 NativeMetal→AdrenoMetal 等；建置、開機、MetalCheck 29/29、GFXBench 都驗過；強制推送，舊 tip 存 `pre-rebase-20261028` tag）。
-  - **wip/vpu 全部 rebase 進 wip/hackintosh**（11 個 repo；crosvm 76 個 VPU commit；app 582 測試過；新 crosvm 實機驗過）。
-  - **TODO 1 陀螺儀原廠路線完成**——kernel HID 服務（`DroidVMMotionHid.inc`：加速度計 `{0xff00,3}`、陀螺儀 `{0xff00,9}`、方向 `{0x20,0x8a}`，各帶空 `{0xff0c,3}` + HIDDefaultBehavior，方向事件帶 `{0xff15,2}` 時間戳）→ locationd/CoreMotion → backboardd；ADT 根 compatible 第一項改 `J120AP`（否則 CoreMotion 查不到感測器）；一般 app `CMMotionManager` 讀得到，自動旋轉不靠 orientd。
-  - **TODO 6 電池完成**——crosvm goldfish battery（新的通用 sysfs backend）→ guest `DroidVMBattery`（`IOPMPowerSource` 子類別）→ powerd → SpringBoard，狀態列電量與充電圖示跟著手機走。
-  - **TODO 3 音訊原廠堆疊整條通**——`IOAudio2Device`（Speaker／Mic 依 UID 分裝置）→ VirtualAudio → HAL → virtio-snd（virtio-mmio 上的 vhost-user AAudio）；Safari 播放經手機喇叭實際出聲，剩 app 內錄音驗收。
-- **10-29**：
-  - **8 Elite Gen 5（Adreno 840）的 Metal 修好**——5566 的 Data seed 帶的舊 Turnip 不在開機 trust cache；換成已 trust 的 plugin bundle（seed 也換新）後 iPadOS 走 Metal，軟體渲染 fallback 的 backboardd SIGBUS 與設定 app 空白一起消失。
-  - **動態 ADT**——DarwinBoot 開機時從 firmware 的 FDT 補上 RAM 與 `/arm-io` 裝置（DarwinBoot b2ad902、device 2c9227e…3f3474d 的 `--dynamic`）；crosvm 裝置或 pool 變動不必再重產 ADT。
-  - **iPadOS 的 virtio-media 傳輸層通了**——guest 自檢讀到解碼器的格式（H.264／HEVC／VP9／AV1 → NV12）；crosvm `--virtio-mmio-media`（d5c13c494）、guest `DroidVMVirtioMedia.c`（e66a7b4）。
-  - **從零建置自動化**——裝置 repo `scripts/build-droidvm-all.py`（全新 clone → release）＋ rig `fresh-deploy.sh`（手機上換一台新 VM）；動態 ADT 接進 board.toml；applebox 獨立成 Droid-VM/applebox；8 Gen 3 手機上刪掉舊 VM、部署新的，開到主畫面。
+續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
+
+## 已完成
+
+- ✅ **11-02** MSAA 在 Adreno 上降到單取樣成本：Turnip 對不儲存的多重取樣附件走 GMEM＋metal2vulkan 對 Turnip 交 DONT_CARE（`turnip-msaa-resolved-prefers-gmem.patch`、`0021-turnip-dont-care-stores.patch`；4x 64 draw 37.5→9.2 ms；fork 803a014）
+- ✅ **11-02** 查明誰用 MSAA：系統 UI 不用（backboardd 0 個），只有動態桌布與 Safari 的 WebGL／WebGPU，「關 MSAA 讓 UI 變順」不適用
+- ✅ **11-02** Swift 的計時恢復：`libswift_Concurrency` 把 deadline 寫死成 24 MHz（ns×3÷125），19.2 MHz 的 guest 上 `Task.sleep`／debounce／timeout 永不觸發 → 核心對外呈現 24 MHz 時基（`droidvm-timebase-24mhz.patch`、`droidvm-timebase-hz=24000000`，device 5edbbfc）
+- ✅ **11-02** 設定側欄出現 Ethernet（時基修好後；詳細頁有 IPv4、遮罩、路由器、DNS、HTTP Proxy；「Optimizing Search and Siri」、TV Provider 也回來）
+- ✅ **11-02** WebGPU 的 MSL 只有編譯警告時不再回 error（WebKit 把任何 error 當失敗）（AdrenoMetal 3a4afd3、fork bb654a0）
+- ✅ **11-02** WebGPU bind group 能用：plugin 包裝 metal2vulkan 的 `ArgumentEncoder`、resource ID、`useResource`／`useHeap`，補 encoder descriptor、indirect draw、帶 options 的 buffer↔texture blit、swizzle view（AdrenoMetal 8841752、f4ce342，fork 667492a）；rotatingCube、computeBoids、texturedCube 等正常
+- ✅ **11-02** 藍牙可用（On、可被發現、掃描中）：ADT 根層 `bluetooth` 節點（`transport-encoding` 10）讓 bluetoothd 用 Apple VM 的程序內虛擬控制器 BTVC，userland 全 stock（device 126487d）
+- ✅ **11-02** keychain 寫入修好：27 的 NativeKeyStoreEvents 補回 aks_wrap_key／unwrap（selector 10／11，`package/KeyStoreWrap.inc`），bluetoothd 不再因存不了 LE identity root 重啟
+- ✅ **11-02** launchd 90% CPU 修好：不再停用 bluetoothd（BTAudioHALPlugin 找不到它的 Mach 服務就每秒查找約 1900 次）→ 2%
+- ✅ **11-02** Wi-Fi 介面：`package/DroidVMWifi.inc` 的 `IO80211Controller`／`IO80211Interface`＋無傳輸層的 `DroidVMVirtualWifi`（en1），Settings 的 Wi-Fi、Ethernet、Bluetooth 並存、上網走 en0；`droidvm-wifi-ssid=NAME` 測 UI（device 9bcff1a）
+- ✅ **11-02** IOKit 會安靜、mobileassetd 不再吃 40% CPU：上游 SoftwareAES 搬到 27 提供 IOAESAccelerator（`package/SoftwareAES-24A446.S`、`SoftwareAESKeys.inc`），AppleImage4 不再卡住 config thread（device a42261e）
+- ✅ **11-02** Safari WebGPU 能用（webgpureport 列出 adreno adapter、helloTriangle）：`com.apple.WebKit.GPU` 加進 GPU client、`owner-hide-vmm` 加 WebKit.GPU、plugin 的 `supportsFamily:` 只對 WebGPU.framework 回 Apple4（device 24a79b2、fork 3d8ef4d、AdrenoMetal 4089943）
+- ✅ **11-02** Mesa 在 sandbox 擋 `hw.physmem`／`hw.pagesize` 的行程裡不再算出 0 bytes heap：改讀 `hw.memsize`（fork `mesa-darwin-total-memory-sysctl.patch`）
+- ✅ **11-02** 純 arm64（非 arm64e）程式能跑：JOP 停用的 thread 回 EL0 時用 SCTLR_EL1 關 IA／DA／DB，shared cache auth mapping 與 dyld pager 用不簽章的專屬 key（`droidvm-native-pac-user-jop.patch`，device 8ea1e33）
+- ✅ **11-02** Games 開得起來：加進 `droidvm-gpu-clients`（它的 VFX 沒有 Metal 就結束）（device af2be42）
+- ✅ **11-02** 穩定性測試通過：連開 30 個 App、連砍 backboardd 3 次、上滑關 App、連砍 locationd 2 次，沒有卡死或連鎖 respring
+- ✅ **11-02** 切到其他 Android App 再回來 VM 畫面不再黑：display client 記住每個 surface 最後一次 flip 的來源，新 surface 重新 flip（Virtualization 72d325bc3）
+- ✅ **11-02** 多工快照寫得進去：Data seed 改 `newfs_apfs -e -x`（case-sensitive＋expanded records），SplashBoard 能標 purgeable（device 59ec0a8、fork f0dafc4；Data UUID 2EE158B3）
+- ✅ **11-02** 多工卡片不再白：`make-droidvm-adt.py` 從 `graphics-featureset-fallbacks` 拿掉 APPLE2／MTL2,2，快照改 PNG 由 CPU 解（device 824043f）
+- ✅ **11-02** locationd 重啟不再連帶 backboardd＋SpringBoard 崩潰：guest 核心加 SPU 命令通道 stub（`package/DroidVMSensorProcessor.cpp`，motion HID 類別改名 `AppleSPUHIDDevice`）（device e5009a5）
+- ✅ **11-02** 記憶體壓力等級會動：`droidvm-pressure-pageable.patch` 把 page-shortage 門檻 OR 進來（GPU 記憶體全 wired，原本等級永遠 0）（device a60ed0e）
+- ✅ **11-02** free page 門檻依頁大小換算（×16384/PAGE_SIZE，free target 7.8→31.2 MiB）（device 33fe95e）
+- ✅ **11-02** 砍 backboardd／render server 後不再永遠轉圈：dyld pager 拿著自己的頁去 peek 同一 16K fixup page 的兄弟頁 → ABBA 死鎖，改成先 peek 再 fault（device 32075d9）
+- ✅ **11-02** crosvm 裝置 worker 不再繼承 vCPU0 的綁核：WorkerThread、u_thread_create 改用主 thread 的 CPU 集合（crosvm 47cd593ee、virglrenderer 899a4e17）
+- ✅ **11-01** 從畫面外黑邊滑進來會觸發手勢：整個顯示容器收觸控，EvdevEncoder 在跨過邊框處補 touchdown，沒進畫面的手指不送（app 6171c80）
+- ✅ **11-01** 上滑停住叫得出多工：手指按著且 8 ms 沒新 frame 就重發、x 交替偏 1 軸單位（`DroidVMVirtioInput.c`，device f61a969）
+- ✅ **11-01** 查明設定點選項 0.5–1 s 是磁碟 page-in（上游 VirtioMmioBlock 同步、一次一個 64 KB 請求），不是 CPU 不夠
+- ✅ **11-01** 區塊驅動並行化：16 個 slot 在途、鎖只保護 ring、等待不持鎖（`ipados27/patches/VirtioMmioBlock/` 0001–0002，device dbe2270）；開機到鎖定畫面 176→152 s
+- ✅ **11-01** 開機時 16K 簽章的 4K 雜湊預處理同一 vnode 只做一次（`droidvm-native4k-once.patch`，device 1dc2f68）；SystemOS 開機讀取 12.7→7.4 GB
+- ✅ **11-01** 區塊單次傳輸 256 KB、完成偵測前 150 us 每 2 us 檢查（0003–0004，device 7586bea）
+- ✅ **11-01** virtio-gpu 傳輸層不再因 stray element 停擺：`reap()` 讀 used index 後下 barrier、對不上的重讀後略過計數、client 關閉時 `abandon(ticket)` 交還 slot（device c23dda3）
+- ✅ **11-01** 上游合併 UniXNU 407db1a（merge，fork `wip/droidvm` c4502e8；AdrenoMetal 01a3721、GopFramebuffer ed08bd4、ArmCpu c85e084、DarwinBoot c936dc6）；上游順便修好 CoreImage 的 `externFunctionNames`／kernel by name
+- ✅ **11-01** render server 不再失去 GPU：drm2kgsl 每個 context 的 GPU VA 2→6 GiB（VBO 192 GiB 切 32 片，virglrenderer 6536a4a8）＋m2v spare 上限 1/16 位址空間、VA 用盡時 Turnip 寫下用量（fork c4502e8）
+- ✅ **11-01** RenderBox `custom_effect` 能連結帶 function constant／靜態初始化的模組：metal2vulkan 0018 連結前在副本裡綁定 constant（fork 6833c6a）
+- ✅ **11-01** iconservicesagent 不再被 jetsam 15 MB 上限殺掉：GPU blob 頁改 purgeable、歸 graphics 帳本不計 footprint（device b846440）
+- ✅ **11-01** union 目錄列得出下層：`getdirentries` 上層讀完不回報 EOF（`native-union-getdirentries-eof.patch` 17／27，fork 1a9a7fc）→ CI 的 kernel library 找得到、設定的行圖示全部畫出；順修 `..` 的 NULL vnode panic
+- ✅ **11-01** backboardd 不再在 `create_pipeline_state` abort（SpringBoard 閃退）：metal2vulkan 0015 對未附掛的 color attachment 讀取給 0（fork 69f377a）
+- ✅ **11-01** `newFunctionWithDescriptor:` 的 `specializedName` 生效（RenderBox `clampedPlusL_v1` → `custom_blend`）（fork fdd21fe 0016、NativeMetal 6c17c82）
+- ✅ **11-01** plugin 支援 Metal 動態函式庫（`newDynamicLibraryWithURL:`、`supportsDynamicLibraries`、preloaded libraries），CoreImage 的 `ci_stdlib` 等載得到（exp-bgra f926107；union 修好後驗證）
+- ✅ **11-01** guest panic「Resuming from debugger synchronization failed」：內建 `ml-timeout-debug-ack-scale=40`（device 71750ba）
+- ✅ **11-01** owner 除錯權限：帶 `com.apple.private.droidvm.debug` 的 binary 在 `owner-debug=1` 時可取 task port、唯讀讀 vnode（fork `zzye-owner-debug-task-ports`、`zzyf-owner-debug-vnode-read`）；debugserver 能 attach 系統程序、shell 能讀 data vault
+- ✅ **11-01** vCPU 依需求 uclamp：GPU constraint 開著時 6 個 vCPU 的 uclamp.min 拉到 1024（virglrenderer 0682b304）；104–105→108–110 fps
+- ✅ **11-01** guest 自己要效能：crosvm virtual cpufreq（`--virt-cpufreq-upstream`，1a5592aa9）＋DarwinBoot 6f5724f `/arm-io/cpufreq`＋`package/DroidVMCpufreq.c` perfcontrol callout（device 5389c07）
+- ✅ **11-01** 大小核 AMP：拓撲由 host 推導（app 74a167f、DarwinBoot 284645c 寫 `cluster-type`、device abd17ab `droidvm-amp.patch` Edge 排程器＋4d4462f 互動 thread group 升頻）；AMP 110–112.6 vs SMP 106–109 fps
+- ✅ **11-01** VM 設定不再在 daemon 重啟後回到舊值：rig `vmpersist.py` 把 daemon 設定寫回 `vms.json`（device 75ce85d）
+- ✅ **10-31** IPI 風暴（手機發燙、一顆核心每秒 150 萬次 IPI）：IPI SPI 共用的 ICFGR 讀改寫加鎖、回讀、收到時清 ICPENDR（ArmCpu 177a0d3、fork 4fb10c6）
+- ✅ **10-31** 停用手機上 crash loop 的 com.qti.qcc（使用者同意）
+- ✅ **10-31** memorystatus 不再把 inactive 檔案頁算成可用（device 65d9d21）；Turnip freed-BO cache 上限 96 MiB（fork b612590，`TU_DARWIN_BO_CACHE_MB`）；m2v 空 block 回收（fork 32defe3，實測幾乎回收不到）
+- ✅ **10-31** host blit 走 KGSL 高優先：手機 app 的 `libvulkan_freedreno.so` 換 priority 版（備份 `.bak-sep3`），queue 等待 p90 6.4→2.3 ms
+- ✅ **10-31** 120 Hz：`droidvm-display-hz=120`、`ca-triple-buffer=1`（device 1ab7fdf）
+- ✅ **10-31** complete-on-post：scanout＋flush 一送出就完成 swap（`droidvm_virtio_complete_on_post`，device 905ee57）；翻頁 82→98 fps
+- ✅ **10-31** `bindfs_pagein: ubc_upl_map() failed` panic：GPU blob 配在呼叫端行程的位址空間、kernel 不映射（`droidvm_virtgpu_in_task`，device 0b73c2a）
+- ✅ **10-31** GPU 依 guest 幀需求升頻：guest Turnip 把 render server 的 queue 建成 deadline queue（fork 1e49d86），drm2kgsl 依提交速率設 KGSL power constraint（virglrenderer e68e95d4）；每幀 GPU 6.28→2.69 ms、101–107 fps
+- ✅ **10-30** 27 走 8-bit framebuffer＋virtio display 零 copy scanout：cherry-pick 上游 9eca077 到 NativeMetal `exp-bgra`，render server 出 BGRA；翻頁 14→72 fps
+- ✅ **10-30** display 的 MaxEntries 4096→16384（2048×2732 surface 有 5464 段）（device b1908f8）
+- ✅ **10-30** GPU blob 配不到 64 KiB 連續塊就退回一般頁，不再連續 respring 後一路 NoMemory（device 3089d22）
+- ✅ **10-30** 27 首頁版面修好：unit-scale=2、VM 螢幕 2048×2732（UIScreen 1024×1366 @2x，選到 J320），DarwinBoot 開機畫面保留 8→24 MiB（device 34c42ef）
+- ✅ **10-30** GPU userland 升到上游 7183e58（NativeMetal wip/hackintosh a188974、m2v 624bab39、bridge 0017–0019，fork 476204c）：27 render server 正常出幀，圖示、IconRendering、CoreImage、widget 有內容
+- ✅ **10-30** 27 首頁與鎖定畫面有桌布：`*Poster*` 與 `SBRendererService` 加進 GPU client（device 8277f55）
+- ✅ **10-30** 27 也開動態 ADT（`--dynamic`：FDT 補 RAM、panic 區、boot video 保留、`/arm-io` 裝置、CPU／GIC）
+- ✅ **10-30** 17 的功能搬到 27 並實機驗過：launch policy、內建 boot-arg（`DroidVMBootArgs27.c`）、en0（IONetworkingFamily-188）、電池、時鐘、Data store、觸控／Home、動作感測、App cryptex（`sheng-no-lc=1`）
+- ✅ **10-30** 27 的 ssh 除錯 shell：工具改編 arm64e（`DROIDVM_IOS_TARGET`；ownervisor c6c8b2a、applebox 6e3b471、device 08db257、70839e1）
+- ✅ **10-30** 27 音訊：`owner-hide-vmm=audiomxd` 只對音訊 server 隱藏 hypervisor（fork `zzyd-owner-hide-vmm` 7c8d2f6）＋`/product/audio` `acoustic-id` 2029；鎖定／解鎖音效經 virtio-snd 播出（device 0bce497）
+- ✅ **10-30** 27 HID：sheng 的 27 版 ShengHidInput 照 `hid-device-24A446.json` 綁回原廠（53 個 binding），三個 IIG `*_Invoke` 補進 reviewed pairing
+- ✅ **10-30** 27 能觸控、解鎖、開 Settings：`sheng-touch-split=1` 獨立 digitizer 裝置（合併裝置的 primary usage 是 Keyboard，backboardd 丟掉觸控）
+- ✅ **10-30** native `__DATA` 槽位 16→336 KiB：input queue、display scratch、信箱 buffer 改執行期配置（`DROIDVM_*_DYNAMIC`）
+- ✅ **10-30** 檔案信箱 4 MiB、公布實體位址：`export.py` 75 KB/s→1.8 MB/s
+- ✅ **10-30** 27 時鐘從 crosvm 的 PL030 設日曆（`DroidVMClock.c`，launchd 之前）
+- ✅ **10-30** 27 unified log：`logarchive.py` 從 timesync 算出 archive Info.plist 的時間參考，macOS 27 的 `log show` 讀得了
+- ✅ **10-30** 27 鎖定畫面用 Metal 畫出：17 的 virtio GPU（傳輸／3D／display）與 NativeAdreno 進 27 display archive，staged AGXAccelerator 掛在 24A446 原廠 IOGPUFamily 下
+- ✅ **10-30** 27 GPU userland：fork ios27 target 編 Turnip 與 plugin，Data seed `--plugin`、trust `--owner`，backboardd 載入 plugin（CA 的 49 個 pipeline 成功）
+- ✅ **10-30** 27 Data 改走 data-store（`droidvm-data-persist=2`、第三顆磁碟、seed 12 GiB），GPU 連續 blob 配得到
+- ✅ **10-30** RGhA 幀黑畫面：`LegacyDisplayProbe.cpp` 在 CPU 複製前等 GPU 做完（最多 200 ms）
+- ✅ **10-30** 27 SpringBoard 起來：Data seed 寫 `CAEnableMedina=false`（`seed-data-prefs.py`）
+- ✅ **10-30** 27 顯示：sheng 的 27 legacy display（`build-droidvm-legacy-display.py`）畫到 DarwinBoot 的 GOP framebuffer
+- ✅ **10-30** 27 檔案信箱（`DroidVMFileExport.c`）：`export.py ps/ls/get`、`crashes.py` 可用；fork 的 RELEASE 參考 kernel 補 `__zone_site_register` stub
+- ✅ **10-29** 27 launchd 起來、userland 開到 SpringBoard：Data seed（`build-droidvm-data-seed.py`）、IPSW 原版三個 trust module 包成 TrustCache bundle（3711 筆）
+- ✅ **10-29** fork 併入上游 `feat/ipados27-gpu-parity` 6ad1297；sheng 6ed0ba4（每次開機丟 LaunchServices 資料庫）移植到 27
+- ✅ **10-29** AppleImage4 壞指標：手動配對把 `read_random` 認成 `SHA512_Init`；改正後補 28 個 stub 配對，stub 呼叫點 65→24
+- ✅ **10-29** `fileset-reviewed.json` 新增 `data` 清單：補上沒配上的 kext→kernel 資料參照（APFS named-stream vnop desc、sandbox `audio_active`）
+- ✅ **10-29** 27 kernel 修正：ArmCpu fe98808（IRQ handler 還沒裝就收到中斷）、sheng SIGP recovery 預設關（`sheng-sigp-recover=1`）、ADT `/chosen/kernel-ctrr-to-be-enabled = 0`、暫用 `use_contiguous_hint=0`
+- ✅ **10-29** P3：27 kernel 6 顆 CPU 起來，OS volume 以 root 掛上（APFS ARV），owner chain 掛上 SystemCryptex
+- ✅ **10-29** P2：裝置 repo 第二個 board `ipados27/`，arm64e kernel prelink 進 24A446 fileset kernelcache（fork 補 RELEASE+LTO 比對用 kernel）
+- ✅ **10-29** 27 儲存：IOBlockStorageDevice 從原始碼編、掛原廠類別下，配上 NativeVirtioBlock／NativeRamBlock／Data store；OS／SystemOS raw image 與簽章 root policy（117 MiB）
+- ✅ **10-29** 27 kernel 開到 AppleImage4：random-seed 256 bytes、`fileset-reviewed.json` 補配對（stub 呼叫點 162→65）、corecrypto FIPS POST 全過
+- ✅ **10-29** 隨機卡頓 0.2–1.8 s：display worker 改用 per-client `fenceLock`、CREATE_BLOB 取頁 4 MiB→256 KiB 塊（device 1d8a612）
+- ✅ **10-29** 設定桌布／Stage Manager 的 respring：NativeAdreno 的 OOL 判斷錯（>4096 bytes 的 EXECBUFFER 被拒）（32e864a）＋1 MiB 大請求 buffer（device 4161a9a）
+- ✅ **10-29** 設定 App 崩潰：mimalloc v3 的 TSD 108／109 撞 Swift 的 slot → v2（fork 88675ae）
+- ✅ **10-29** 上游 GPU parity 的 GPU 半邊合進（metal2vulkan 0dfdbcd、17 個 bridge patch、Turnip 紅黑樹 VA 與 BO 快取）：約 1.7 倍幀數（fork 82744fe、device b8e5279、NativeAdreno 627836d、NativeMobileDisplay 364ce27）
+- ✅ **10-29** 上游 surface import 保留的 UAF（cache 命中存了呼叫者的 IOSurfaceRef，backboardd 約 30 s 崩一次）（NativeMetal 7da9d3d）
+- ✅ **10-29** arm64e 可行性：三支手機在 Gunyah pseudo-unprotected 下 PAC 都可用（`plans/IPADOS27_BUMP.md`）；使用者決定直接 bump 到 iPadOS 27
+- ✅ **10-29** 從零建置自動化：`scripts/build-droidvm-all.py`（全新 clone → `out/droidvm/release/`，每步 stamp，reference candidate 自動 build）＋rig `fresh-deploy.sh`（手機上換一台新 VM）
+- ✅ **10-29** 動態 ADT：DarwinBoot 從 firmware FDT 補 RAM、`/arm-io` 裝置（DarwinBoot b2ad902、device 2c9227e…3f3474d 的 `--dynamic`）；接進 `board.toml`，crosvm 裝置變動不必重產 ADT [[droidvm-dynamic-adt]]
+- ✅ **10-29** owner 工具（applebox、ipatool、debugserver、lsdiag）烤進 Data seed，不再開機後 stage
+- ✅ **10-29** applebox 獨立倉庫 Droid-VM/applebox（2307bb9），裝置 repo 以 `feeds.toml` 釘 commit
+- ✅ **10-29** libimobiledevice 進流程：21 個工具併成一顆 4 MB multicall（`build-droidvm-libimobiledevice.py`），乾淨 clone 從零 17 分鐘
+- ✅ **10-29** ownervisor 獨立成 debug shell 倉庫 Droid-VM/ownervisor（65fc2c7）：一份 `debug-shell.json` 信任紀錄取代六份
+- ✅ **10-29** 8 Gen 3 那支刪掉舊 VM、`fresh-deploy.sh` 建新 VM（crosvm d5c13c494）開到主畫面：Metal、en0、電量、virtio-media／snd 正常
+- ✅ **10-29** 推上後乾淨 clone 全流程一次跑完（fork 1c8e709、device 312cb4a，約 16 分鐘；Adreno740 7b61139 補 hostsim 的 `proc_selfpid`）
+- ✅ **10-29** 8 Elite Gen 5（Adreno 840）的 Metal 修好：Data seed 帶的舊 Turnip 不在開機 trust cache，換成已 trust 的 plugin bundle（seed 也換新）[[gpu-8e5-support]]
+- ✅ **10-29** iPadOS 的 virtio-media 傳輸層：guest 自檢讀到解碼器格式 H.264／HEVC／VP9／AV1 → NV12（crosvm `--virtio-mmio-media` d5c13c494、guest `DroidVMVirtioMedia.c` e66a7b4）
+- ✅ **10-28** TODO 6 電池：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）→ powerd → SpringBoard，放電與充電都驗過 [[droidvm-battery]]
+- ✅ **10-28** TODO 3 音訊原廠堆疊整條通：`IOAudio2Device`（Speaker／Mic 依 UID 分裝置）→ VirtualAudio → HAL → virtio-snd（virtio-mmio 上的 vhost-user AAudio）；PCM 逐位元正確，Safari 播放經手機喇叭出聲（device 3e0d34c、crosvm 8d587f266）[[droidvm-audio]]
+- ✅ **10-28** crosvm 的 vhost-user 能用在 virtio-mmio：activate 不強求 MSI-X、frontend 尊重 `VIRTQ_AVAIL_F_NO_INTERRUPT`
+- ✅ **10-28** entitlement 全集盤點（stock 21H461：3,658 key、247 個 list key；權限類候選全集 3,430 key／約 360 KB）[[entitlement-fullset]]
+- ✅ **10-28** 決定：UniXNUSetting＝ownervisor 的 in-app GUI，要 root 的操作經 socket 交 ownervisor，不做特權 app
+- ✅ **10-28** 實測：persona 不能讓 mobile 自力提權（EPERM）；360 KB 全集 AMFI 拒收（上限約 256 KB）；109-key lockdownd 除錯集（17 KB）AMFI 全部授予
+- ✅ **10-28** runtime 信任快取可行：`zzyd-owner-runtime-trust-cache.patch`＋`owner-runtime-trust-cache=1`，載入 version-2 模組後 cdhash 立即被信任，不用重開機
+- ✅ **10-28** AMFI 把任何 entitlement（含私有）授予 cdhash-trusted 的 binary（實測）
+- ✅ **10-28** TODO 1 陀螺儀原廠路線：kernel HID 服務（`DroidVMMotionHid.inc`）→ locationd／CoreMotion → backboardd；ADT 根 compatible 第一項改 `J120AP`；App 的 `CMMotionManager` 讀得到，自動旋轉不靠 orientd
+- ✅ **10-28** 介面 fps 22→64~92（旋轉改走 2D 引擎、答案快取、編碼執行緒、mimalloc）
+- ✅ **10-28** GFXBench 拉伸修好（開機 framebuffer blob 補白頁；切換 producer 後重套 transform）
+- ✅ **10-28** 上游 UniXNU rebase 進來（元件改名 NativeMetal→AdrenoMetal 等；MetalCheck 29/29；舊 tip 存 `pre-rebase-20261028` tag）
+- ✅ **10-28** wip/vpu 全部 rebase 進 wip/hackintosh（11 個 repo；crosvm 76 個 VPU commit；app 582 測試過）
+- ✅ **10-27** 整套 iOS hackintosh 推上 GitHub
+- ✅ **10-27** 開機參數內建進 kernel（`DroidVMBootArgs.c`）
+- ✅ **10-27** 畫面旋轉＋動作感測器（host 全通用，crosvm `--input motion`）
+- ✅ **10-27** GFXBench IPA 改用 UIScene，修實機閃退
+- ✅ **10-27** guest 的 droidvm-gpu 驅動拆除
+- ✅ **10-27** fps 調校：送出畫面前等 GPU 畫完，修破圖
+- ✅ **10-26** 隨機記憶體破壞：8 位元 ASID＋Gunyah vCPU 遷移 → 16 位元 ASID（fork `zzxa-16bit-asid.patch`），GFXBench 10/10
+- ✅ **10-26** GFXBench 破圖（Aztec 全黑＝pipeline reflection；T-Rex／Car Chase）
+- ✅ **10-26** host 端只剩通用裝置：droidvm-gpu 退役、drm2kgsl 不再辨識 guest
+- ✅ **10-25** drm2kgsl 遷移：iOS 3D 預設走 virtio-gpu＋drm2kgsl（`vgpu-3d=1`），ALU2 22→50 fps
+- ✅ **10-25** 重型 GFXBench（Aztec／Car Chase／T-Rex）都出分
+- ✅ **10-25** 兩種手機 watchdog 當機（guest WFE＋secondaries 讀 stale boot data）
+- ✅ **10-24** GFXBench 第一次出分
+- ✅ **10-24** GPU 記憶體 2 GB→590 MB
+- ✅ **10-24** 發現手機 OPLUS daemon 把大核限頻（跑分要記 `scaling_max_freq`）
+
+## 未解／待查
+
+- ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
+- ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
+- ⬜ **11-02** WebGPU renderBundles 要 `MTLIndirectCommandBuffer`（執行期有 API，plugin 還沒包裝）
+- ⬜ **11-02** WebGPU 的 cubemap、fractalCube 範例待查
+- ⬜ **11-02** Wi-Fi 沒有無線電：station 掃描結果為空、沒加入網路（`droidvm-wifi-ssid` 只測 UI）；接真實硬體要在 station 換後端（例如 host 的 Wi-Fi 掃描／連線經 virtio 轉入）
+- ⬜ **11-02** 藍牙只有 Apple VM 的虛擬控制器（LE 走 Bonjour）；接手機真實藍牙未做：bluetoothd 的 "VIRT" driver（`<裝置>-in`／`-out`）由 kernel 轉 virtio，或 H4＋kernel control socket
+- ⬜ **11-02** 第三方 App 拿不到 Metal（GPU client 白名單制）
+- ⬜ **11-02** 嚴格的 Apple4 做不到：raster order groups、imageblocks、tile shaders、imageblock sample coverage、post-depth coverage 被拒，indirect／ICB 邊角、linear texture、depth/stencil resolve 等有缺口；附件型 ROG／imageblock 可部分模擬；只問 Apple4 以上的 App 會被拒
+- ⬜ **11-02** locationd 每次開機約 10 秒後 PAC 崩潰一次（arm64e，Cohort:0 佇列上已釋放的 dispatch 物件）；重啟後正常，已不波及 UI
+- ⬜ **11-02** SpringBoard 當 GPU 客戶端會讓 home 指示條消失、App 內邊緣上滑不被辨識（已還原，根因未查）
+- ⬜ **11-02** 新 Data 第一次產生桌布圖庫時的記憶體風暴：PosterBoard 讓各桌布擴充同時 GPU 渲染，wired 衝到 4.65 GiB、jetsam 殺掉幾十個行程；blob 頁不計 footprint，jetsam 看不到真正的大戶
+- ⬜ **11-02** metal2vulkan keep_room 的空 pooled block（render server 547–616 MiB，`emptied=None`，trim 不釋放）；下一步：壓力 ≥ Warning 時暫停 keep_room，或限制空 block 總量
+- ⬜ **11-02** 16 MiB block 會讓 render server 的 GPU context hang（3/5 vs 64 MiB 0/5，不是 UBWC），根因未查；fork feefe53、AdrenoMetal 8f735a2 未推，手機 plugin 1a47826 沒有除錯檔時預設 16（guest 已寫 64）
+- ⬜ **11-02** kgsl-sync、vrend-sync、Binder:crosvm 被 VM 的 GPU cgroup 放進 `/dev/cpuset/gpuworker`（cpu 7），與 vCPU5 共用 core 7（VM 設定問題，未改）
+- ⬜ **11-01** 設定第一次開某頁仍要 300–650 ms：冷 page-in（每次 fault 0.1–0.2 ms），區塊驅動並行化後單執行緒冷讀小檔改善有限
+- ⬜ **11-01** 開機路徑仍有 6 GB 的 4K 雜湊預處理（讀 21 s、雜湊 10.5 s，corecrypto `CC_USE_ASM=0` 純 C SHA）；方向：硬體 SHA 指令，或存下推出來的 4K 雜湊
+- ⬜ **11-01** 09:18 UTC 當機：guest 可用記憶體 150 ms 內掉 1 GB（同時 KaleidoscopePoster OutOfMemory），誰吃掉的待查
+- ⬜ **11-01** 一次開機 SpringBoard 沒起來（只畫 3 格），重開即好，未重現
+- ⬜ **11-01** Adreno740 留在 627836d：合併版在 NativeAdreno `wip/merge-up-1101`（f57a9c6），等移植 `build-droidvm-gpu.py` 對 `NativeAdrenoPublish.cpp` 的文字替換
+- ⬜ **11-01** 上游兩個 Turnip patch（render-mode、gmem-mutable-swap）套不上 Droid-VM/mesa，連同 bridge 0020 未收
+- ⬜ **11-01** union 不去重：上下層同名的項目列兩次（`System`、`usr`、`CoreImage.metallib`）
+- ⬜ **11-01** 設定側欄約 60 fps、下拉搜尋 46 fps：Liquid Glass 讓 pass 數與像素暴增；Spotlight 的重幀大半是 metal2vulkan 模擬 no-copy buffer（每幀整塊拷 6–27 MB＋上千次小拷貝）
+- ⬜ **11-01** 使用者指定的卡頓：設定亂點、旋轉、左側小工具、App 資料庫、下拉搜尋（連帶的 SpringBoard 閃退已修，卡頓仍在）
+- ⬜ **11-01** 翻頁下一步：固定 120 Hz 以上的觸控注入器排除測試方法本身；抓那 1/5 主執行緒連續忙 9–14 ms 的幀在算什麼
+- ⬜ **11-01** 次要：guest GPU 驅動輪詢 `IODelay(5)` 的微阻塞（SpringBoard 主執行緒 6 秒 8,824 次）；host CREATE_BLOB／GEM_CLOSE／CREATE_BLOB_USER 往返偶爾 10–33 ms（`droidvm_virtgpu_slow_ops`）
+- ⬜ **11-01** DroidVM 被手動加進 OPLUS 遊戲空間（CPU 上限 1.0–1.1 GHz），是否移出由使用者決定
+- ⬜ **10-31** 手機上的 `usr/lib/libvirglrenderer.so` 是手動換的（原檔 `.bak-098ce1c7`），還沒打包進 APK
+- ⬜ **10-31** 強制 GMEM 會黑畫面，待查
+- ⬜ **10-31** metal2vulkan 排程器從不扣住批次，73% 的提交送出時 GPU 佇列是空的
+- ⬜ **10-31** host blit（prio 5）在 IB 之間搶占，約 30% 的幀多 1.5–2.4 ms
+- ⬜ **10-31** 首頁編輯模式（圖示抖動）58 fps：每幀 47 個 render pass、467 個 draw、6100 萬像素
+- ⬜ **10-31** 下一步候選：GPU 工作不留空檔（縮短每幀 GPU 階段或提前送下一幀）；app 端 `requestUnbufferedDispatch`；毛玻璃多 pass 的 GPU 成本（GMEM／sysmem）；CA tick 對齊 host vsync
+- ⬜ **10-30** 開機時 render server 偶爾卡在 Turnip 的 `CREATE_BLOB_USER`（7 個 GPU 提交沒完成），abort 一次 backboardd 後正常
+- ⬜ **10-30** rig `touch.py`（寫 guest RAM）在 27 上沒效果：HID report 有增加但鎖定畫面與翻頁沒反應（量測改用 `input.py`）
+- ⬜ **10-30** iPadOS 17 也用上游 7183e58 那個 GPU pin，但還沒用這版跑過
+- ⬜ **10-30** 27 還沒搬：tools overlay、virtio-media 解碼、麥克風錄音驗收；GPU client 清單未擴回 17 的範圍（14 個時手機進 swap）
+- ⬜ **10-30** 一次開機在開機動畫後就沒再出 frame（沒有 GPU fault），同一映像重開正常，當偶發
+- ⬜ **10-30** Liquid Glass 的重影
+- ⬜ **10-30** 關機卸載時 kernel 在 `vnode_rele_ext` panic（usecount 變負；10-29 起）
+- ⬜ **10-29** 上游 RamBlock 4be2d7e 未收：它只在 Install（sheng-data-reset）時建 Data store，DroidVM 新 VM 的空白 data-store.img 會永遠存不進去
+- ⬜ **10-29** IOHIDFamily 一個只讀不寫的 32 位元旗標沒配對（落在 0 上），先不動
+- ⬜ **10-29** `use_contiguous_hint=0` 是暫解：正解是 emitter 把 4K kernel 的 `__TEXT` 對齊 64 KiB
+- ⬜ **10-29** ArmCpu fe98808 只在 Mac 的 27 樹用 ignored `ipados27/local.toml` 覆寫，fork pin 未動（等 17 量過再釘）
+- ⬜ **10-29** 8 Elite Gen 5 那支的 iPadOS 17 VM 在停／開與重啟 daemon 後開機 panic「offline scratch Data mount failed: 2」，沒修（重建 seed 會清 Data），等使用者決定
+- ⬜ **10-29** 8 Gen 3 那支開機後一次 backboardd NULL deref：`tu_CmdCopyImageToBuffer2` ← metal2vulkan `ShadowCopy::record_gated` 的 `ShadowTarget::Rotated`（我們的 0011 旋轉 patch，只有橫向走這條）
+- ⬜ **10-29** GPU parity 只部署到三支手機中的兩支
+- ⬜ **10-29** hostsim 的 deferred-pressure 檢查失敗（上游 Turnip patch 與測試不一致），記在 `release.json` 的 `checks`，不擋 build
+- ⬜ **10-29** iPadOS 17 新 Data 的桌布是黑的（Poster 問題；27 已有桌布）
+- ⬜ **10-29** 兩格小工具首次打開空白
+- ⬜ **10-29** ownervisor 的 serial-shell 有定義但不啟動：本板 `/dev/console` 還沒接到 UART
+- ⬜ **10-28** 陀螺儀待補：單位、動態轉動的實機驗證
+- ⬜ **10-28** 錄音還沒在 app 裡驗到：host 的 capture stream 開著，guest 沒收到 input 的 StartIO；Voice Memos 按錄音沒反應（tccd 處理 `voicememod` 時 LaunchServices 回 -10814）
+- ⬜ **10-28** GPS 暫停：J120 上 locationd 不會啟動 GNSS（WiFi 版 iPad 沒有 GPS provider bit），要換 J121AP 身分；未解的是 J121 走 gpsd 還是基頻 QMI；回來第一步只換 ADT 身分實測 [[droidvm-gps-plan]]
+- ⬜ **10-28** 8 Elite Gen 5 那支的 seed 已換：下一次 `payload-redeploy.sh` 要 `ALLOW_CHANGE=seed`，會重置 Data（先備份 `/private/var/ngpu`）；8 Gen 3 主 tree 的 seed 仍帶未 trust 的舊 Turnip（沒動）
+- ⬜ **10-28** 搬到 8 Elite 那支中止：留下 app r312、crosvm（`crosvm.bak-579d1a5b`）、UniXNU 映像與 VM 項目（data-store 已失效）[[droidvm-5568-state]]
+- ⬜ **10-28** `board.toml` 的 trust pin 是 8 Elite Gen 5 rig 自己的，沒 commit
+- ⬜ **10-28** no-sandbox staged app 從主畫面啟動未端到端跑（app-launch 半邊等 runtime 安裝器）
+- ⬜ **10-28** UniXNUSetting app 本身未做：staged 系統 app 放唯讀 os.img、SpringBoard 不給刪（`plans/UNIXNUSETTING.md` §3.1）
+- ⬜ **10-28** 持久化 trust 清單改由 kernel 在 Data 掛上時直接讀（`DroidVMTrustCache.c`），未實作
+- ⬜ **10-28** entitlement 要盤一份 curated 清單（不簽 360 KB 全集）；keychain 的 `*` 萬用字元要查 Security 原始碼，未驗
+- ⬜ **10-28** runtime trust cache 實驗（`zzyd` patch、`DroidVMTrustCache.c`）當時是本機 WIP；定案前要收掉 `owner-tc-selftest=1` 與 gfxprobe 的實驗 entitlement
+- ⬜ **10-28** 配對：機內 lockdownd 協定配對走不通（value-only 端點；TCP 62078 要 TLS／passcode）；剩 USB-mux 模擬、無線（設密碼）、直接寫 `/var/db/lockdown` 的 pair record（待逆向格式）
+- ⬜ **10-28** debug bridge／USB 未做：NCM（USB Ethernet gadget）把 PC 橋到 guest en0；真 usbmux 要 FunctionFS
+
+## 陷阱與工具（續報整理）
+
+### 陷阱
+
+- fileset 會搬動 native kernel 程式碼：從 native code 呼叫原廠位址要經帶絕對位址字面值的 stub（`ldr x16 / br x16`），PC 相對呼叫會 instruction fetch abort
+- fileset 比對：改到會被內聯的核心函式後，靠「參考順序」配上的函式會失配（`microuptime` → 開機 panic "original component called an unmapped kernel function"）；重建無補丁核心、比對新舊 `kernel.map.json`，把差異寫進 `fileset-reviewed.json`
+- emitter 對沒配上的 kext→kernel 資料參照會原地加 slide，落在 native 物件上（kernel.json `missing`）：在 `fileset-reviewed.json` 的 `data` 清單補
+- 手動補配對時字串掃描會跑過函式結尾（`read_random` 被認成 `SHA512_Init`）：逐一對照原廠反組譯與 xnu 原始碼
+- `deploy27.sh` 會把 `out/kernel.nm` 換回 native 位址：每次都要重跑 `fileset-syms.py`，否則 rig 符號全錯、還會誤報 panic
+- xnu-12377 的 random-seed 要 256 bytes，少了會在 console 出來前 panic
+- DEVELOPMENT kernel 的 625 µs 看門狗會在 vCPU 被 host 搶占時觸發：`interrupt-masked-debug-mode=0`、`sched_preemption_disable_debug_mode=0`
+- 改 defconfig 後要 `unixnu defconfig -D <board> droidvm_ipados27_defconfig` 重新合併 `.config` 並刪 `kern_exec.o`（XNU 的 make 不追 define），否則 kernel 仍是舊 Data UUID → `offline scratch Data mount failed: 2`
+- 每次建 seed 都是新的 Data volume UUID（build kernel 前寫進 `CONFIG_XNU_OWNER_DATA_VOLUME_UUID`）；27 換 seed 就要重建 data-store
+- Data seed 要用 `--case-sensitive --expanded-records`（`newfs_apfs -e -x`）建：SplashBoard 的 purgeable 需要 expanded records，只能在建卷時設
+- ADT 的 `graphics-featureset-fallbacks` 不能有 APPLE2／MTL2,2：MobileGestalt 會判 DeviceSupportsASTC，SplashBoard 改寫 ATX 快照，解 ATX 要 AGX 私有 API；舊 .ktx 快照要等 app 再開一次才換掉
+- AMP 核心遇到沒有 `cluster-type` 的 CPU 會開機 panic（`recount: cannot map cluster type`）：從 Mac 建磁碟要換上 AMP 版 DarwinBoot
+- 命令列上限 1023 bytes（曾到 1051）：新參數放核心內建（`DroidVMBootArgs*.c`）
+- 上游 AdrenoMetal 的診斷是開關：命令列要 `sheng-diag=1 log-gpu=1`
+- 不能整個拿掉 `vmm-present`（AMFI panic「No PMGR?」），也不能對所有行程隱藏（SpringBoard 的背光 watchdog 殺 SpringBoard、全黑）：用 `owner-hide-vmm=` 逐行程隱藏
+- WebGPU.framework 在 VM 裡（`kern.hv_vmm_present`=1）只在 `WebKitAllowWebGPUOnVMs` 為真時繼續，adapter 只給 Apple4 以上
+- WebKit 把 `newLibraryWithSource:` 回傳的任何 error（含只有警告）當失敗
+- iPadOS 27 要 `sheng-no-lc=1` 跳過 launch constraint；17 的 `owner-skip-launch-constraints` 在 27 不讀
+- 27 的 zsh 會重設 login shell 的 PATH：root 的 `~/.zshenv` 把 `/private/var/ngpu/bin` 放進 PATH
+- 27 的 QuartzCore `preferredScale`：虛擬裝置、或高度 >1080 的 panel 一律 @2x（17 沒有），所以 27 用 2048×2732@2x
+- 27 與 17 的核心都是 4 KiB 頁（UniXNU 在非 Apple SoC 用 BCM2837 的配置）：大 surface 段數多（2048×2732＝5464 段）
+- ADT `/product` 的機種身分是從 J820 靜態複製的；螢幕尺寸不在 FDT（走 virtio-gpu／GOP）
+- 原地覆寫正在用的 plugin → kernel 快取的簽章 blob 對不上（`cs_mtime != mtime`），respring 不夠，要重開 VM
+- J820 是 Face ID 機型，叫醒後約 2 秒熄屏；probe 在 transfer 少於 2 次時不受理 Home，熄屏的 respring 後先用 `touch.py` 點一下
+- `plugin-build-fam.sh` 不會重建 Turnip（log 顯示 `same libvulkan_freedreno.dylib`）：改 Mesa 後先跑 `link-droidvm-gpu-sources.py`（補上 drivers/Adreno740）再 `build-turnip-darwin.py --target ios27`
+- rust 1.98.0 編 ios27 plugin 前要 `rustup component add rust-src`
+- DarwinBoot.efi 要用 unixnu 準備的 LLVM toolchain（`CLANG_BIN=out/droidvm/toolchain/`；Apple clang 沒有 llvm-lib）
+- 本板格式下本機 `unixnu.lock` 會蓋過 `feeds.toml` 的 pin：`build-droidvm-all.py` 每次 `fetch --update`
+- multicall 併檔：工具是 hidden visibility，改名的 main 會留 hidden，要用 `ld -r -alias _main _<tool>_main`
+- 新 Data 首次開機約 5 分鐘才出第一張圖（要建所有 app／extension 的 container）
+- 複製 data-store 前一定先停來源 VM，否則 guest panic「libSystem.B.dylib not loaded」
+- 手機重開後 `gh_hugepage_reserve.ko` 在使用者的 KernelSU 目錄（請使用者 insmod）；`load-modules.sh` 依 `uname -r` 選模組目錄 [[droidvm-host-reboot-recovery]]
+- VM 設定只存在 daemon 記憶體：只做 `vm_modify` 的話 daemon 重啟後回到舊設定，改完要跑 `vmpersist.py` 寫回 `vms.json`（27 VM 的設定檔在 rig 的 `unixnu27-vm.2048.config.json`）
+- crosvm 的 `PowerClient` 要同時實作 `get_power_data` 與 `last_request_timestamp`；build wrapper 吃掉退出碼曾部署到舊 binary（畫面停在 goldfish 預設 50%）
+- IOKit 驅動先 `init()` 再 `attach()`，反了會在 `attachToParent` data abort
+- 手機沒聲音先查手機的媒體音量（`STREAM_MUSIC` speaker index 0）；`cmd media_session volume --set` 在這支手機設不進去，用 `KEYCODE_VOLUME_UP/DOWN`
+- OPLUS 遊戲空間常把所有核心壓在 1.0–1.1 GHz（`/proc/game_opt/cpu_max_freq`）：量測時用 root 暫設 `/proc/game_opt/disable_cpufreq_limit=1`、量完還原；沒記限頻狀態的數字不可靠
+- host WALT 以「忙碌時間×目前頻率」算負載、每 16 ms 視窗只升約 25%：0.9 GHz 滿載只算 25%，爬到頂要 40–116 ms，guest 的短爆量做完頻率還沒上來
+- 手機平放時 guest 開機是直向，往 y 滑會拉出 Spotlight＋鍵盤（曾誤判成手機過熱）：量之前一律 `shot.py` 看一眼
+- guest 裡的 spindump 會占一顆 vCPU，1 ms 取樣還會讓 SpringBoard 的檔案頁被換出（假的 1.5 秒 page-in），不能拿來判斷誰在等 CPU
+- u_trace（`gpu-traces`）會把 GPU 時間拉長數倍，量幀時要關
+- GPU 時間要以 pass 為單位看：整個 batch 混了 host blit 搶占與中途變頻，看不出時脈效果
+- A840 不吃單筆 batch 的 power constraint 旗標；constraint 常駐會讓閒置首頁也鎖在 1200 MHz，所以依提交速率切換
+- GPU 時間已排除（改了不變）：IO-coherent（virglrenderer 82e81d2e 的 `DRM2KGSL_NONCOHERENT`）、m2v inline memoryless 切 pass、強制 sysmem
+- 試過沒收益：display hold（讓 commit 提早回傳）、encode 執行緒 SCHED_RR 54（commit→送出的 3.3 ms 是翻譯本身）
+- 翻頁每幀只有 1 個 render pass（89 draw）：「每個 pass 翻完先送」不適用；m2v 在 commit 前送半個 pass 有 Metal 語意風險，不做
+- rig 的 `frame-burst.sh` 讀開機 simplefb，virtio-gpu 之後量不到東西：改用 scratchpad `rec.sh`（screenrecord，每格時間戳）
+- crash report 裡的 code 0xdac11a30 不是錯誤碼，是 `autda x16, x17` 的機器碼（PAC 驗證失敗）
+- 不能用「jop_key 為 0」判斷 JOP 停用：shared region 第一個 slide pager 的 key 就是 0，launchd 會 PAC 崩潰、開機卡死
+- 8 Gen 3 那支跑 PAC probe 時 cpu3 卡住讓手機重開過（cpu0–2 正常）
+- 平台 sandbox 只放行 Apple 列出的 IOKit 類別：自製的 HID／user client 類別名要用 Apple 的（如 `AppleSPUHIDDevice`），否則 `iokit-open-user-client`／`iokit-open-service` 被擋
+- 不要停用 bluetoothd：它的 Mach 服務不存在時 audiomxd 的 BTAudioHALPlugin 每秒查找約 1900 次，launchd 每次讀 password 檔、吃 90% CPU（17 也踩過，註解在 `DroidVMBootArgs.c`）
+- AppleImage4 的 `start()` 會等 IOAESAccelerator，沒有就卡住 IOKit config thread（InterfaceNamer 每個新介面等 4 分鐘）；它的硬體金鑰 0x8a4 回 unsupported 會 panic，要由裝置種子軟體衍生
+- 27 的 stock Wi-Fi 堆疊條件：configd 看 controller 類別、IO80211.framework 看 IFT_ETHER＋`IFNET_SUBFAMILY_WIFI`、wifid 用 `IOInterfaceName` 比對、`APPLE80211_IOC_FILTER_MONITOR_EVENTS` 被拒就放棄、MobileGestalt 的 `wifi` 看 `/arm-io/wlan`；wifid plist 有 `_LimitLoadToDeviceTree=wlan`
+- AMFI 把任何 entitlement 授予任何 cdhash-trusted binary（含之後 runtime 信任的使用者 IPA）：授權不能只查 entitlement，要查對端 cdhash
+- entitlement 全集：萬用字元的比對規則各檢查方不同；同一 key 型別不一致（給錯型別＝沒給）；聯集裡有雜訊（`no-sandbox\n`、誤入的 `CFBundleIdentifier`），聯集 ≠ 真全集
+- `dyld` 還沒初始化完就查 image 清單會讓 debugserver 卡住：改用 `qMemoryRegionInfo` 找主程式
+
+### 除錯工具
+
+- `gfxprobe dontcare`（device 3ad4a03）：BGRA8／RGBA16Float／Depth32Float × 1x／4x × Clear／Load／DontCare 的儲存行為，配 `TU_DEBUG=gmem|sysmem`
+- `gfxprobe clocks`：用 Swift 的算法排計時器，驗證時基
+- `gfxprobe argbuf`：argument encoder（descriptor／function × kernel／fragment）
+- `gfxprobe families`（plugin 的 `droidvmFamilyBlockers:`）：在裝置上跑 Metal family 稽核
+- `gfxprobe ktxdecode`、`pitchcheck`、`spuopen`；`gfxprobe wired`（device 3089d22）：guest 記憶體分類
+- `gfxprobe mg`、`gfxprobe sbscreen`（device 343ea40）：MobileGestalt 值、SpringBoard 選到的螢幕
+- `dbgattach.py`：在 `WebGPU::Device::generateAValidationError(NSString*)` 設斷點讀 WebKit 被隱私遮蔽的錯誤；同一次開機的 shared cache slide 可從閒置 daemon 量
+- `dbgbreak.py`（scratchpad）：debugserver 斷點、自動跨過、改暫存器、印 Swift 類別名、用 GOT 推算 shared cache slide
+- 檔案信箱 kind 8（`package/DroidVMPageInfo.c`，`export.py page CTX perm`，device dc66d13）：stackshot 的 PageBusy context 減 `vm_kernel_addrperm` 就是 page，印 offset、旗標、object 與 4 層 shadow、vnode 檔名（guest `vm_pages` 實體不連續，host 讀不到）
+- `export.py mem`：debugserver 取 `libvulkan_freedreno` 載入位址後讀 Turnip 的 `darwin_va` 用量
+- plugin 的 MEM／MA 列（核心 `native_adreno_metal_rows`，scratchpad `mtrows.py`，MA 用 `NativeAdrenoMetal.map` 解）
+- 找 Turnip device loss：guest 開關 `/private/var/ngpu/debug/mesa-log`（NativeMetal c9f76cf）→ `MESA_VK_ABORT_ON_DEVICE_LOSS` → crash report
+- plugin 的 `gpu-traces` 開關（NativeMetal fafb7fc，`/private/var/ngpu/debug/gpu-traces`）：Turnip u_trace 每個 pass 的 GPU 時間戳；scratchpad `utrace.py`、`utframe.py`、`utkgsl.py`、`utclk.py` 對齊 KGSL trace
+- plugin 日誌公開（`NBLOG` 用 `%{public}s`）：被拒的 pipeline、缺少的 selector、Rust panic 進系統日誌，pipeline 日誌有 `L`／`D` 行；scratchpad m2v27 worktree 的 `examples/journal_replay.rs` 用 guest 的 metallib 重放被拒的日誌行
+- frames.trace 逐幀＋u_trace：scratchpad `gestframes.py`、`utgroups.py`、`gaps.py`
+- `droidvm-sched-trace.patch`＋`tools/rig/schedtrace.py`（device 81def30）：context switch／wakeup 寫進 12 MiB ring，host 直接讀，和 frames.trace 同一個 mach 時鐘
+- `uclat`：在手機上量 WALT 升頻延遲
+- scratchpad `tlrow.py`、`tlcap.sh`、`cop-ab.sh`、`blitrace.py`、`inflight.py`：spindump 時間線、complete-on-post A/B、host blit 時序
+- NativeMetal exp-bgra 94b6c57 的 Q 列：metal2vulkan 排程器（host step／gate／event／grouping）
+- 觸控延遲：手機端直接讀 guest 記憶體的計數器（觸控、HID 報告、畫面）＋screenrecord；scratchpad `rec.sh`、`probe.sh`
+- 計數器：`native_virtio_time`（區塊裝置、驗證、複製、等鎖時間，每顆磁碟）、`droidvm_input_still`、`droidvm_virtio_gpu_stray`、`droidvm_virtgpu_slow_ops`
+- `logarchive.py` 修正（device d7b279c）：`log show` 不再停在最後一筆 timesync
+- rig `panic.py` 用 fileset 的 KernelCache slide 符號化（device 3804c57）；AdrenoMetal 334eeb8 在 library 檔打不開時寫 log
+- `kcdiff.py`：guest 記憶體對照映像
+- `sheng-exc-name` 讓 userland 例外進 kernel log；Mac 上掛 SystemOS cryptex 用 `ipsw dyld a2s` 符號化（slide 從 pc 附近 8 個指令字在 cache 裡找，16K 對齊）
+- `stacks+*.ips`（stackshot，`export.py`／`crashes.py` 取）含所有行程的 thread 堆疊：看 userland 卡在哪
+- `scratchpad/entdump.py`／`entclass.py`：擷取、分類 entitlement；產物 `fullset-candidate.plist`、`ents-21H461.jsonl`、`ents-21H461-cryptex.jsonl`
 
 ## 1. 現況
 
@@ -1145,7 +518,7 @@ UniXNUSetting 本質上是幫 ownervisor 做的 app 內 GUI，所以用 ownervis
   再由各 guest（iOS、Windows、Linux）自己的 provider 接到原生 API。線上協定不帶 IOKit selector、Objective-C 物件、Apple struct
   或 host 指標。傳輸能通只代表資料送得到 guest，不代表系統 API 已經接上（例如陀螺儀現在進得了 guest，app 卻讀不到）。
 
-1. ~~**陀螺儀：原廠路線**~~ **已完成（2026-10-28）**：kernel HID 服務（`DroidVMMotionHid.inc`）→ locationd/CoreMotion → backboardd；ADT 根 compatible 改 `J120AP`；一般 app `CMMotionManager` 讀得到，自動旋轉不靠 orientd。詳見最上面續報與 memory [[droidvm-motion-sensors]]。待補：陀螺儀單位、動態轉動的實機驗證。
+1. ✅ **陀螺儀：原廠路線已完成（2026-10-28）**：kernel HID 服務（`DroidVMMotionHid.inc`）→ locationd/CoreMotion → backboardd；ADT 根 compatible 改 `J120AP`；一般 app `CMMotionManager` 讀得到，自動旋轉不靠 orientd；待補項見「未解／待查」。memory [[droidvm-motion-sensors]]。
 2. **iPadOS 內的 IPA 安裝器 / UniXNUSetting（進行中）。** 見最上面「TODO 2 續報」：runtime 信任快取已證實可行、entitlement 可任意授予。配對先擱著。範圍與動工順序：
    - **(1) shell 環境（先做）＝ 4 個工具，全部簽上 entitlement 全集 + owner-trust，每個 applet/行程都帶滿權限**（AMFI 對 cdhash-trusted binary 授予任意 entitlement，已驗）：
      **applebox**（單一 multicall：Apple OSS `_cmds`（file/text/shell/adv/network…）+ toybox 補缺口（xz/timeout/od…）+ zsh，用 `ld -r` + exported-symbols-list 併一顆）、**dropbear**（ssh，login shell exec applebox-zsh → 滿權限 zsh）、**debugutil**（原 gfxprobe）、**libimobiledevice**（備著，待配對通了才用）。entsh 暫不做（這幾顆滿權限的就是它）。
@@ -1165,28 +538,38 @@ UniXNUSetting 本質上是幫 ownervisor 做的 app 內 GUI，所以用 ownervis
      池、Linux guest driver（DKMS）、libva-v4l2 都做完，Ubuntu 上出貨組態驗收（Firefox 硬解 H.264／VP9／AV1、ffmpeg 硬體編碼、相機）
      大部分已關；`wip/vpu` 已 rebase 進 `wip/hackintosh`。還開著的：**P-6**（畫面卡死、之後鎖定畫面全黑，blocker，未能重現）、**P-5**
      （硬體編碼 drain 偶發掉尾幀，非決定性）、P-2（low）、P-9 的 12.4 h 實機 soak 沒做。細節 `plans/VPU_DESIGN.md` §7.8。
-   - **iPadOS guest：傳輸層第一個里程碑完成（10-29，5566；已 push：crosvm d5c13c494、device e66a7b4／3f3474d、DarwinBoot b2ad902）。**guest 開機自檢讀到
-     `droidvm decoder caps 0x4004000 out: H264 HEVC VP90 AV01 cap: NV12`（9 個 command、0 timeout）。
-     - crosvm：新增 `--virtio-mmio-media`（media 裝置接在 snd 之後的 virtio-mmio）；VM 加 `--pre-alloc ...,media-host-mb=64`、
-       `--virtio-media kind=decoder,uid=10367`（helper 以 app uid 跑，buffer 從 `media_host` pool 配）。
-     - guest：`package/DroidVMVirtioMedia.c`（輪詢式 virtio-mmio 傳輸、commandq/eventq、OPEN/CLOSE/IOCTL/MMAP/MUNMAP API）。
-       陷阱：`VIDIOC_QUERYCAP` 由 driver 用 config space 自己回答，送給 device 會回 ENOTTY。
-     - **動態 ADT（使用者 10-29 提議）**：DarwinBoot 開機時從 firmware 的 FDT（EDK2 `FDT_CLIENT_PROTOCOL`）補上 RAM
-       （`dram-base/size` 與 `/pram`、memory-limit、video-memory、`kern.maxvnodes`）和 `/arm-io` 的裝置節點（逐一讀 virtio-mmio
-       視窗的 DeviceID 分類，加上 pool 與電池）；`make-droidvm-adt.py --dynamic` 只產靜態部分。加 media pool 讓 RAM 從
-       `0x13f200000` 縮成 `0x13b200000`、drm pool 搬家，都自動處理，不用再為了 crosvm 裝置變動重產 ADT。
-       驗證：host harness 跑出的結果與 Python 靜態 ADT 逐位元相同（現況與加 media 兩種配置），5566 實機開機正常。
-       memory [[droidvm-dynamic-adt]]、[[droidvm-virtio-media-ios]]。
+   - ✅ **iPadOS guest：傳輸層第一個里程碑完成（10-29）**：guest 自檢讀到解碼器格式（H264／HEVC／VP90／AV01 → NV12，9 個 command、0 timeout）；crosvm `--virtio-mmio-media`（d5c13c494）、guest 輪詢式 `package/DroidVMVirtioMedia.c`（e66a7b4）、動態 ADT（DarwinBoot b2ad902、device 3f3474d）。memory [[droidvm-dynamic-adt]]、[[droidvm-virtio-media-ios]]。
+     - 陷阱：`VIDIOC_QUERYCAP` 由 driver 用 config space 自己回答，送給 device 會回 ENOTTY。
      - 下一步：kernel 自檢跑一次完整解碼往返（S_FMT、REQBUFS MMAP、QBUF 一段 H.264、STREAMON、DQBUF／SOURCE_CHANGE 事件、
        NV12 校驗），再加 encoder／camera；之後才決定怎麼接 VideoToolbox 與相機堆疊（要逆向原廠驅動介面）。
+   - **接 VideoToolbox：用 Apple 自己 VM 的 paravirtualization 通道（11-02 查明，從 24A446 shared cache 讀出）。**
+     - iPadOS 27 的 VideoToolbox 本身帶完整的 paravirtualized 解碼器、編碼器、JPEG、motion estimation（`ParavirtualizedVideoDecoder_*`
+       等；macOS host 那半邊 `VTParavirtualizationHost*` 也編在同一顆）。`VTParavirtualizationIsRunningInGuest` 只看
+       `AppleVideoToolboxParavirtualizationDriver` 打不打得開（不看 `kern.hv_vmm_present`），打得開就讓合格的 codec 全走它。
+       userland 原封不動，XNU 扮演 host，把 session 翻成 virtio-media 的 V4L2：符合「通用 host 裝置、XNU 翻譯、userland 原廠」。
+     - 傳輸（`VideoToolboxParavirtualizationSupport.framework`，8 KB，`AppleParavirtGPU-1`）：IOServiceOpen type 0。
+       selector 0 `{size}`→`{容量, 送出 buffer, 佇列}`（kernel 映射進行程，先 16 KiB）；1／2 註冊／註銷 guest UUID（16 bytes）；
+       3 `{長度, 最多 5 個 IOSurface ID}`→`{status}`；4 佇列取空。host→guest 用 IODataQueue＋notification port（每則 ≤16 KiB）。
+       sandbox 只放行 `AppleVideoToolboxParavirtualizationUserClient` 這個名字（kernel 的 profile 有這串）。
+     - 訊息：48 bytes 的 FigAtom `'vtpv'`（類型 FourCC、flags、guest UUID、request ID），後接序列化 CF 型別與 sample buffer 的 atom。
+       解碼器：guest→host `decs` 列表、`dcap` 能力、`+dec` 建立、`dsta` 開 session、`dcan`、`dfrm` 解一幀、`dfin`、`dcop`／`dset`／
+       `dmul`／`dsup`／`dsav` 屬性、`dinv`、`-dec`、`Bye!`；host→guest `Dbuf` 請 guest 配 pixel buffer（IOSurface）、`Demt` 送出解好的幀、
+       `Ddpa`／`Dpba`／`Drpa` 屬性、`Dfub`。編碼器對稱（`encs`…）。
+     - 進度：傳輸層 `package/DroidVMVTParavirt.cpp`（Apple 名字的 driver／user client、buffer、佇列、每則訊息記錄給 peek），
+       預設不發布（`droidvm-vt-paravirt=1` 或 root 寫 `kern.droidvm_vt_paravirt=1`；只影響之後才啟動的行程），
+       觸發用 `gfxprobe vtdecode [hw] [paravirt]`（內嵌 64x64 H.264 IDR）。已驗證（device 3df7c94）：開啟、buffer、UUID 註冊、送出都通，
+       收到第一則 `decs`（flags 1、request 100，payload 一個 `'para'` atom：`,ver` `=u32` 6，即 guest 協定版本 6）；沒人回覆時
+       VideoToolbox 等約 1.2 s 後退回軟體解碼（guest 現在的 H.264 是軟解，64x64 一幀 25–45 ms）。rig 讀法：scratchpad `vtpv.py`。
+     - 下一步：host 端回 `decs`（host 的 `VTParavirtualizationHostCopyDecoderListReply` 用硬體解碼器清單組 dictionary 陣列：
+       `CMClassImplementationName`、rating、`DecoderCapabilities`、codec type；回覆標頭沿用請求的類型、UUID、request ID），再做
+       `dcap`／`+dec`／`dsta`／`dfrm`，接 virtio-media 解碼（avcC→Annex-B 進 OUTPUT queue，NV12 從 CAPTURE 寫進 `Dbuf` 拿到的 IOSurface）。
 5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**
    - **GPS：調查完、暫停（使用者 10-28 指示，晚點回來）。**結論見最上面 10-28 晚續報：J120 上 locationd 不會啟動 GNSS（WiFi 版
      iPad 沒有 `kProviderLocationGps`），要換 J121AP 身分（值已從官方 IPSW 取得）；未解的是 J121 上 locationd 走 gpsd 還是基頻
      QMI。路線：virtio-console 具名 port（NMEA）→ XNU 驅動提供 `/dev/cu.gps` → gpsd＋薄 vendor plugin。
    - 磁力計：手機有 mmc56x3x，走第 1 項的 HID 路徑（未做）。
    - Wi-Fi 唯讀：survey 過，kernel 沒有 IO80211 family、真驅動是 DriverKit，太重，暫不做。
-6. ~~**電池**~~ **已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別，
-   只提供基類就夠）→ powerd → SpringBoard。放電、充電都驗過。memory [[droidvm-battery]]。
+6. ✅ **電池：已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）→ powerd → SpringBoard，放電、充電都驗過。memory [[droidvm-battery]]。
 7. **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**
    - iPadOS 上它們不是鍵盤頁（0x07）的鍵，而是 Consumer page（0x0C）的 HID 按鍵事件：Power／Lock 0x30、Volume+ 0xE9、
      Volume− 0xEA（另有 Mute 0xE2、Home＝Menu 0x40）。backboardd／SpringBoard 依 usage page＋usage 分辨。
