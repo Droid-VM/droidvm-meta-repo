@@ -3,6 +3,29 @@
 更新：2026-11-02。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-11-02 深夜之二，Claude）：MSAA 在 Adreno 上的成本降到跟單取樣一樣（GMEM + DONT_CARE）
+
+- **誰在用 MSAA**：系統 UI 沒有用（backboardd 的 pipeline 裡 0 個多重取樣）。管線日誌 24603 條裡有 405 條是 MSAA，全部來自
+  動態桌布（Mercury「celosia」4x、Pride 2x/4x、Unity2025 4x、Hello 2x）和 Safari 的 WebGL／WebGPU（4x）。
+  所以「關 MSAA 讓 UI 變順」對這台不適用：UI 本來就不走 MSAA。
+- **高通的 MSAA 優化之前沒用上**：Adreno 的 MSAA 只有在 GMEM（tile 記憶體）模式才便宜，因為取樣留在晶片上，只寫出 resolve 結果。
+  原本 4x 是 1x 的 5 倍（2048x2732、64 個混合全螢幕三角形：37.5 ms 對 7.6 ms），兩個原因：
+  1. Turnip 的 autotune 把少於 5 個 draw 的 pass 一律送去 SYSMEM，每個取樣都寫進記憶體再讀回來 resolve。
+     修法：`patches/mesa/turnip-msaa-resolved-prefers-gmem.patch`，有不需要儲存的多重取樣附件的 pass 一律走 GMEM。
+  2. metal2vulkan 在沒量測過的驅動上，把 Metal 的 `DontCare`／`MultisampleResolve` 一律轉成 Vulkan `STORE`
+     （`DriverFact::DontCareStoreIsOneOfMetals`），所以就算走 GMEM，每個 tile 還是把取樣寫回去。所有 App 的 DontCare 深度緩衝也一樣。
+     修法：`patches/metal2vulkan/0021-turnip-dont-care-stores.patch`，給 Turnip（高通）這個 fact。
+- **量測**（device 3ad4a03 的 `gfxprobe dontcare`）：BGRA8 1x/4x（有無 resolve）、RGBA16Float、Depth32Float 1x/4x，
+  載入 Clear／Load／DontCare，不畫／畫一半／全畫，1024x1024 和 2048x2732。`TU_DEBUG=gmem` 下每個 texel 和取樣都是原本的值，
+  `TU_DEBUG=sysmem` 下都是 Store 會留下的值，從來沒有第三種答案，符合這個 fact 的條件。
+- **結果**（fork 803a014）：64 個 draw 的 4x 從 37.5 ms 降到 9.2 ms（等於 1x）；1 個 draw 從 4.5–5.0 ms 降到 2.0 ms。
+  鎖定畫面、主畫面、Safari 的 WebGPU 範例（helloTriangleMSAA、shadowMapping、deferredRendering）畫面正確。
+- **fence wait 逾時不是這次造成的**：gpu-3d 的「fence waits timed out」是 Turnip 每 100 ms 一段的等待到期。A/B（同樣開機與
+  同樣順序）：改之前 deferredRendering +52、shadowMapping +22；改之後 +58、+29；helloTriangleMSAA 兩邊都是 0。
+  這些逾時本來就有，只出現在較重的 WebGPU 範例，原因待查。
+- **陷阱**：`plugin-build-fam.sh` 不會重建 Turnip（log 顯示 `same libvulkan_freedreno.dylib`）。改 Mesa 後要先跑
+  `link-droidvm-gpu-sources.py`（補上 drivers/Adreno740），再跑 `build-turnip-darwin.py --target ios27`。
+
 ## 續報（2026-11-02 深夜，Claude）：Swift 的計時全部失效（已修，時基改成 24 MHz）；設定出現 Ethernet；藍牙／Wi-Fi 的 daemon
 
 - **根因：iPadOS 27 的 Swift Concurrency 把時基寫死成 Apple 的 24 MHz（device 5edbbfc，已推）**。
