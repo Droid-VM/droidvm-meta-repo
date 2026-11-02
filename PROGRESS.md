@@ -79,10 +79,15 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
     - `APPLE80211_IOC_FILTER_MONITOR_EVENTS` 被拒，wifid 就放棄排程裝置，WiFiKit 拿到 `devices (null)`。現在 set 一律接受，只拒絕熱點模式。
     - MobileGestalt 的 `wifi` 看 `IODeviceTree:/arm-io/wlan`，所以 wlan 節點搬到 arm-io 底下，並加上 `/chosen/mac-address-wifi0`。
   - 以後接真實硬體：在 station 換一個後端，例如把 host 的 Wi-Fi 掃描／連線經 virtio 轉進來，介面這層不用動。
-- **待查**：
-  - 新介面第一次命名要等 4 分鐘：InterfaceNamer 等 IOKit 安靜，但 `ArmDTPlatform/defaults` nub 一直 busy（!matched）。
-  - mobileassetd 持續吃約 40% CPU。
-  - 有一次開機 gpu-3d 出現 3 次 fence wait 逾時。
+- **IOKit 永遠不安靜、mobileassetd 吃 40% CPU（已修，device a42261e）**：同一個原因。
+  - AppleImage4 掛在 `defaults` 節點，`start()` 會等 IOAESAccelerator，VM 沒有。結果 IOKit 的 config thread 永遠卡住，IOKit 不會安靜，
+    InterfaceNamer 每次命名新介面都要等 4 分鐘逾時；AppleImage4 的 nonce sysctl 也沒有回應，mobileassetd 一直重試。
+  - 修法：把上游的 SoftwareAES（軟體 AES-CBC）搬到 27，跟 17 一樣提供 IOAESAccelerator。
+    - 27 原始 `IOAESAccelerator` 的 ABI 跟 17 相同：vtable 181 槽，IOService 168 槽加上 13 個自有方法，物件 0x120。
+      位址從 fileset 讀出，寫在 `package/SoftwareAES-24A446.S`。
+    - 函式要經過帶絕對位址字面值的 stub 才能呼叫：fileset 會搬動 native kernel 的程式碼，直接 PC 相對呼叫會跳錯位置，曾經造成 instruction fetch abort。
+    - AppleImage4 用硬體金鑰 0x8a4 加密 nonce，回 unsupported 就會 panic。所以這把金鑰改由每台裝置的種子以軟體衍生（`package/SoftwareAESKeys.inc`）。
+- **待查**：有一次開機 gpu-3d 出現 3 次 fence wait 逾時。
 - **除錯工具**（scratchpad）：
   - `dbgbreak.py`：debugserver 斷點，自己處理跨過斷點；支援改暫存器、印 Swift 類別名稱，以及用 GOT 推算 shared cache slide 後設斷點。
   - `dyld` 還沒初始化完就查 image 清單會讓 debugserver 卡住，改用 `qMemoryRegionInfo` 找主程式。
