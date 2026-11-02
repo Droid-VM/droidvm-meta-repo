@@ -33,6 +33,15 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   - 評估過做 stub 藍牙或 Wi-Fi 的成本：
     - Wi-Fi 要寫 IO80211 驅動來回應 wifid 的私有介面，還會讓 en0 變成 Wi-Fi，是數週的工作。
     - 藍牙要一個假的 HCI 控制器，包括傳輸驅動、HCI 初始化和廠商命令，是數天的工作；而且要橋接到手機的藍牙才有實際用途。
+- **WebGPU 的 rotatingCube（有 bind group 的頁面）**：追到兩層原因。
+  - 第一層（已修，AdrenoMetal 3a4afd3、fork bb654a0）：WebKit 把 `newLibraryWithSource:` 回傳的任何 error 都當失敗，
+    而 plugin 的編譯前端（metal driver mode）會對 WebGPU 產生的 MSL 報「unused variable」警告。
+    現在只有警告時不回報 error，警告寫進日誌。
+  - 第二層（未修）：plugin 沒有實作 `MTLArgumentEncoder`，也沒有 `newArgumentEncoderWithArguments:`、`gpuResourceID`。
+    WebGPU 的 BindGroupLayout 要靠它們建立，所以用到 bind group 的頁面都會得到「invalid BindGroupLayout」。
+    metal2vulkan 的執行期已經有完整的 `ArgumentEncoder`，缺的是 bridge 匯出和前端的 ObjC 包裝。
+  - 抓 WebKit 被隱私遮蔽的錯誤：`dbgattach.py` 在 `WebGPU::Device::generateAValidationError(NSString*)` 設斷點，直接讀 NSString。
+    同一次開機的 shared cache slide 可以從閒置的 daemon 量。
 - **除錯工具**（scratchpad）：
   - `dbgbreak.py`：debugserver 斷點，自己處理跨過斷點；支援改暫存器、印 Swift 類別名稱，以及用 GOT 推算 shared cache slide 後設斷點。
   - `dyld` 還沒初始化完就查 image 清單會讓 debugserver 卡住，改用 `qMemoryRegionInfo` 找主程式。
