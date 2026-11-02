@@ -7,6 +7,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-03** 解析度／DPI 查明：iPadOS 27 的 UI scale 不看 DPI、`display-scale`、MobileGestalt，由 `-[CADisplayMode preferredScale]` 決定（模式帶 preferredUIScale 就用它，只有外接 digital-out 模式會帶；否則 MobileGestalt `IsVirtualDevice` 為真 → 至少 @2x；否則高度 >1080 px → @2x），而且每個 UIKit 行程各自算。所以 1024×1366 永遠是 @2x、512×683 點、iPad mini 排版。不改 userland 的省法：1536×2048（768×1024 點 @2x，SpringBoard screen type 111），首頁、設定排版正常、觸控正常，像素少 44%，backboardd GPU 記憶體 617→454 MiB、顯示 surface 85→48 MiB；代價是同樣的手機畫面只放 768×1024 點（介面放大約 1.33 倍）。VM 仍維持 2048×2732，換解析度只改 VM 螢幕設定，DPI 不影響
 - ✅ **11-02** VideoToolbox paravirt 預設開啟（內建開機參數 `droidvm-vt-paravirt=1`，有 virtio-media 編／解碼裝置才發布）；裝置做不到的（小於 96x96、非 4:2:0）在 `dsta` 就拒絕，VideoToolbox 改用軟體解碼；主畫面、HEIC、JPEG 不受影響（device 706338e）
 - ✅ **11-02** VideoToolbox 編碼走手機 VPU：guest 核心回 paravirtualized 編碼器（`encs`／`+enc`／`esta`／`efrm`→`Efds`／`Eemt`／`ecfr`），接 virtio-media 編碼器；App 的 IOSurface 經 videocodecd 自己的 client 建 port 再查（selector 0x23／0x22）。720p 60 幀：H.264 204 fps、HEVC 292 fps，0 失敗，ffmpeg 解得回來（Y PSNR 37–67 dB）（device 9d5a0ce）
 - ✅ **11-02** VideoToolbox 解碼走手機 VPU：guest 核心扮演 Apple VM 的 paravirtualization host，接 virtio-media 解碼器（MediaCodec）。720p 60 幀：H.264 135–151 fps、HEVC 159–170 fps，0 失敗，亮度正確（device 1479852）
