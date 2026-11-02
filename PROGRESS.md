@@ -3,6 +3,42 @@
 更新：2026-11-02。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
+## 續報（2026-11-02 晚，Claude）：Safari 的 WebGPU（已能用）；metal2vulkan 與 Apple4；設定沒有 Ethernet（根因已縮小）
+
+- **Safari 的 WebGPU 為什麼不工作：四道關卡，已全部打通（device 24a79b2、fork 3d8ef4d、AdrenoMetal 4089943，均已推）**。
+  1. Safari 的 GPU 行程（`com.apple.WebKit.GPU`）不在 GPU 客戶端清單裡，沒有 Metal 裝置。已加入 `board.toml` 的
+     `droidvm-gpu-clients`。
+  2. 加入後，Metal 裝置在建立時被拒絕：`device: OutOfMemory(Device)`。原因是 GPU 行程的 sandbox 擋掉 `hw.physmem` 和
+     `hw.pagesize`（`hw.memsize` 沒擋），Mesa 的 `sysconf(_SC_PHYS_PAGES)` 因此回傳 -1，Turnip 算出 0 bytes 的 heap。
+     修法：新增 fork 的 Mesa 補丁 `mesa-darwin-total-memory-sysctl.patch`，這種情況改讀 `hw.memsize`。
+     影響範圍：所有 sandbox 擋這兩個 sysctl 的行程都會中這個問題，不只 WebKit。
+  3. iPadOS 27 的 WebGPU.framework 先讀 `kern.hv_vmm_present`；在 VM 裡，只有使用者預設值 `WebKitAllowWebGPUOnVMs` 為真時
+     才繼續。修法：核心內建的 `owner-hide-vmm` 加上 `com.apple.WebKit.GPU`（原本只有 audiomxd）。命令列已經到 1051 bytes，
+     超過 1023 的上限，所以改放核心內建參數。
+  4. WebGPU 只給 `MTLGPUFamilyApple4` 以上的裝置 adapter，我們的裝置只回報 Apple1–3。修法：plugin 的 `supportsFamily:`
+     依呼叫者所在的 framework 分類，只對 WebGPU.framework 回答 Apple4 = YES（比照原本 RenderBox 的特例）。
+  - 結果：webgpureport.org 列出 `adreno` adapter，`requestAdapter`／`requestDevice`／`getContext("webgpu")` 都成功；
+    webgpu-samples 的 helloTriangle 畫得出來。
+  - 尚未解決：rotatingCube 的 render pipeline 被拒（`createBindGroup: invalid BindGroupLayout`），WebKit 的錯誤訊息被隱私遮蔽，
+    plugin 端沒有拒絕紀錄。
+- **metal2vulkan 與 Apple4（`gfxprobe families`，透過新的 `droidvmFamilyBlockers:` 在裝置上跑 family 稽核）**。
+  - Adreno 840 回報 Apple1–3 和 Common1–2；Apple3 本來就是帶豁免宣告的。
+  - Apple4 多出的阻擋項目分兩類：
+    - Refused：raster order groups、imageblocks（Turnip 沒有 `fragment_shader_interlock`）、tile shaders、imageblock sample
+      coverage（Vulkan 沒有對應物）、post-depth coverage（沒有 `EXT_post_depth_coverage`）。
+    - Gap：indirect draw／ICB 的邊角情況、linear textures、depth/stencil resolve、counter sample buffers 等。
+  - 嚴格意義的 Apple4 做不到。Turnip 有 `rasterization_order_attachment_access` 和 `dynamic_rendering_local_read`，
+    以附件為對象的 ROG／imageblock 可以部分模擬；tile shaders 要拆 render pass。
+- **設定沒有 Ethernet 選單：偵測沒問題，是側欄沒有重新整理**。
+  - en0 符合 Preferences 的所有條件（type 6、family 2、subfamily 0、非 hidden、沒有 DIRECTLINK）。
+  - 用 debugserver 掛在 Settings 啟動上確認：`EthernetListItemProvider` 的初始非同步更新呼叫 `hasEthernetNetworkInterfaces`
+    得到 YES，並把旗標設成 1。但側欄的 items getter 在這之前就讀過一次（當時是 0），之後沒有再讀。
+  - 用除錯器在第一次讀取時把旗標改成 1，側欄就出現 Ethernet，所以項目、bundle 和 controller 都正常。
+  - 下一步：找出側欄重新查詢 provider 的觸發點。真機上推測是 Wi-Fi／藍牙等 provider 的狀態變化順帶觸發重繪，guest 沒有這些。
+- **對第三方 App 的影響**。
+  - 第三方 App 目前完全拿不到 Metal，因為 GPU 客戶端是白名單制；這是最大的影響。
+  - 若之後開放：Mesa heap 的修正已涵蓋擋 `hw.physmem` 的 sandbox。只問 Apple4 以上 family 的 App 一樣會被拒。
+
 ## 續報（2026-11-02 傍晚，Claude）：純 arm64 程式一啟動就 PAC 崩潰（已修）；Games 開不起來（已修）；壓力測試結果
 
 - **純 arm64（非 arm64e）程式一律無法執行（device 8ea1e33，已推）**。UniXNU 的 native PAC（fork `native-pac-keys.patch`）
