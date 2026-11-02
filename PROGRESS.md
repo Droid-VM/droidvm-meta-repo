@@ -7,6 +7,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-02** VideoToolbox 編碼走手機 VPU：guest 核心回 paravirtualized 編碼器（`encs`／`+enc`／`esta`／`efrm`→`Efds`／`Eemt`／`ecfr`），接 virtio-media 編碼器；App 的 IOSurface 經 videocodecd 自己的 client 建 port 再查（selector 0x23／0x22）。720p 60 幀：H.264 204 fps、HEVC 292 fps，0 失敗，ffmpeg 解得回來（Y PSNR 37–67 dB）（device 9d5a0ce）
+- ✅ **11-02** VideoToolbox 解碼走手機 VPU：guest 核心扮演 Apple VM 的 paravirtualization host，接 virtio-media 解碼器（MediaCodec）。720p 60 幀：H.264 135–151 fps、HEVC 159–170 fps，0 失敗，亮度正確（device 1479852）
 - ✅ **11-02** MSAA 在 Adreno 上降到單取樣成本：Turnip 對不儲存的多重取樣附件走 GMEM＋metal2vulkan 對 Turnip 交 DONT_CARE（`turnip-msaa-resolved-prefers-gmem.patch`、`0021-turnip-dont-care-stores.patch`；4x 64 draw 37.5→9.2 ms；fork 803a014）
 - ✅ **11-02** 查明誰用 MSAA：系統 UI 不用（backboardd 0 個），只有動態桌布與 Safari 的 WebGL／WebGPU，「關 MSAA 讓 UI 變順」不適用
 - ✅ **11-02** Swift 的計時恢復：`libswift_Concurrency` 把 deadline 寫死成 24 MHz（ns×3÷125），19.2 MHz 的 guest 上 `Task.sleep`／debounce／timeout 永不觸發 → 核心對外呈現 24 MHz 時基（`droidvm-timebase-24mhz.patch`、`droidvm-timebase-hz=24000000`，device 5edbbfc）
@@ -540,8 +542,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
      （硬體編碼 drain 偶發掉尾幀，非決定性）、P-2（low）、P-9 的 12.4 h 實機 soak 沒做。細節 `plans/VPU_DESIGN.md` §7.8。
    - ✅ **iPadOS guest：傳輸層第一個里程碑完成（10-29）**：guest 自檢讀到解碼器格式（H264／HEVC／VP90／AV01 → NV12，9 個 command、0 timeout）；crosvm `--virtio-mmio-media`（d5c13c494）、guest 輪詢式 `package/DroidVMVirtioMedia.c`（e66a7b4）、動態 ADT（DarwinBoot b2ad902、device 3f3474d）。memory [[droidvm-dynamic-adt]]、[[droidvm-virtio-media-ios]]。
      - 陷阱：`VIDIOC_QUERYCAP` 由 driver 用 config space 自己回答，送給 device 會回 ENOTTY。
-     - 下一步：kernel 自檢跑一次完整解碼往返（S_FMT、REQBUFS MMAP、QBUF 一段 H.264、STREAMON、DQBUF／SOURCE_CHANGE 事件、
-       NV12 校驗），再加 encoder／camera；之後才決定怎麼接 VideoToolbox 與相機堆疊（要逆向原廠驅動介面）。
+     - 解碼、編碼的往返已由下面的 VideoToolbox 路線做完；相機還沒接。
    - **接 VideoToolbox：用 Apple 自己 VM 的 paravirtualization 通道（11-02 查明，從 24A446 shared cache 讀出）。**
      - iPadOS 27 的 VideoToolbox 本身帶完整的 paravirtualized 解碼器、編碼器、JPEG、motion estimation（`ParavirtualizedVideoDecoder_*`
        等；macOS host 那半邊 `VTParavirtualizationHost*` 也編在同一顆）。`VTParavirtualizationIsRunningInGuest` 只看
@@ -555,14 +556,24 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
        解碼器：guest→host `decs` 列表、`dcap` 能力、`+dec` 建立、`dsta` 開 session、`dcan`、`dfrm` 解一幀、`dfin`、`dcop`／`dset`／
        `dmul`／`dsup`／`dsav` 屬性、`dinv`、`-dec`、`Bye!`；host→guest `Dbuf` 請 guest 配 pixel buffer（IOSurface）、`Demt` 送出解好的幀、
        `Ddpa`／`Dpba`／`Drpa` 屬性、`Dfub`。編碼器對稱（`encs`…）。
-     - 進度：傳輸層 `package/DroidVMVTParavirt.cpp`（Apple 名字的 driver／user client、buffer、佇列、每則訊息記錄給 peek），
-       預設不發布（`droidvm-vt-paravirt=1` 或 root 寫 `kern.droidvm_vt_paravirt=1`；只影響之後才啟動的行程），
-       觸發用 `gfxprobe vtdecode [hw] [paravirt]`（內嵌 64x64 H.264 IDR）。已驗證（device 3df7c94）：開啟、buffer、UUID 註冊、送出都通，
-       收到第一則 `decs`（flags 1、request 100，payload 一個 `'para'` atom：`,ver` `=u32` 6，即 guest 協定版本 6）；沒人回覆時
-       VideoToolbox 等約 1.2 s 後退回軟體解碼（guest 現在的 H.264 是軟解，64x64 一幀 25–45 ms）。rig 讀法：scratchpad `vtpv.py`。
-     - 下一步：host 端回 `decs`（host 的 `VTParavirtualizationHostCopyDecoderListReply` 用硬體解碼器清單組 dictionary 陣列：
-       `CMClassImplementationName`、rating、`DecoderCapabilities`、codec type；回覆標頭沿用請求的類型、UUID、request ID），再做
-       `dcap`／`+dec`／`dsta`／`dfrm`，接 virtio-media 解碼（avcC→Annex-B 進 OUTPUT queue，NV12 從 CAPTURE 寫進 `Dbuf` 拿到的 IOSurface）。
+     - ✅ **解碼、編碼都通（11-02）**：`package/DroidVMVTParavirt.cpp`（傳輸、Apple 名字的 driver／user client）＋`DroidVMVTHost.cpp`
+       （host：session 依 UUID，V4L2 session、worker thread、IOSurface 查詢）＋`DroidVMVTWire.h`（訊息格式）。device 1479852（解碼）、
+       9d5a0ce（編碼）。預設仍不發布：`droidvm-vt-paravirt=1` 或 root 寫 `kern.droidvm_vt_paravirt=1`（之後才啟動的行程才會用）。
+       測試：`gfxprobe vtdecode paravirt FILE N`、`gfxprobe vtencode paravirt [hevc] W H N`（輸出 `/private/var/ngpu/enc.h264|hevc`）。
+       VM 要有 `--virtio-media kind=decoder` 與 `kind=encoder`（＋`--virtio-mmio-media`、`media-host-mb=160`）。
+     - 格式怎麼來的：Mac（macOS 27）上 `tools/vtpv-oracle`：`hostonly` 把 guest 錄到的訊息餵給 VideoToolbox 自己的 host session，
+       錄 host 的回覆（`Efds` 要回真的 format description，host 才會吐 `Eemt`）；編碼器在 macOS 是 out-of-process，loopback 跑不起來。
+     - 陷阱：
+       - guest framework 在 selector 3 整段持鎖，host 不能在 guest 的 thread 上等 guest 回覆（輸入排隊、worker 做事）。
+       - MediaCodec 會扣幀（單張 IDR 也扣），`dfin`／`ecfr` 要 drain（`*_CMD_STOP`→LAST→`*_CMD_START`），兩秒還沒交出的幀回錯誤。
+       - 高通 AVC 解碼器 720p 要 21 個 CAPTURE buffer；c2.qti 解碼最小 96x96。
+       - IOSurface 只能被「建立者 task」或「已持有它的 client」查：解碼的 surface 是 videocodecd 自己建的，核心另開一個 client 查即可；
+         編碼的 surface 是 App 的（XPC 傳進來），要用行程自己的 client（`IOUserClientCreator` 找）建 port 再查。
+         同一個 client 查第二次會被拒，所以依 ID 快取，session 結束 `clientClose` 一次還。
+       - 關鍵幀不能帶 `NotSync`（WebRTC、gfxprobe 都只看有沒有這個 key）。
+       - 解碼器、編碼器 session ID 會重複，媒體事件要依裝置＋session 分派。
+     - 下一步：開機預設發布並測 Safari／AVPlayer 播放與錄影類 App；1080p；VP9／AV1 解碼（VideoToolbox 的 paravirt 清單能不能列）；
+       `ecop` 目前回不支援。
 5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**
    - **GPS：調查完、暫停（使用者 10-28 指示，晚點回來）。**結論見最上面 10-28 晚續報：J120 上 locationd 不會啟動 GNSS（WiFi 版
      iPad 沒有 `kProviderLocationGps`），要換 J121AP 身分（值已從官方 IPSW 取得）；未解的是 J121 上 locationd 走 gpsd 還是基頻
