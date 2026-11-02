@@ -66,9 +66,23 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   audiomxd 的 BTAudioHALPlugin 在連線錯誤回呼裡立刻重連，每秒查找約 1900 次。
   launchd 每次查找失敗都要讀一次 password 檔。現在不再停用 bluetoothd，launchd 降到 2%。
   （17 時期就踩過同一個坑，註解寫在 DroidVMBootArgs.c。）
-- **Wi-Fi（調查中）**：上游 UniXNU-sheng 的 `package/WifiNet.cpp` 讓 stock wifid 透過 Apple80211 請求操作一個 en 介面，
-  registry 用 `IO80211Controller`/`IO80211Interface` 的名稱；無線電藏在 `nw_abi.h` 後面，可以換成 stub 或 virtio 後端。
-  27 的 wifid 還帶 `IO80211APIUserClient` entitlement，要先確認 27 用的是 ioctl 還是 user client。
+- **Wi-Fi（已可用，device 9bcff1a）**：Settings 跟接了 USB 網卡的 iPad 一樣，Wi-Fi（Not Connected，開關打開、正在掃描）、
+  Ethernet、Bluetooth（On）三者並存，上網走 Ethernet（en0）。
+  - 作法：`package/DroidVMWifi.inc`。在 IONetworkingFamily 的 Ethernet 類別上做 `IO80211Controller`/`IO80211Interface`，
+    再加一個沒有傳輸層的 `DroidVMVirtualWifi`（自己的 nub，en1）。
+    Apple80211 request 的格式和回答參考上游 UniXNU-sheng 的 `WifiNet.cpp`；station 沒有無線電，掃描結果為空。
+    `droidvm-wifi-ssid=NAME` 會出現一個可加入的開放網路，只用來測 UI。
+  - 27 的 stock Wi-Fi 堆疊實際需要的條件（逐一在 guest 上查到）：
+    - configd 靠 controller 類別判定 IEEE 802.11。
+    - IO80211.framework 靠 SIOCGIFTYPE 判定 Wi-Fi：IFT_ETHER 加 IFNET_SUBFAMILY_WIFI（`setInterfaceSubType`）。
+    - wifid 用 `IOPropertyMatch {IOInterfaceName: "en1"}` 找介面，IONetworkInterface 沒有這個屬性（在 `initIfnetParams` 補上）。
+    - `APPLE80211_IOC_FILTER_MONITOR_EVENTS` 被拒，wifid 就放棄排程裝置，WiFiKit 拿到 `devices (null)`。現在 set 一律接受，只拒絕熱點模式。
+    - MobileGestalt 的 `wifi` 看 `IODeviceTree:/arm-io/wlan`，所以 wlan 節點搬到 arm-io 底下，並加上 `/chosen/mac-address-wifi0`。
+  - 以後接真實硬體：在 station 換一個後端，例如把 host 的 Wi-Fi 掃描／連線經 virtio 轉進來，介面這層不用動。
+- **待查**：
+  - 新介面第一次命名要等 4 分鐘：InterfaceNamer 等 IOKit 安靜，但 `ArmDTPlatform/defaults` nub 一直 busy（!matched）。
+  - mobileassetd 持續吃約 40% CPU。
+  - 有一次開機 gpu-3d 出現 3 次 fence wait 逾時。
 - **除錯工具**（scratchpad）：
   - `dbgbreak.py`：debugserver 斷點，自己處理跨過斷點；支援改暫存器、印 Swift 類別名稱，以及用 GOT 推算 shared cache slide 後設斷點。
   - `dyld` 還沒初始化完就查 image 清單會讓 debugserver 卡住，改用 `qMemoryRegionInfo` 找主程式。
