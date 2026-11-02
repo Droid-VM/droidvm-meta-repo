@@ -141,6 +141,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 未解／待查
 
+- ⬜ **11-02** VideoToolbox paravirt 編碼器還不吃 App 的設定：`esup` 沒列 AverageBitRate、MaxKeyFrameInterval、RealTime、ProfileLevel 等，VideoToolbox 直接拒絕、不送 `eset`，碼率與 GOP 用 MediaCodec 預設。要做：列進清單、`eset` 對到 V4L2 `V4L2_CID_MPEG_VIDEO_*`，且 codec 要延到第一幀才建立（App 在 session 建好後才設，`esta` 時已經 STREAMON）
 - ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
 - ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
 - ⬜ **11-02** WebGPU renderBundles 要 `MTLIndirectCommandBuffer`（執行期有 API，plugin 還沒包裝）
@@ -572,8 +573,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
          同一個 client 查第二次會被拒，所以依 ID 快取，session 結束 `clientClose` 一次還。
        - 關鍵幀不能帶 `NotSync`（WebRTC、gfxprobe 都只看有沒有這個 key）。
        - 解碼器、編碼器 session ID 會重複，媒體事件要依裝置＋session 分派。
-     - 下一步：開機預設發布並測 Safari／AVPlayer 播放與錄影類 App；1080p；VP9／AV1 解碼（VideoToolbox 的 paravirt 清單能不能列）；
-       `ecop` 目前回不支援。
+       - VideoToolbox 只轉發 `dsup`／`esup` 支援清單裡有的屬性，清單外的它自己回 -12900、不問 host；目前清單只列
+         `UsingHardwareAccelerated{Decoder,Encoder}`（回 true，device fab4fb1）。HEVC 編碼 session 會主動問
+         `MVHEVCVideoLayerIDs`（多視角 HEVC），回不支援是對的。
+     - 下一步：開機預設發布並測 Safari／AVPlayer 播放與錄影類 App；1080p；VP9／AV1 解碼（VideoToolbox 的 paravirt 清單能不能列）。
 5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**
    - **GPS：調查完、暫停（使用者 10-28 指示，晚點回來）。**結論見最上面 10-28 晚續報：J120 上 locationd 不會啟動 GNSS（WiFi 版
      iPad 沒有 `kProviderLocationGps`），要換 J121AP 身分（值已從官方 IPSW 取得）；未解的是 J121 上 locationd 走 gpsd 還是基頻
