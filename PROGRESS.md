@@ -163,7 +163,6 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **11-02** WebGPU 的 cubemap、fractalCube 範例待查
 - ⬜ **11-02** Wi-Fi 沒有無線電：station 掃描結果為空、沒加入網路（`droidvm-wifi-ssid` 只測 UI）；接真實硬體要在 station 換後端（例如 host 的 Wi-Fi 掃描／連線經 virtio 轉入）
 - ⬜ **11-02** 藍牙只有 Apple VM 的虛擬控制器（LE 走 Bonjour）；接手機真實藍牙未做：bluetoothd 的 "VIRT" driver（`<裝置>-in`／`-out`）由 kernel 轉 virtio，或 H4＋kernel control socket
-- ⬜ **11-02** 第三方 App 拿不到 Metal（GPU client 白名單制）
 - ⬜ **11-02** 嚴格的 Apple4 做不到：raster order groups、imageblocks、tile shaders、imageblock sample coverage、post-depth coverage 被拒，indirect／ICB 邊角、linear texture、depth/stencil resolve 等有缺口；附件型 ROG／imageblock 可部分模擬；只問 Apple4 以上的 App 會被拒
 - ⬜ **11-02** locationd 每次開機約 10 秒後 PAC 崩潰一次（arm64e，Cohort:0 佇列上已釋放的 dispatch 物件）；重啟後正常，已不波及 UI
 - ⬜ **11-02** 新 Data 第一次產生桌布圖庫時的記憶體風暴：PosterBoard 讓各桌布擴充同時 GPU 渲染，wired 衝到 4.65 GiB、jetsam 殺掉幾十個行程；blob 頁不計 footprint，jetsam 看不到真正的大戶
@@ -191,7 +190,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **10-30** 開機時 render server 偶爾卡在 Turnip 的 `CREATE_BLOB_USER`（7 個 GPU 提交沒完成），abort 一次 backboardd 後正常
 - ⬜ **10-30** rig `touch.py`（寫 guest RAM）在 27 上沒效果：HID report 有增加但鎖定畫面與翻頁沒反應（量測改用 `input.py`）
 - ⬜ **10-30** iPadOS 17 也用上游 7183e58 那個 GPU pin，但還沒用這版跑過
-- ⬜ **10-30** 27 還沒搬：tools overlay、virtio-media 解碼、麥克風錄音驗收；GPU client 清單未擴回 17 的範圍（14 個時手機進 swap）
+- ⬜ **10-30** 27 還沒搬：tools overlay、麥克風錄音驗收（virtio-media 解碼 11-02 已在 27 上；GPU client 11-03 起全開、由 sandbox 決定）
 - ⬜ **10-30** 一次開機在開機動畫後就沒再出 frame（沒有 GPU fault），同一映像重開正常，當偶發
 - ⬜ **10-30** Liquid Glass 的重影
 - ⬜ **10-30** 關機卸載時 kernel 在 `vnode_rele_ext` panic（usecount 變負；10-29 起）
