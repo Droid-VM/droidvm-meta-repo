@@ -7,6 +7,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-03** VM 螢幕高度 ≤1920 時 @1x：用 UniXNU 的 native-text-fixup 修補 QuartzCore `-[CADisplayMode preferredScale]` 兩處（虛擬裝置分支改走高度規則、門檻 1080→1920；`make-droidvm-adt.py --text-fixup` 寫 `/chosen/text-fixups`；code-signing bitmap 快速路徑也套用，`droidvm-text-fixup-bitmap.patch`）。1032×1376（13 吋 iPad 的點數、1/4 像素）：@1x、screen type 110 同 2048、首頁／桌布／設定／Safari WebGPU 正常、觸控正確；顯示 surface 85→22 MiB、backboardd GPU 記憶體 617→449 MiB；2048×2732 仍 @2x。VM 螢幕尺寸就是開關（device ffeb241）
 - ✅ **11-03** 解析度／DPI 查明：iPadOS 27 的 UI scale 不看 DPI、`display-scale`、MobileGestalt，由 `-[CADisplayMode preferredScale]` 決定（模式帶 preferredUIScale 就用它，只有外接 digital-out 模式會帶；否則 MobileGestalt `IsVirtualDevice` 為真 → 至少 @2x；否則高度 >1080 px → @2x），而且每個 UIKit 行程各自算。所以 1024×1366 永遠是 @2x、512×683 點、iPad mini 排版。不改 userland 的省法：1536×2048（768×1024 點 @2x，SpringBoard screen type 111），首頁、設定排版正常、觸控正常，像素少 44%，backboardd GPU 記憶體 617→454 MiB、顯示 surface 85→48 MiB；代價是同樣的手機畫面只放 768×1024 點（介面放大約 1.33 倍）。VM 仍維持 2048×2732，換解析度只改 VM 螢幕設定，DPI 不影響
 - ✅ **11-02** VideoToolbox paravirt 預設開啟（內建開機參數 `droidvm-vt-paravirt=1`，有 virtio-media 編／解碼裝置才發布）；裝置做不到的（小於 96x96、非 4:2:0）在 `dsta` 就拒絕，VideoToolbox 改用軟體解碼；主畫面、HEIC、JPEG 不受影響（device 706338e）
 - ✅ **11-02** VideoToolbox 編碼走手機 VPU：guest 核心回 paravirtualized 編碼器（`encs`／`+enc`／`esta`／`efrm`→`Efds`／`Eemt`／`ecfr`），接 virtio-media 編碼器；App 的 IOSurface 經 videocodecd 自己的 client 建 port 再查（selector 0x23／0x22）。720p 60 幀：H.264 204 fps、HEVC 292 fps，0 失敗，ffmpeg 解得回來（Y PSNR 37–67 dB）（device 9d5a0ce）
@@ -226,6 +227,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - AMP 核心遇到沒有 `cluster-type` 的 CPU 會開機 panic（`recount: cannot map cluster type`）：從 Mac 建磁碟要換上 AMP 版 DarwinBoot
 - 命令列上限 1023 bytes（曾到 1051）：新參數放核心內建（`DroidVMBootArgs*.c`）
 - 上游 AdrenoMetal 的診斷是開關：命令列要 `sheng-diag=1 log-gpu=1`
+- rig 的 Mac 建置樹（fresh27）會落後已 commit 的檔案：dev-cycle 只同步相對 HEAD 有改動的檔案。11-03 改 `make-droidvm-adt.py` 時把 11-01 的 AMP cluster-type 一起帶過去，而磁碟用的 DarwinBoot.efi 是 10-29 版（不替複製的 CPU 寫 cluster-type）→ cpu0 'P'、其餘無類型 → kernel panic「recount: cannot map cluster type」。要用 11-01 以後的 DarwinBoot（會寫 cluster-type）；panic 太早時 panic.py 讀不到，讀 `debugger_panic_str`（kernel VA 轉 PA）
 - 不能整個拿掉 `vmm-present`（AMFI panic「No PMGR?」），也不能對所有行程隱藏（SpringBoard 的背光 watchdog 殺 SpringBoard、全黑）：用 `owner-hide-vmm=` 逐行程隱藏
 - WebGPU.framework 在 VM 裡（`kern.hv_vmm_present`=1）只在 `WebKitAllowWebGPUOnVMs` 為真時繼續，adapter 只給 Apple4 以上
 - WebKit 把 `newLibraryWithSource:` 回傳的任何 error（含只有警告）當失敗
