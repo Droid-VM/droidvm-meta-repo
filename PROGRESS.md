@@ -7,6 +7,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-03** iPadOS 27 任何第三方 app 都有 3D：`droidvm-gpu-clients` 加 `@apps`（主程式在 `/var/containers/Bundle/Application/` 下的 process），plugin 准入（fork 42ab1cd）和 kernel sandbox grant（`droidvm-gpu-grant-apps.patch`）都認它；系統常駐 process 仍逐一列名（每個都有自己的裝置和 64 MiB 記憶體池）。arm64 app 本來就能載入 arm64e 的 plugin（keys-off，PAC 指令等同 NOP；先前「dyld 不載入」的判斷是錯的，fat plugin 試做後撤回）。GFXBench 改簽 App Store app 的 entitlements（加 container-required：trust cache 讓它成為 platform binary）：舊的 no-container 版在 27 上被 System Policy 擋掉寫入自己的容器 → 存檔路徑 nil → 12 秒崩潰。在 sandbox 內跑：ALU2 108.6 fps（CPU 上限 2.75/3.13 GHz）、T-Rex 60、Manhattan 38.3、Manhattan 3.1 27.4、Car Chase 21.2、Aztec normal 30.3／high 21.4 fps（後段手機熱到 CPU 上限 1.0–1.3 GHz）；MetalCheck（arm64）42/42（device af625d8）。Offscreen 1080p：ALU2 333、Driver2 13.7、Fill2 39.0、T-Rex 71.0、Manhattan 88.2、Manhattan 3.1 60.9、Car Chase 40.5、Aztec normal 69.1 fps（CPU 上限約 1.1–2.4 GHz、手機 57–67°C）
+- ✅ **11-03** arm64 process 的 C++ exception 不再崩潰：IB（return address key）也在 EL0 關掉（keys off），libunwind 對 arm64 frame 未簽章的 return address 做 autib 不再 PAC fail（`droidvm-native-pac-user-ib.patch`）。任何會丟 C++ exception 的 arm64 App Store app 原本都會死在 unwinder（device d85806a）
 - ✅ **11-03** iPadOS 27 的 Metal 正確性：MetalCheck（arm64e）42/42 通過，無 GPU 錯誤／逾時／panic。測試工具重新成為 GPU client：`droidvm-gpu-clients` 從命令列搬回內建開機參數並加上 MetalCheck、app_ios、gfxprobe（命令列 1006→891 bytes；device 18e8d3f）
 - ✅ **11-03** GFXBench 裝進 iPadOS 27：trust 加 app_ios CDHash，ipatool／lsdiag 修 27 的 LaunchServices selector（去掉 personaUniqueStrings）、解壓保留 Unix 權限、大 app 不再撐爆記憶體（device 9dca3ac）；IPA 經手機 nc 走網路傳入（ssh 只有 0.6 MB/s）
 - ✅ **11-03** VM 螢幕高度 ≤1920 時 @1x：用 UniXNU 的 native-text-fixup 修補 QuartzCore `-[CADisplayMode preferredScale]` 兩處（虛擬裝置分支改走高度規則、門檻 1080→1920；`make-droidvm-adt.py --text-fixup` 寫 `/chosen/text-fixups`；code-signing bitmap 快速路徑也套用，`droidvm-text-fixup-bitmap.patch`）。1032×1376（13 吋 iPad 的點數、1/4 像素）：@1x、screen type 110 同 2048、首頁／桌布／設定／Safari WebGPU 正常、觸控正確；顯示 surface 85→22 MiB、backboardd GPU 記憶體 617→449 MiB；2048×2732 仍 @2x。VM 螢幕尺寸就是開關（device ffeb241）
@@ -146,7 +148,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 未解／待查
 
-- ⬜ **11-03** iPadOS 27 上第三方 arm64 app 沒有 Metal 裝置（GFXBench 全部測試在啟動 12 秒內崩潰）：真 iPad 的 GPU 驅動在 shared cache 裡，arm64 process 也能用；我們的 NativeAdrenoMetal／Turnip 在 cache 外且只有 arm64e，dyld 不會把它載入 arm64 process。要做：Turnip、bridge、plugin 加「27＋arm64」建置，lipo 成 fat binary，trust 收兩個 slice 的 CDHash
+- ⬜ **11-03** 系統 process 的 GPU 是否全開（`droidvm-gpu-clients=*`，即原廠行為）：要實測 Maps（當初 VectorKit 掉裝置、卡死 render server 要重開機）和常駐 client 數、每個的記憶體池；過關就拿掉名單，只留 `*`
+- ⬜ **11-03** GFXBench Aztec high offscreen 崩潰在 Turnip：metal2vulkan `RenderLowering::end_pass`（render.rs:5331）執行 secondary → `tu_CmdExecuteCommands` → `tu_cs_add_entries` SIGSEGV（兩次都重現，伴隨 fence wait 逾時）；Tessellation 測試在 `TestWrapper::init0()` NULL（測試物件沒建出來，原因未查）
 - ⬜ **11-02** VideoToolbox paravirt 編碼器還不吃 App 的設定：`esup` 沒列 AverageBitRate、MaxKeyFrameInterval、RealTime、ProfileLevel 等，VideoToolbox 直接拒絕、不送 `eset`，碼率與 GOP 用 MediaCodec 預設。要做：列進清單、`eset` 對到 V4L2 `V4L2_CID_MPEG_VIDEO_*`，且 codec 要延到第一幀才建立（App 在 session 建好後才設，`esta` 時已經 STREAMON）
 - ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
 - ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
