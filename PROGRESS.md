@@ -154,6 +154,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 - ⬜ **11-03** 偶發：GPU 全開實驗中 backboardd 有一次收到來源不明的 SIGTERM（jetsam reaper 掃過 70 個閒置 process、開始強制 soft memory limit 之後 15 秒），三輪重現都沒再發生；另有一次 VM 重開卡在 root 掛載前（`apfs_sysctl_register` 之後無輸出），同一個 disk 前後兩次都正常
 - ⬜ **11-03** 每個 GPU blob 在 crosvm 佔 3 個 fd（virgl object 的、virgl resource 的、rutabaga resource 的 export），可以降到 1–2 個；fd 上限拉高後不急
+- ⬜ **11-03** GPU 權限改成 deny-first（原廠 sandbox 拒絕就維持拒絕）：現在 `*` 讓 kernel 對所有 process 跳過 iokit-open-service／iokit-open-user-client／method filter，比原廠寬。實驗（只保留 method filter 放行）：open-service 會過，但 open-user-client 被原廠 profile 擋——backboardd、DockFolderViewService、各 Poster extension 都是 `deny(1) iokit-open-user-client AGXDeviceUserClient`，render server 沒 GPU、鎖定畫面全黑（已還原）。原因：profile 比對 class 繼承鏈，profile 字串表裡有 `IOGPUDeviceUserClient`（如 WebKit 的）與 AGX 各 class；真的 AGXDeviceUserClient 繼承 IOGPUDeviceUserClient，我們的同名 class 直接繼承 IOUserClient。要做：讓我們的 user client 在 metaclass 鏈上是 IOGPUDeviceUserClient 的子類（比照 AGXAccelerator 的分段註冊，IOGPUFamily 載入後才註冊），然後拿掉 open 兩道的 grant，只留 method filter（原廠規則寫的是真 AGX 的 selector）
 - ⬜ **11-02** VideoToolbox paravirt 編碼器還不吃 App 的設定：`esup` 沒列 AverageBitRate、MaxKeyFrameInterval、RealTime、ProfileLevel 等，VideoToolbox 直接拒絕、不送 `eset`，碼率與 GOP 用 MediaCodec 預設。要做：列進清單、`eset` 對到 V4L2 `V4L2_CID_MPEG_VIDEO_*`，且 codec 要延到第一幀才建立（App 在 session 建好後才設，`esta` 時已經 STREAMON）
 - ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
 - ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
