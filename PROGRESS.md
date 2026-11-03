@@ -7,6 +7,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-03** iPadOS 27 的 Metal 正確性：MetalCheck（arm64e）42/42 通過，無 GPU 錯誤／逾時／panic。測試工具重新成為 GPU client：`droidvm-gpu-clients` 從命令列搬回內建開機參數並加上 MetalCheck、app_ios、gfxprobe（命令列 1006→891 bytes；device 18e8d3f）
+- ✅ **11-03** GFXBench 裝進 iPadOS 27：trust 加 app_ios CDHash，ipatool／lsdiag 修 27 的 LaunchServices selector（去掉 personaUniqueStrings）、解壓保留 Unix 權限、大 app 不再撐爆記憶體（device 9dca3ac）；IPA 經手機 nc 走網路傳入（ssh 只有 0.6 MB/s）
 - ✅ **11-03** VM 螢幕高度 ≤1920 時 @1x：用 UniXNU 的 native-text-fixup 修補 QuartzCore `-[CADisplayMode preferredScale]` 兩處（虛擬裝置分支改走高度規則、門檻 1080→1920；`make-droidvm-adt.py --text-fixup` 寫 `/chosen/text-fixups`；code-signing bitmap 快速路徑也套用，`droidvm-text-fixup-bitmap.patch`）。1032×1376（13 吋 iPad 的點數、1/4 像素）：@1x、screen type 110 同 2048、首頁／桌布／設定／Safari WebGPU 正常、觸控正確；顯示 surface 85→22 MiB、backboardd GPU 記憶體 617→449 MiB；2048×2732 仍 @2x。VM 螢幕尺寸就是開關（device ffeb241）
 - ✅ **11-03** 解析度／DPI 查明：iPadOS 27 的 UI scale 不看 DPI、`display-scale`、MobileGestalt，由 `-[CADisplayMode preferredScale]` 決定（模式帶 preferredUIScale 就用它，只有外接 digital-out 模式會帶；否則 MobileGestalt `IsVirtualDevice` 為真 → 至少 @2x；否則高度 >1080 px → @2x），而且每個 UIKit 行程各自算。所以 1024×1366 永遠是 @2x、512×683 點、iPad mini 排版。不改 userland 的省法：1536×2048（768×1024 點 @2x，SpringBoard screen type 111），首頁、設定排版正常、觸控正常，像素少 44%，backboardd GPU 記憶體 617→454 MiB、顯示 surface 85→48 MiB；代價是同樣的手機畫面只放 768×1024 點（介面放大約 1.33 倍）。VM 仍維持 2048×2732，換解析度只改 VM 螢幕設定，DPI 不影響
 - ✅ **11-02** VideoToolbox paravirt 預設開啟（內建開機參數 `droidvm-vt-paravirt=1`，有 virtio-media 編／解碼裝置才發布）；裝置做不到的（小於 96x96、非 4:2:0）在 `dsta` 就拒絕，VideoToolbox 改用軟體解碼；主畫面、HEIC、JPEG 不受影響（device 706338e）
@@ -144,6 +146,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 未解／待查
 
+- ⬜ **11-03** iPadOS 27 上第三方 arm64 app 沒有 Metal 裝置（GFXBench 全部測試在啟動 12 秒內崩潰）：真 iPad 的 GPU 驅動在 shared cache 裡，arm64 process 也能用；我們的 NativeAdrenoMetal／Turnip 在 cache 外且只有 arm64e，dyld 不會把它載入 arm64 process。要做：Turnip、bridge、plugin 加「27＋arm64」建置，lipo 成 fat binary，trust 收兩個 slice 的 CDHash
 - ⬜ **11-02** VideoToolbox paravirt 編碼器還不吃 App 的設定：`esup` 沒列 AverageBitRate、MaxKeyFrameInterval、RealTime、ProfileLevel 等，VideoToolbox 直接拒絕、不送 `eset`，碼率與 GOP 用 MediaCodec 預設。要做：列進清單、`eset` 對到 V4L2 `V4L2_CID_MPEG_VIDEO_*`，且 codec 要延到第一幀才建立（App 在 session 建好後才設，`esta` 時已經 STREAMON）
 - ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
 - ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
