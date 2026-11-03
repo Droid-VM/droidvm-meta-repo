@@ -7,6 +7,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-03** GPU 全開（`droidvm-gpu-clients=*`，原廠行為）：每個 process 都能用 GPU。實測穩定後常駐 client 6 個（SpringBoard、Dock 資料夾、一個 poster、widget renderer、icon service、render server），wired 記憶體和名單模式相當（2478 vs 2557 MiB），Maps 地圖正常、render server 沒卡死（device af0c2d2）。11-02 記的「SpringBoard 當 GPU client 讓 home 手勢壞掉」其實是 SpringBoard 有了 Metal 之後 iPadOS 提供「視窗化 App」模式（`SBMedusaMultitaskingEnabled`）：該模式沒有 home 指示條；兩種模式底部上滑都能回主畫面，模式由使用者在設定→多工處理與手勢選，guest 已設回全螢幕
+- ✅ **11-03** GFXBench Aztec high offscreen 不再崩潰：crosvm 的 fd 上限 65536 被 GPU blob 用光（每個 blob 在 host 佔 3 個 dmabuf fd，Aztec high 同時約 12000 個 blob → `drm2kgsl_renderer_get_blob: dup failed: Too many open files`）→ CREATE_BLOB 失敗 → Turnip 的失敗 cs 停在 fail sink，`tu_cs_add_entries` 卻照樣加 entry（讀空 BO 陣列 bos[-1]）而 SIGSEGV。修法：crosvm 啟動時把 `RLIMIT_NOFILE` 拉到 `nr_open`（1048576，crosvm d661920，wip/virtio-mmio 和 wip/hackintosh）；Turnip patch `turnip-cs-failed-stream-entries.patch` 讓失敗的 stream 回報錯誤（fork 32e1738）。實測峰值 66340 fd，5 次連跑全過（42.3／37.2／30.3 fps，熱降頻下）
+- ✅ **11-03** render server 的 spare command pool 不再無限保留：metal2vulkan 把用過的 command pool 連同每個 pass instance 的 secondary 永久留著，Turnip 又在隱式 reset 時保留 command stream BO；視窗模式＋Maps 之後 backboardd 抱著 13890 個 blob（8–128 KiB，約 390 MiB wired）。fork patch metal2vulkan 0022：既有的 kept-memory trim（每 2 秒，壓力時立即）一併釋放閒置 ≥20 秒、最新 8 個以外的 spare pool（壓力時只留 2 個）；實測切 app 時 6343 → 閒置後 3031（fork ef4486d）
+- ✅ **11-03** GFXBench 的 Tessellation 測試不是我們的問題：上游原始碼 `metal_wrapper.h` 寫死 `METAL_LOW_LEVEL_TESS_ENABLED 0`（`mtl_tess.mm` 還有 MTL_TESS_TODO），`metal_tess` id 註冊了卻沒有實作，GFXBench 對 NULL 測試物件呼叫 init0 而崩潰。曲面細分由 Car Chase（螢幕＋offscreen）覆蓋
 - ✅ **11-03** iPadOS 27 任何第三方 app 都有 3D：`droidvm-gpu-clients` 加 `@apps`（主程式在 `/var/containers/Bundle/Application/` 下的 process），plugin 准入（fork 42ab1cd）和 kernel sandbox grant（`droidvm-gpu-grant-apps.patch`）都認它；系統常駐 process 仍逐一列名（每個都有自己的裝置和 64 MiB 記憶體池）。arm64 app 本來就能載入 arm64e 的 plugin（keys-off，PAC 指令等同 NOP；先前「dyld 不載入」的判斷是錯的，fat plugin 試做後撤回）。GFXBench 改簽 App Store app 的 entitlements（加 container-required：trust cache 讓它成為 platform binary）：舊的 no-container 版在 27 上被 System Policy 擋掉寫入自己的容器 → 存檔路徑 nil → 12 秒崩潰。在 sandbox 內跑：ALU2 108.6 fps（CPU 上限 2.75/3.13 GHz）、T-Rex 60、Manhattan 38.3、Manhattan 3.1 27.4、Car Chase 21.2、Aztec normal 30.3／high 21.4 fps（後段手機熱到 CPU 上限 1.0–1.3 GHz）；MetalCheck（arm64）42/42（device af625d8）。Offscreen 1080p：ALU2 333、Driver2 13.7、Fill2 39.0、T-Rex 71.0、Manhattan 88.2、Manhattan 3.1 60.9、Car Chase 40.5、Aztec normal 69.1 fps（CPU 上限約 1.1–2.4 GHz、手機 57–67°C）
 - ✅ **11-03** arm64 process 的 C++ exception 不再崩潰：IB（return address key）也在 EL0 關掉（keys off），libunwind 對 arm64 frame 未簽章的 return address 做 autib 不再 PAC fail（`droidvm-native-pac-user-ib.patch`）。任何會丟 C++ exception 的 arm64 App Store app 原本都會死在 unwinder（device d85806a）
 - ✅ **11-03** iPadOS 27 的 Metal 正確性：MetalCheck（arm64e）42/42 通過，無 GPU 錯誤／逾時／panic。測試工具重新成為 GPU client：`droidvm-gpu-clients` 從命令列搬回內建開機參數並加上 MetalCheck、app_ios、gfxprobe（命令列 1006→891 bytes；device 18e8d3f）
@@ -148,8 +152,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 未解／待查
 
-- ⬜ **11-03** 系統 process 的 GPU 是否全開（`droidvm-gpu-clients=*`，即原廠行為）：要實測 Maps（當初 VectorKit 掉裝置、卡死 render server 要重開機）和常駐 client 數、每個的記憶體池；過關就拿掉名單，只留 `*`
-- ⬜ **11-03** GFXBench Aztec high offscreen 崩潰在 Turnip：metal2vulkan `RenderLowering::end_pass`（render.rs:5331）執行 secondary → `tu_CmdExecuteCommands` → `tu_cs_add_entries` SIGSEGV（兩次都重現，伴隨 fence wait 逾時）；Tessellation 測試在 `TestWrapper::init0()` NULL（測試物件沒建出來，原因未查）
+- ⬜ **11-03** 偶發：GPU 全開實驗中 backboardd 有一次收到來源不明的 SIGTERM（jetsam reaper 掃過 70 個閒置 process、開始強制 soft memory limit 之後 15 秒），三輪重現都沒再發生；另有一次 VM 重開卡在 root 掛載前（`apfs_sysctl_register` 之後無輸出），同一個 disk 前後兩次都正常
+- ⬜ **11-03** 每個 GPU blob 在 crosvm 佔 3 個 fd（virgl object 的、virgl resource 的、rutabaga resource 的 export），可以降到 1–2 個；fd 上限拉高後不急
 - ⬜ **11-02** VideoToolbox paravirt 編碼器還不吃 App 的設定：`esup` 沒列 AverageBitRate、MaxKeyFrameInterval、RealTime、ProfileLevel 等，VideoToolbox 直接拒絕、不送 `eset`，碼率與 GOP 用 MediaCodec 預設。要做：列進清單、`eset` 對到 V4L2 `V4L2_CID_MPEG_VIDEO_*`，且 codec 要延到第一幀才建立（App 在 session 建好後才設，`esta` 時已經 STREAMON）
 - ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
 - ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
@@ -160,7 +164,6 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **11-02** 第三方 App 拿不到 Metal（GPU client 白名單制）
 - ⬜ **11-02** 嚴格的 Apple4 做不到：raster order groups、imageblocks、tile shaders、imageblock sample coverage、post-depth coverage 被拒，indirect／ICB 邊角、linear texture、depth/stencil resolve 等有缺口；附件型 ROG／imageblock 可部分模擬；只問 Apple4 以上的 App 會被拒
 - ⬜ **11-02** locationd 每次開機約 10 秒後 PAC 崩潰一次（arm64e，Cohort:0 佇列上已釋放的 dispatch 物件）；重啟後正常，已不波及 UI
-- ⬜ **11-02** SpringBoard 當 GPU 客戶端會讓 home 指示條消失、App 內邊緣上滑不被辨識（已還原，根因未查）
 - ⬜ **11-02** 新 Data 第一次產生桌布圖庫時的記憶體風暴：PosterBoard 讓各桌布擴充同時 GPU 渲染，wired 衝到 4.65 GiB、jetsam 殺掉幾十個行程；blob 頁不計 footprint，jetsam 看不到真正的大戶
 - ⬜ **11-02** metal2vulkan keep_room 的空 pooled block（render server 547–616 MiB，`emptied=None`，trim 不釋放）；下一步：壓力 ≥ Warning 時暫停 keep_room，或限制空 block 總量
 - ⬜ **11-02** 16 MiB block 會讓 render server 的 GPU context hang（3/5 vs 64 MiB 0/5，不是 UBWC），根因未查；fork feefe53、AdrenoMetal 8f735a2 未推，手機 plugin 1a47826 沒有除錯檔時預設 16（guest 已寫 64）
