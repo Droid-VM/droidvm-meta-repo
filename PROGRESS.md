@@ -177,7 +177,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 ## 未解／待查
 
 - ⬜ **11-05** host 記憶體耗盡時 guest 卡死、恢復不了：5567 在截圖很多的測試裡 host 記憶體用光（anon 72 MB、GFP_NOWAIT 配置失敗、osvelte lowmem），adb 斷線，guest 所有 vCPU 停在 `gh_vcpu_ioctl`、timer 中斷 0、觸控叫不醒，只能重啟 VM；懷疑 crosvm／Gunyah 的中斷路徑在記憶體壓力下掉了 wakeup，未證實。有一次 18 分鐘後自己醒來，launchd reboot 時 APFS unmount panic（`vnode_rele_ext` usecount 變負），是另一個 kernel bug（懷疑 union／Data overlay）
-- ⬜ **11-05** GPU 記憶體還剩的浪費：metal2vulkan pool 的碎片（backboardd 的 64 MiB block 只用了 8–51%，約 200 MiB；桌布約 100 MiB；0032「先放最滿的 block」測試中）；memoryless 附件仍佔真實記憶體（darwin 沒有 LAZILY_ALLOCATED 記憶體，Turnip lazy BO 測試中）；IOSurface 的 shadow 約 57 MiB（架構性，要 dma-buf import 才能省）；render server 自己的 Turnip cache 64–85 MiB
+- ⬜ **11-05** GPU 記憶體還剩的浪費：metal2vulkan pool 的碎片（backboardd 的 64 MiB block 只用了 8–51%，約 200 MiB；桌布約 100 MiB；「先放最滿的 block」量不出差別）；IOSurface 的 shadow 約 57 MiB（架構性，要 dma-buf import 才能省）；render server 自己的 Turnip cache 64–85 MiB
 - ⬜ **11-04** Safari 網址列快速輸入時會掉字（例如一次送 "http://..." 只剩 "http"）：guest kernel 的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
 - ⬜ **11-04** 觸控板：iPadOS 的觸控板手勢要哪種裝置（通用 HID Touch Pad，還是 Apple 的 multitouch 介面）還沒逆向；crosvm 已有 multi-touch-trackpad（缺五指和解析度），app 還是在本地模擬滑鼠
 - ⬜ **11-04** Windows guest 的 virtio-input 驅動（vioinput）能不能把 stylus 裝置的壓力、傾斜對應成 HID Pen，尚未確認
