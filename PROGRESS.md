@@ -1,12 +1,15 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-05。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-06。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
 
 ## 已完成
 
+- ✅ **11-06** 轉場卡頓（優先權反轉）：iPadOS 的 render server（backboardd）把 user-interactive QoS 壓到 37–46，我們的 Metal encode 執行緒因此排在每個 App 主執行緒（47）之下，但 CoreAnimation 的 display 執行緒每一幀都在等它（CA render-server 執行緒是 55）；打開 App 時 App 和 SpringBoard 的主執行緒佔走 CPU，encode 有四分之一的時間在 runnable。改成 backboardd 的 encode 執行緒預設 SCHED_RR 54（NativeMetal fb063de）。同一次開機開／關交替 3 對、每臂 2 輪六種轉場，每 100 幀超過 33 ms 的次數：widgets 12.3→5.6、App Library 5.8→2.9、Spotlight 26.2→4.1、打開設定 14.3→6.1、設定回主畫面 13.2→9.8，平均 fps 多 20–40；MetalCheck 42/42。開在每個行程時 App 切換器反而變差（App 的 encode 高過自己的主執行緒），所以只開在 render server。m2v 自己的 scheduler／handlers／queue-wait 也提高到 54 量不出差別，已撤掉。仍剩的 1% low（8–13 fps）主要是 render server 閒著等 App 交出畫面（App 啟動的 CPU）和手機被限頻到 1.4 GHz 的時段
+- ✅ **11-06** memoryless 附件不再佔真實記憶體：Turnip 的 darwin backend 有 set_iova 但沒有 lazy BO，所以沒有 LAZILY_ALLOCATED 記憶體可用，metal2vulkan 把每個 memoryless（transient）附件都放進 wired 的 guest 記憶體。補上 lazy VMA 的 iova 保留／釋放，lazy BO 在第一個需要 sysmem 的 pass 才配置（`turnip-darwin-lazy-bos.patch`，fork 5c6a422）。同一次開機開／關交替 3 對：render server 515 vs 630 MiB、guest wired 2255 vs 2389 MiB；七個畫面的截圖比對都在雜訊內，MetalCheck 42/42。另外「先放最滿的 block」（0032）量不出差別，已撤掉；0031 是 pool 報告與 0029 的 A/B 開關
+- ✅ **11-06** 一次打開 App 的 4 秒裡有 86 個行程死掉，查明是 jetsam 的 sustained-pressure 政策：壓力停在 warning 超過 10 分鐘後，依序殺 idle band 的行程（多是 1–3 MB 的 daemon，之後又被叫起來），不是每次打開 App 都會發生（對照實驗連開 3 次 0 個行程死掉）。guest 的 kill 計數（`memorystatus_kill_counts`，注意陣列跳過 IdleExit 與 Invalid 兩欄）累計 3196 次 sustained-pressure kill。5 ms 的整機 spindump 本身就吃掉約 3.8 s／5 s 的 CPU，量轉場要用 200 ms 整機（每個執行緒的 cpu time 不受間隔影響）或只取樣目標行程（`-onlyTarget -proc`）
 - ✅ **11-05** Dock、工具列、Spotlight 的毛玻璃不再變黑或變成桌布：CoreAnimation 在 display pass 之間取樣旋轉過的 framebuffer 做 backdrop；pass 的旋轉 twin 和 shader 取樣的 read image 是同一塊 plane bytes 的兩個 shadow，read image 在這一幀第一次 capture 時 copy in，之後被帶到後面的 encoder。render encoder 之間沒有順序，twin 的 copy back 不會經過 `ShadowSync::wrote`（只有它會丟掉帶著走的 entry）→ 後面的 backdrop 一直取樣舊的 read image。修法：copy back 也丟掉跟它寫入同一份資料的 carried shadow，下次用到再 copy in（fork metal2vulkan 0026，181b8b4）。glasstest：Dock 亮度 221–237（原本會掉到黑），MetalCheck 41/41。0023–0025 是追查時加的 A/B 開關（DontCare 全部 STORE、各類附件的 DontCare 遮罩、每個 pass 前完整 barrier），預設全關；DONT_CARE 不是原因
 - ✅ **11-05** guest 記憶體（VM 不能再加 RAM：12 GB 手機、Gunyah 0.5 G、Android 留 5.5 G）。guest wired 2.4–2.8 → 約 1.95–2.15 GB：
   - 根 policy 的 hash table（兩個碟共 116 MiB）存了 3 份：DarwinBoot 交出的靜態區、kernel 驗證用的 copy、每個碟各自一份。VirtioMmioBlock 0005 讓碟直接對 policy 那份驗證（Security 299 → 181 MB）。firmware 靜態區本身放不掉：physmap 從 kernel data 結尾開始，`ml_static_mfree` 拒絕更低的位址
