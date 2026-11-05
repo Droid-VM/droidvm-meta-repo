@@ -1,12 +1,26 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-04。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-05。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
 
 ## 已完成
 
+- ✅ **11-05** Dock、工具列、Spotlight 的毛玻璃不再變黑或變成桌布：CoreAnimation 在 display pass 之間取樣旋轉過的 framebuffer 做 backdrop；pass 的旋轉 twin 和 shader 取樣的 read image 是同一塊 plane bytes 的兩個 shadow，read image 在這一幀第一次 capture 時 copy in，之後被帶到後面的 encoder。render encoder 之間沒有順序，twin 的 copy back 不會經過 `ShadowSync::wrote`（只有它會丟掉帶著走的 entry）→ 後面的 backdrop 一直取樣舊的 read image。修法：copy back 也丟掉跟它寫入同一份資料的 carried shadow，下次用到再 copy in（fork metal2vulkan 0026，181b8b4）。glasstest：Dock 亮度 221–237（原本會掉到黑），MetalCheck 41/41。0023–0025 是追查時加的 A/B 開關（DontCare 全部 STORE、各類附件的 DontCare 遮罩、每個 pass 前完整 barrier），預設全關；DONT_CARE 不是原因
+- ✅ **11-05** guest 記憶體（VM 不能再加 RAM：12 GB 手機、Gunyah 0.5 G、Android 留 5.5 G）。guest wired 2.4–2.8 → 約 1.95–2.15 GB：
+  - 根 policy 的 hash table（兩個碟共 116 MiB）存了 3 份：DarwinBoot 交出的靜態區、kernel 驗證用的 copy、每個碟各自一份。VirtioMmioBlock 0005 讓碟直接對 policy 那份驗證（Security 299 → 181 MB）。firmware 靜態區本身放不掉：physmap 從 kernel data 結尾開始，`ml_static_mfree` 拒絕更低的位址
+  - render server 的 memoryless color backing 只服務同一個 extent，每種 extent 留一個、永不釋放：19 個、254 MiB。metal2vulkan 0029 讓單取樣 backing 服務它涵蓋得到的所有同類附件，新的長到最大那個的大小、被涵蓋的釋放 → 2 個、28 MiB
+  - shadow 的 merge scratch 每個 shadow 永遠留 2 個，靜止的桌布也抱著 64 MiB。0030 讓它們閒置 10 秒後跟著 idle trim 釋放，記憶體壓力時全放
+  - Turnip 的 freed-BO cache：每個常駐 client 的 96 MiB 預算都填滿（桌布 extension 為一張靜止圖片抱 56 MiB、widget／SpringBoard 各 30–40 MiB）；render server 釋放的 64 MiB block 吃掉共用預算，小 BO 一釋放就沒了、下次再重建（每次都要經 host 唯一的 virtio-gpu worker 跑一趟）。改成小 BO（≤1 MiB）有自己的預算（`turnip-darwin-bo-cache-small-budget.patch`）、超過預算的 BO 直接釋放（`-oversize.patch`，原本「最新放入的不淘汰」讓一個 32 MiB block 永遠留在 16 MiB 預算裡）（fork 97dc23e）；client 用 16＋8 MiB，render server 維持預設（NativeMetal 52162a4）
+  - 結果：backboardd 的 GPU 記憶體高原 1031 → 約 642 MiB、桌布 extension 約 326 → 244 MiB；兩輪 sixfps 的開機碟讀取 190–227k → 約 46k 個 block（page cache 不再被擠掉）
+  - 不是洩漏：長時間增加是 metal2vulkan 自己的保留加上 pool 碎片，會停在高原；貼圖在 Metal／Vulkan／Turnip 三層只有一份配置（例外是 host-pointer import 上的 shadow，Turnip 在那裡不綁 image）。Siri／intelligence 共 22 個 process、86–104 MiB（Siri 本體約 35 MiB）
+  - 診斷工具：metal2vulkan 0028 用 `#[track_caller]` 記下每個 placement 的來源行（`m2v_placement_sites`），frontend 記 app 的 Metal 呼叫要了多少（`nmb_memory_row`／`nmb_memory_top`），`/private/var/ngpu/debug/client-mem` 讓每個 GPU client 每 5 秒把這些寫到暫存目錄的 m2v-mem.txt
+- ✅ **11-05** 延遲來源：
+  - ArmCpu 沒有回報 powergate_latency，XNU 的 `cpu_idle_latency` = 0，所以連 1 µs 的 `IODelay` 都去睡全域那一個 `clock_delay_until` 事件，各個 polling driver 的 thread 擠在同一個 waitq 的 lock 上；持有者的 vCPU 被 host 搶走時就 lock timeout panic。改成每個 CPU 回報 25 µs，短延遲改成自旋（ArmCpu 5265ef1）
+  - VirtioMmioBlock 0006：讀取自旋 1 ms 之後改睡在 driver 自己的事件上、等碟的中斷（`droidvm,intid` 經 `armcpu_spi_attach`，最多 2 ms），不再每 20 µs 一次 delay 擠那個共用事件；A/B 跟 polling 一樣快
+  - Data 碟的請求：自旋之後原本每次睡 `IOSleep(1)`（1 ms 以上），同一個碟的請求全排在它後面，主畫面翻頁時 Biome 每秒 200–300 次寫入讓 SpringBoard 主執行緒卡在 fsync。改成 50 µs 自旋＋50 µs 一步，並有等待時間直方圖
+  - virtio-gpu：等 fence、等空位、顯示等 GPU 都改成等 transport 的中斷計數（`returns()`／`awaitReturn()`），不再 `IOSleep(1)` 輪詢；blob 的 GEM_NEW 和 CREATE_BLOB 預設不等回覆（`droidvm_virtgpu_async_create=1`），render server 第一次開 view 時不再每個 blob 等 0.1–15 ms（device 3af9eca、45052cd、6a8076f）
 - ✅ **11-04** IOSurface 的 CPU 存取會等 GPU（Safari WebGPU textured cube 隨機破圖、canvas 像素遺失）：iPadOS 27 的 WebKit.GPU 用 CoreAnimation 的加速 CG（`CA::CG::Queue`，也就是 Metal）畫 2D canvas 和 ImageBitmap，`putImageData` 是先 flush、再 IOSurfaceLock 用 CPU 寫入；Apple 的 IOSurfaceLock 會等這個 surface 上還沒做完的 GPU 工作，這裡沒有 → 晚一步執行的 GPU 清除把 CPU 寫的像素蓋掉，畫完立刻讀回只拿到一半。submit 不會列出它用到的資源，所以改由 Metal plugin 在 commit 時告訴 kernel 這個 command buffer 用了哪些 IOSurface（ticket，分寫入或只讀），做完時結束；XNU 的 `iokit_user_client_trap` 在執行 trap 前呼叫 hook（`droidvm-surface-gpu-wait.patch`），IOSurfaceRootUserClient 的 lock（trap 2，unlock 是 3，27 上實測）等 lock 之前開始的 ticket：讀鎖等寫入、寫鎖連讀取也等，最多 500 ms（device e29d087、NativeMetal 3f8d44a）。5567 實測：flush 後立刻 putImageData 6/6 遺失 → 0、沒畫過的 canvas 5/5 → 0、ImageBitmap 經 copyExternalImageToTexture 20/20 錯 → 0、textured cube 連續重載 4 次都正常、MetalCheck 41/41；真的需要等的 lock 有 120 次（平均 5.3 ms、最長 88 ms、無逾時），合成、遊戲、WebGPU 畫面不經過這個等待。順帶修了 host 的 udmabuf：map/unmap 沒帶 importer 的 DMA 屬性，KGSL 對 IO-coherent 匯入要求的 DMA_ATTR_SKIP_CPU_SYNC 被丟掉，每次 unmap 都對 guest RAM 做 cache invalidate，可能丟掉 guest 還沒寫回的資料（gunyah_host_mod 8e3c5a9，wip/hackintosh 新分支）；原廠 GKI 的 udmabuf 也是這樣，只有載入我們模組的核心（8 Gen 3）修得到，8 Elite 用的是內建版
 - ✅ **11-04** 觸控筆＝Apple Pencil（壓力、懸停、傾斜角、方位角、筆身按鈕）：host 端是通用的 pen tablet，crosvm 新增 `--input stylus`（INPUT_PROP_DIRECT、BTN_TOOL_PEN／RUBBER、BTN_TOUCH、BTN_STYLUS／2、ABS_PRESSURE 0..4095、ABS_DISTANCE 0..255、ABS_TILT_X/Y ±90°，crosvm c9e24ed54），和觸控螢幕是分開的裝置，跟 Linux（wacom、hid-multitouch）、Windows（Pen 與 Touch Screen 是不同 collection）、Apple 硬體的慣例一致。app 新增每個螢幕的 PEN 通道（排在所有輸入裝置最後，原有裝置的 MMIO 位址不變），任何輸入模式下觸控筆都走 pen：觸碰、懸停、筆身按鈕；tilt 是 Android InputReader 換算的精確反函數（有單元測試），離開感應範圍延後 60 ms（Android 在落筆前送 HOVER_EXIT、抬筆後送 HOVER_ENTER）（app fad5042，未推）。guest：virtio-input 的 KIND_PEN 在 kernel 內用整數換算 tilt→polar，發給第三個 HID 裝置「pencil digitizer」（Digitizer/Stylus、Built-In、DisplayIntegrated，report 4）（device b7396ee）。反組譯查到 iPadOS 27 的條件：UIKit 從 stylus 子事件的 **polar** 方向讀角度（altitudeAngle = π/2 − Altitude，azimuth 是 y 朝上逆時針），IOHIDEventDriver 只產生 tilt 型事件且丟掉 tilt → dispatch wrapper 直接改事件資料的 orientationType（+0x58）、用 setFixedValue（vtable slot 26）寫入角度、壓力和 Z；backboardd 的最大壓力取自 service 的 `AccurateMaxDigitizerPressureValue`（缺了網頁 pressure 就是 0），懸停高度取自 `MaxHoverHeight`，而且只讀 usage 0x20 的 service（缺了 UIKit 不產生 hover）。Safari Pointer Events 實測：pointerType pen、pressure 照送入值 0.1→1.0、懸停移動、四個方向的 tilt 與 altitude 都對，手機本身的 OnePlus Pencil Pro 也是；rig 新增 pen.py（經 daemon 送合成筆）、keys.py（鍵盤）
 - ✅ **11-04** iPadOS 27 跑在 5567（8 Gen 3、Adreno 750）：1024x1366 @1x、7 vCPU、5 GiB；Metal（主畫面、widget）、VPU 硬體解碼 720p 95.7 fps、paravirt 硬體編碼 87.6 fps（ffprobe 驗證）都正常，不開 vCPU 防護腳本也沒重開機。全新 Data 的 seed 裡 GPU plugin、gfxprobe、ipatool、lsdiag 是舊版，不在開機碟的 trust cache → AMFI 拒絕（沒有 Metal、工具被 SIGKILL），從 Mac／另一台 guest 補上目前版本即可
@@ -159,6 +173,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 未解／待查
 
+- ⬜ **11-05** host 記憶體耗盡時 guest 卡死、恢復不了：5567 在截圖很多的測試裡 host 記憶體用光（anon 72 MB、GFP_NOWAIT 配置失敗、osvelte lowmem），adb 斷線，guest 所有 vCPU 停在 `gh_vcpu_ioctl`、timer 中斷 0、觸控叫不醒，只能重啟 VM；懷疑 crosvm／Gunyah 的中斷路徑在記憶體壓力下掉了 wakeup，未證實。有一次 18 分鐘後自己醒來，launchd reboot 時 APFS unmount panic（`vnode_rele_ext` usecount 變負），是另一個 kernel bug（懷疑 union／Data overlay）
+- ⬜ **11-05** GPU 記憶體還剩的浪費：metal2vulkan pool 的碎片（backboardd 的 64 MiB block 只用了 8–51%，約 200 MiB；桌布約 100 MiB；0032「先放最滿的 block」測試中）；memoryless 附件仍佔真實記憶體（darwin 沒有 LAZILY_ALLOCATED 記憶體，Turnip lazy BO 測試中）；IOSurface 的 shadow 約 57 MiB（架構性，要 dma-buf import 才能省）；render server 自己的 Turnip cache 64–85 MiB
 - ⬜ **11-04** Safari 網址列快速輸入時會掉字（例如一次送 "http://..." 只剩 "http"）：guest kernel 的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
 - ⬜ **11-04** 觸控板：iPadOS 的觸控板手勢要哪種裝置（通用 HID Touch Pad，還是 Apple 的 multitouch 介面）還沒逆向；crosvm 已有 multi-touch-trackpad（缺五指和解析度），app 還是在本地模擬滑鼠
 - ⬜ **11-04** Windows guest 的 virtio-input 驅動（vioinput）能不能把 stylus 裝置的壓力、傾斜對應成 HID Pen，尚未確認
