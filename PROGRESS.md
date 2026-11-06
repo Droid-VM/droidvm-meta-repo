@@ -1,12 +1,13 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-06。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-07。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
 
 ## 已完成
 
+- ✅ **11-07** Metal 的 indirect command buffer（ICB）接上了：WebKit 的 WebGPU 把每個 render bundle 都編成 ICB，`newIndirectCommandBufferWithDescriptor:maxCommandCount:options:` 以前沒實作（回 nil），webgpu-samples 的 renderBundles 一開就是「MTLIndirectCommandBuffer allocation failed」。metal2vulkan 執行期本來就有 ICB（含 shader 寫入），缺的是 bridge 和前端：ICB 本身、render／compute 命令的 setter、reset、render／compute encoder 的 `executeCommandsInBuffer:`（含從 buffer 讀範圍）、ICB 的 useResource、blit 的 copy／reset／optimize、argument encoder 的 `setIndirectCommandBuffer:atIndex:`、render pipeline 的 `supportIndirectCommandBuffers`；render encoder 的 `memoryBarrierWithScope:afterStages:beforeStages:` 以前也是空的，現在是真的 barrier。命令自己的 render state（cull、depth 等）只有 Apple10 會用，Metal 在別的裝置上會直接結束行程，所以記一筆後丟掉（WebKit 是設在 pass 上）。5566 上錯誤消失、rotatingCube 正常、MetalCheck 42/42（NativeMetal 16f3493）
 - ✅ **11-06** 5566（Adreno 840）上「假完成」和 CP fault 的根因找到並修好了：是 Turnip darwin 後端的 **BO slot 競態**，不是 a840 的命令產生錯誤。`darwin_bo_finish` 在放開 retire 鎖**之後**才把 BO 在 handle 索引陣列裡的 slot 清成 0，但鎖裡的回收已經可能把 handle 放回快取或釋放（fence 已完成）；這個空檔裡另一條執行緒配置新 BO 拿到同一個 handle 和 slot，晚到的 memset 就把**新的、還活著的 BO** 清成 0。它的命令串於是位址變成 0（送出被拒、device lost，之後每一幀都「立刻完成」，GFXBench 報出 260–1515 fps 而且狀態 OK），或是 slot 再被別人佔走、IB 指進別的 BO 的記憶體（KGSL 的 CP fault：IB2 讀到 opcode 0、DDE 抓到亂飛的位址）。CPU 和 GPU 都快的 5566 最容易撞到：fence 一完成 handle 立刻能被重用。修法是先清 slot、再讓 handle 回收（fork 879e93c）。5566 Aztec offscreen：修正前 8 次裡 3 次抓到壞位址（其中 2 次假完成），修正後 11 次全部正常（69–98 fps，隨 CPU 上限變化）、0 次 KGSL fault；5567（Adreno 750）Aztec 9.6–10.3、Manhattan 3.1 18.6–18.9 fps（檢查器開著），MetalCheck 兩台都過
 - ✅ **11-06** 找到它的工具：`TU_DARWIN_CHECK_IBS=1`（GFXBench 用 `GFX_ENV`）在每次送出前檢查 CP 會去讀的每個 GPU 位址（IB、draw state、index buffer、indirect 參數與 count，往下追三層）是否落在活著的 BO 裡，有問題就記下封包和前後的 BO；`=2` 時直接拒送。KGSL 沒辦法 dump 我們匯入的 IB，所以只能在 guest 端查。這次的證據是 `submitted stream 0x0 has no live BO`，以及表裡留下的 `[0x0 +0x0]`（被清成 0、卻從沒經過 finish 的 BO）。另外每次送出也會檢查命令串的 BO 是否已釋放，並記下是哪個 command buffer 和它的狀態（fork 7ec7519、e7d38f9）
 - ✅ **11-06** GPU reset 不再被當成完成：KGSL 會跳過被 reset 的 context 後面的工作、但照樣推進 timestamp，guest 只會看到每個 fence 立刻完成、畫面是空的。drm2kgsl 以前 `MSM_PARAM_FAULTS` 一律回 0、`global_faults` 從不更新；現在 guest 問過 `MSM_PARAM_FAULTS` 之後，每次送出都先用 `KGSL_PROP_GPU_RESET_STAT`（讀了就清掉）看該 queue 的 context 有沒有被 reset，guilty 或 unknown 的 reset 會記進 shmem 的 `global_faults`（innocent 不算，和 Turnip 的 KGSL 後端一樣）。Linux Turnip 只從 shmem 讀、從來不問，所以行為不變（virglrenderer 7e17c8e8）。guest Turnip 在 dwv_open 時問一次，每次送出前讀 shmem 的計數（不用呼叫），有變化就 device lost（fork 7ec7519）
@@ -198,7 +199,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **11-02** VideoToolbox paravirt 編碼器還不吃 App 的設定：`esup` 沒列 AverageBitRate、MaxKeyFrameInterval、RealTime、ProfileLevel 等，VideoToolbox 直接拒絕、不送 `eset`，碼率與 GOP 用 MediaCodec 預設。要做：列進清單、`eset` 對到 V4L2 `V4L2_CID_MPEG_VIDEO_*`，且 codec 要延到第一幀才建立（App 在 session 建好後才設，`esta` 時已經 STREAMON）
 - ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
 - ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
-- ⬜ **11-02** WebGPU renderBundles 要 `MTLIndirectCommandBuffer`（執行期有 API，plugin 還沒包裝）
+- ⬜ **11-07** WebGPU renderBundles（預設 5000 顆小行星）現在會把 Safari 的 GPU 行程卡到被殺：WebKit 為了驗證 indexed draw，會用 vertex shader 把越界的 draw 寫回 ICB，所以每幀都以可寫方式 useResource 這個 ICB；metal2vulkan 對「GPU 可能寫入」的 ICB 只能走 host step（等前面的工作做完、在 CPU 上逐一重錄命令），GPU-only 的形式只收「繼承 pipeline、只有 DRAW」的 ICB，WebKit 兩項都不符合。重錄時每個命令都從 command buffer 全部的 resident 資源重建 resident set／root table（排序、BTreeMap、heap 元素、uses），WebKit 又把 5000 多個 uniform buffer 全部 useResource，成本約 N×R，一幀超過 30 秒；Safari 判定 GPU 行程無回應並終止，接著 WebContent 在 `getCurrentTexture()` 拿到空的 texture 崩潰（WebKit 自己的 bug）。iPadOS 27 的 WebKit 沒有主線 2026-09 加的「argument buffer Tier1 就改用 CPU 重放」（反組譯 createRenderBundleEncoder 確認），所以回報 Tier1 也沒用。要修得在 metal2vulkan 讓同一次 execution 的命令共用 resident set／root table，或讓 GPU-only 形式接受各命令自己的 pipeline 與 indexed draw
 - ⬜ **11-02** WebGPU 的 cubemap、fractalCube 範例待查
 - ⬜ **11-02** Wi-Fi 沒有無線電：station 掃描結果為空、沒加入網路（`droidvm-wifi-ssid` 只測 UI）；接真實硬體要在 station 換後端（例如 host 的 Wi-Fi 掃描／連線經 virtio 轉入）
 - ⬜ **11-02** 藍牙只有 Apple VM 的虛擬控制器（LE 走 Bonjour）；接手機真實藍牙未做：bluetoothd 的 "VIRT" driver（`<裝置>-in`／`-out`）由 kernel 轉 virtio，或 H4＋kernel control socket
