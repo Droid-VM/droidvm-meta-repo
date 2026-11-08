@@ -4,82 +4,76 @@
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
+已完成改成一項一行、未解項目縮短之前的清單見 `git show 1063e2b:PROGRESS.md`；未解／待辦項目的完整細節在 `todo/`。
 
 ## 已完成
 
-- ✅ **11-08** cameracaptured 每次開機在 `nmb_compute_pipeline_reflection` 的 SIGSEGV 修好（NativeMetal 3c46b5e，5566 plugin 71095655）：這次有對應的 dSYM（崩潰報告的 UUID 和建出的 plugin 相同），用 llvm-symbolizer 解出 `-[NBDeviceMethods newComputePipelineStateWithDescriptor:options:reflection:error:]` → `computeReflection` → bridge 的 `compute_descriptor` → `Function::function_descriptor` → `Library` 的 `Arc::clone` 對 0 做 atomic add。frontend 遇到「kernel 讀了沒人設定的 function constant、runtime 拒絕」時會把那些 constant 補 0 重建一次（`zeroRestFunction`），但重建出的 NBFunction 只放在重試的 if 區塊裡，區塊一結束 ARC 就釋放它、連帶釋放 handle，接著的 reflection 讀到已釋放的 function。CCPortrait 的 kernel 正好需要 function constant（離線看到 index 102、120 等），FigMetalContext 又要 reflection，所以每次開機的 precompilation 都死（以函式為參數的那條路徑有用外層變數留住，沒事）。現在重建的 function 活到呼叫結束。上一次開機 3 分鐘就崩，這次開機後沒有再出現；MetalCheck 通過
-- ✅ **11-08** GPU 寫過的 ICB 不再每幀都走 host step（board patch 0038，fork 62d0b11）：`IndirectCommandBuffer::gpu_written` 一旦有任一 encoder 把 ICB 標成可寫就永遠為真，於是 WebKit 的 render bundle 雖然只在 index 驗證快取前（前一兩幀）跑會寫 ICB 的 clamp，之後每幀還是要等 GPU 做完、再由排程執行緒在 CPU 上把 5000 個命令重錄一次。現在記錄「曾經可能寫它的 command buffer 數」（`GpuWrites::begun`，原本就有的 `pending` 在完成時減一）：全部完成時（`settled_writes`），commit 用 host step 的讀法（含驗證與 fault 計數）直接讀當下的記錄、錄製，並記下讀時的計數；batch 就緒前若又出現新的寫入路徑（計數變了）或讀時還有未完成的，就照舊交給 host step 等 GPU 後重錄。可能完全在 GPU 上執行的（`gpu_commands` 成立：繼承 pipeline、只有 draw）不變，仍由 GPU form 在 GPU 上讀記錄。icb_scale（lavapipe，5000 命令）：每幀都寫時照舊、畫面 hash 不變；只有第一幀寫（WRITE_FRAMES=1）時之後每幀改在 commit 錄製、不再有 host step，hash 相同；runtime 的裝置執行測試沒有 base 以外的失敗。5566（plugin 71095655）renderBundles：2.3 → 2.6 fps，GPU 使用率 48% → 63%；spindump 看到錄製已從排程執行緒移到 WebKit 的 commit（它的 WebGPU work queue 執行緒 73% 忙，排程執行緒幾乎閒置），MetalCheck 通過。下一步要大幅改善，得讓 commit 在記錄與狀態不變時重用上一幀錄好的命令（現在每幀仍要把 5000 個 draw 走完整的 draw 路徑）
-- ✅ **11-08** Safari 的 WebGL 2 回來了（NativeMetal 2d7aa95、fork ec5c34e，5566 plugin ab9abc0e）：iPadOS 27 的 Safari 只有 WebGL 1（get.webgl.org/webgl2：「your browser does not seem to support WebGL2」，webglreport 的 WebGL 2 頁一片空白）。WebKit 的 WebGL 走 ANGLE 的 Metal renderer（`WebCore.framework/Frameworks/libANGLE-shared.dylib`），ANGLE 從 09a869c24593（2026-01，已在 iPadOS 27 的 WebKit 裡；iPadOS 17 那版還是 Apple3）起只在 `MTLGPUFamilyApple4` 以上提供 ES 3.0：ES 3.0 要 12 個 vertex uniform block，ANGLE 用 argument buffer 綁，而 Apple3 的 tier-1 argument buffer 連同直接綁的 buffer 每個函式只能 31 個。我們的裝置 Apple4 是 NO（imageblock、tile shader、raster order group 等 tile memory 功能），但 argument buffer 是 tier 2，沒有這個限制。plugin 現在對 ANGLE 這個呼叫者回答 Apple4（和 WebGPU.framework 同一套，依回傳位址所在的 image 判斷）；ANGLE 其他看 Apple4 的地方：non-uniform dispatch（runtime 是 Exact）、無附件的 render pass、render target 每像素不足 4 bytes，以及 pixel local storage 改用 raster order group（WebKit 不對網頁開放這個擴充）。5566：get.webgl.org/webgl2 顯示支援 WebGL2（旋轉的「2」立方體），webglreport 的 WebGL 2 頁完整列出 context（WebGL 2.0、GLSL ES 3.00、16 個 vertex uniform block、8 個 draw buffer、4× MSAA、3D texture 2048），three.js 的 Uniform Buffer Objects 範例正確繪製；MetalCheck 通過。另外：iPadOS 27 的 Safari 在多分頁時網址欄併進分頁標籤，頂端的瞬間點擊不被接受（要按住約 120 ms），GPU 忙時要 2 秒以上才進入編輯；鍵盤輸入其實都到得了
-- ✅ **11-08** WebGPU 範例逐一檢查（5566，Safari，plugin f3c0377c）：helloTriangle／MSAA、rotatingCube、twoCubes、texturedCube、instancedCube、fractalCube、cubemap、reversedZ、occlusionQuery、samplerParameters、timestampQuery、blending、computeBoids、gameOfLife、bitonicSort、packedIntegerDotProduct、cameras、normalMap、shadowMapping、particles、points、primitivePicking、imageBlur、generateMipmap、cornell、skinnedMesh 畫面都正確（對照各範例原始碼的預期：reversedZ 左欄的 z-fighting、timestampQuery 的黑色立方體、occlusionQuery 只看到紫色那顆時「visible: 🟪」、bitonicSort 載入就自動排序所以先橫條後漸層，都是範例本來的樣子）；cubemap 沒有接縫，fractalCube 每面遞迴貼上一幀，0037 之後 cube 取樣照舊正確。11-02 留下的「cubemap、fractalCube 待查」結案
-- ✅ **11-08** cube 取樣的方向不再每次都跑完整的 Metal 平手處理（board patch 0037，fork dcdea5f）：metal2vulkan 為了讓每種裝置都讀到 Metal 的面與 texel，每次 cube 取樣都對方向做一整套處理（x>y>z 的平手規則、Metal 讀成 0 的分量、零向量、極大值的縮放），約 89 個運算、全部是 select。但只要三個分量的大小都 ≥ 2^-125、最大的 ≤ 2^125 而且只有一個分量是最大，這套處理的結果就是原向量。現在先用十幾個運算判斷，只有不符合的才走原本的處理（分支）；方向在 sampled image 之前產生（`OpSampledImage` 必須和取樣在同一個 block）。ir3：一次內插方向的 cube 取樣 86 → 16 條（一般路徑）；face 的精確性測試（每種裝置讀到 Metal 的面與 texel、平手、零向量、極大值、inf／NaN）全部照舊通過，核心測試沒有 base 以外的失敗，MetalCheck 通過。GFXBench 有 28 個 fragment shader 取樣 cube，最大的 5 個每個像素實際執行的指令約 1518 → 946 條（-38%，其餘在只有邊界方向才走的分支裡）；5566 的 Car Chase（車身反射）在被溫控壓到 578 MHz 時仍有 46.4 fps（0036 在 726 MHz 是 47.3）。一般 2D 取樣翻譯後只要 2–8 條，cube 是唯一的異常
-- ✅ **11-08** 經由 device address 的存取，每個字不再各算一次 64 位元位址（board patch 0036，fork a4c901d）：存取的位移拆成「4 GiB 頁」（只加一次到 root 的位址上，只動高位字）和 32 位元的字索引，每個字是同一個位址底下 `words[index + j]` 的 place。以前每個字都有自己的 64 位元位址（base + 4×word，在 32 位元 GPU 上是加法、進位比較、再一次加法），驅動沒辦法把它折進讀取指令。Turnip 會把這種 place 降成「64 位元基底＋32 位元偏移」的 `ldg.a`，同一個 leaf 的幾個字也會合成一次讀取。仿 deferredRendering 的 kernel（ir3，noop drm-shim 上的 Adreno 830）：光照迴圈 258 → 217 條，position 的三個字變成一次 vec3 讀取。5566：光照 pass 每幀 60 → 44.5 ms（u_trace），畫面 14.5–15 → 19.8 fps，render server 讀 WebKit surface 的等待不再碰到 100 ms 上限；MetalCheck 通過，核心測試沒有 base 以外的失敗。SEMANTICS_VERSION 1924，所有快取的 pipeline 會重編一次
-- ✅ **11-08** WebGPU 重頁面的畫面卡頓修好：deferredRendering（128 光源）畫面 0.5 fps → 14.5–15 fps（GPU 每幀約 60 ms，上限約 16.6）。根因在 kernel：顯示的每次 swap 都要等**所有程序**在它之前送出的 GPU 工作做完，WebGPU 頁面把 GPU 塞滿時，每次 swap 要等 1.7–1.9 秒（把 `droidvm_virtio_present_wait` 改 0 的 A/B：15.4 fps）。三件事一起修：(1) swap 只等 render server 自己的工作（取 display hold 的程序，device 7651f2b；`droidvm_virtio_present_scope` 是 A/B 開關）；(2) render server 提交前，等別的程序寫完它要讀的 surface（kernel surface ticket 的 awaitWriters，上限 100 ms），因為 GPU 優先權讓它的 ring 跑在 app 前面、KGSL 不替不同 context 排順序；(3) command buffer 的 scheduled 要等同一 queue 前面未完成的少於 3 個才送（NativeMetal 0e7550a）：iPadOS 27.0.1 的 WebKit 只靠 scheduled 節流 WebGPU canvas（在途幀上限與 frame pacer 是 2026-08 才加進 WebKit），以前一送出就 scheduled，WebKit 會一直往前排。A/B（`no-scheduled-pacing`）：有 14.5–14.8、沒有 9.7–9.8 fps 且 render server 的讀取每次都等滿 100 ms。之前以為 pacing 沒效，是因為深度開關用 fopen 讀，WebKit GPU 行程的 sandbox 讀不到，一直都是預設值。MetalCheck 42/42，ALU2 onscreen 86 fps，renderBundles 不變（CPU 受限）
-- ✅ **11-08** 經由「從記憶體讀出的指標」做的存取不再每次讀 root table（board patch 0035，fork b43b964）：WebKit 的 bind group 是 argument buffer，裡面的 buffer 指標到了 metal2vulkan 是 wide pointer，以前每次存取都重讀 root entry 的 host／bind_offset／size 和 sink 位址，而且沒有任何唯讀標記、旁邊還有 miss 計數的 atomic，驅動既不能合併也不能搬出迴圈。webgpu-samples 的 deferredRendering 每個像素對 128 個光源跑迴圈，每個光源讀 20 個欄位。回移植上游 ce204a121（指標改成 (root, at, host, size)，entry 在指標形成時讀一次），root table 與 resident set 的讀取一律走 NonWritable 的 place（`device_place_read_only`，Mesa 會把它們當成可重排的讀取）。ir3（用 Mesa 的 noop drm-shim 在 x86 上以 Adreno 830 編譯同一個 SPIR-V）：每個光源 496 條指令＋363 nop、37 次記憶體操作、11 次 (sy) → 398＋182、17（真正的讀取 7 次）、5；5566 上每幀 GPU 時間 73 → 60 ms（1200×1200、1.2 GHz，WebKit GPU 行程的 Turnip u_trace）。同一支手機的 Android Chrome 約 10 ms。MetalCheck 42/42，核心測試沒有 base 以外的失敗；0034 留下編不過的 used-uses 測試一併修好
-- ✅ **11-08** 5566 開 GPU 優先權（VM 環境變數 `DRM2KGSL_PRIORITIES=3`，render server 走較高的 KGSL ringbuffer）：WebGPU 把 GPU 吃滿時 render server 每次提交從送出到完成平均 270 ms → 35–58 ms。10-27 試過時 GPU 卡在 231 MHz、ALU2 onscreen 減半而關掉；現在有每幀的 KGSL 功耗約束，ALU2 onscreen 86 fps、時脈維持 1200 MHz，沒有重現
-- ✅ **11-07** render encoder 的 resident 集合改成 encoder 層級（board patch 0034，fork e406bf7）：bind state 不再列 resident 資源，render plan 只帶「怎麼碰到 resident 資源」的模板（ResidentReach），shape／plan／heap part 都和 residency 無關；每個 draw 的 resident 前綴由「模板 × residency」產生，residency 只新增 token 時就延伸、帶著延伸自哪個身分（ResidentPrefix::extends，Residency 的 lineage／rewritten），各消費者（tracker、noted-apart、pass-start reads、geometry writes、attachment 檢查、heap touch）只處理尾段、記住幾條鏈（WebKit 的 index clamp 與真正的 draw 是兩條交替的 pipeline）、前綴沒有它在意的存取就整段略過，每條 pipeline 的 CommandUses 跟著 bind state set aside；render pass instance 只記 resident 快照的位置（ResidentLogs），規劃 shadow copy 時才展開；barrier 前沒有可能寫記憶體的命令就不切 pass。icb_scale（lavapipe）encode：每個 draw 前 useResource 1000/2000/4000 draw 473/2212/13966 → 17/33/68 ms；WebKit 的 clamp + barrier + draw 536/2240/10416 → 40/83/180 ms；三種模式畫面 hash 不變、12 組 debug assertion 通過；runtime 的裝置執行測試（`--cfg m2v_cpu_icd`，之前從沒跑過的 87 個模組）失敗清單與 0032 之前相同（一個排程測試在滿載下偶發、單獨跑通過）。5566：renderBundles bundle 模式 GPU 行程 68–88 MB、幀數約 1.75 倍；非 bundle 模式能跑了（第一幀 WebKit 為 5000 個 draw 各下一次 clamp barrier，峰值 467 MB；之後 WebKit 快取 clamp，不再下 barrier，穩定 258 MB，幀率與 bundle 模式相當）；MetalCheck 42/42；texturedCube／shadowMapping／computeBoids／deferredRendering 正常
-- ✅ **11-07** renderBundles 的 GPU 行程記憶體 444 → 150–175 MB（footprint；runtime 自己的 heap 342–418 → 82–117 MB），兩個 renderBundles 分頁同時開也只有 153–175 MB。先在 bridge 換上會計數的 system allocator，Ma 列加上 runtime heap（r）、全部 malloc zone 使用量（z）、footprint（f），確認 CPU 端 malloc 大部分是翻譯層自己的，不是 WebKit；再加取樣式 heap profiler（client-mem 開關下每 32 KB 配置取一個 frame-pointer 堆疊，m2v-mem.txt 列出持有最多的 64 個呼叫點，用 plugin 的 dSYM 解符號，scratchpad heapsym.sh／heapsum.py）。結果：一個 encoder 約 15 種 bind shape（每種 mesh 的 buffer 長度級距一種），每種都把 2 萬項的 used map（全部 resident 資源）複製進 settled shape、plan memo 的 key、plan 自己的 key，每種 shape 的兩個 plan（base 與 replay variant）又各自列一遍全部資源（descriptor write、resource use、heap member）。board patch 0033（fork f63dd55）：BindShape::used 改成共享的 UsedShapes（新 shape 沿用 recent shapes 的那份 map，hash 和 one-level 投影各只做一次），memo 裡的 plan 與其他活著的 plan 共用內容相同的清單（BindingPlan::share_lists），一個 variant 的 memo 對「只差 used 的 shape」只留一個 plan，render pass instance 到第二個範圍才預留 17 格、被越過的 instance 把收集到的 bytes 壓緊並釋放 last。icb_scale 在三種模式畫面 hash 不變、9 組 debug assertion 通過、每 draw 前 useResource 的 2000 draw encode 記憶體 156 → 19 MB、2.8 → 2.2 s；runtime／core 單元測試失敗清單與原版相同；5566 MetalCheck 42/42。診斷工具在 NativeMetal e4015b3（m2v-mem.txt 也列出 render pass instance 的切分原因）
-- ✅ **11-07** WebGPU renderBundles 能跑了（5566：3 fps，持續動畫；之前是卡 30 秒後 GPU 行程被 Safari 殺掉）：原因是 metal2vulkan 每個 draw 的工作量跟 encoder 掛著的 resident 資源數 R 成正比（resident set、handle table、heap 元素、uses 的建立與 note／gather／pass／attachment 檢查、tracker 的 summary join），N 個 draw 就是 N×R；WebKit 把 bundle 裡全部資源（約 1 萬個 buffer、5000 個 texture view）都 useResource，又在 host step 每幀重錄 5000 個 ICB 命令。上游 metal2vulkan development 分支 11-03～05 正好做了這一系列（「resident uses once per identity」、root table 不帶 used resources、heap part 保留、bind shape 不必列 used resources 等），整包升級要重新移植 55 個 patch，所以把其中 26 個 commit 手工 backport 成 board patch 0032（去掉計數器、測試和我們樹上沒有的 kept-draw／compute live 路徑；fork d35b31e）。本機 lavapipe 基準 icb_scale：5000 draw／1 萬 resident 44.2 s → 0.20 s 一幀，2000 draw 輪流 4 種 mesh 且各有自己的 texture view 2.5 s → 0.13 s（上游 0.09 s）；原版、backport、上游在 ICB／一般 draw／每個 draw 前才 useResource 三種模式、5 張不同紋理下畫面 hash 全部相同；commit 自帶的 debug assertion（每個保留的答案都和完整重算比對）沒有失敗；runtime 與 core 單元測試和原版同樣的失敗清單（缺 fixture）。5566 MetalCheck 42/42
-- ✅ **11-07** Metal 的 indirect command buffer（ICB）接上了：WebKit 的 WebGPU 把每個 render bundle 都編成 ICB，`newIndirectCommandBufferWithDescriptor:maxCommandCount:options:` 以前沒實作（回 nil），webgpu-samples 的 renderBundles 一開就是「MTLIndirectCommandBuffer allocation failed」。metal2vulkan 執行期本來就有 ICB（含 shader 寫入），缺的是 bridge 和前端：ICB 本身、render／compute 命令的 setter、reset、render／compute encoder 的 `executeCommandsInBuffer:`（含從 buffer 讀範圍）、ICB 的 useResource、blit 的 copy／reset／optimize、argument encoder 的 `setIndirectCommandBuffer:atIndex:`、render pipeline 的 `supportIndirectCommandBuffers`；render encoder 的 `memoryBarrierWithScope:afterStages:beforeStages:` 以前也是空的，現在是真的 barrier。命令自己的 render state（cull、depth 等）只有 Apple10 會用，Metal 在別的裝置上會直接結束行程，所以記一筆後丟掉（WebKit 是設在 pass 上）。5566 上錯誤消失、rotatingCube 正常、MetalCheck 42/42（NativeMetal 16f3493）
-- ✅ **11-06** 5566（Adreno 840）上「假完成」和 CP fault 的根因找到並修好了：是 Turnip darwin 後端的 **BO slot 競態**，不是 a840 的命令產生錯誤。`darwin_bo_finish` 在放開 retire 鎖**之後**才把 BO 在 handle 索引陣列裡的 slot 清成 0，但鎖裡的回收已經可能把 handle 放回快取或釋放（fence 已完成）；這個空檔裡另一條執行緒配置新 BO 拿到同一個 handle 和 slot，晚到的 memset 就把**新的、還活著的 BO** 清成 0。它的命令串於是位址變成 0（送出被拒、device lost，之後每一幀都「立刻完成」，GFXBench 報出 260–1515 fps 而且狀態 OK），或是 slot 再被別人佔走、IB 指進別的 BO 的記憶體（KGSL 的 CP fault：IB2 讀到 opcode 0、DDE 抓到亂飛的位址）。CPU 和 GPU 都快的 5566 最容易撞到：fence 一完成 handle 立刻能被重用。修法是先清 slot、再讓 handle 回收（fork 879e93c）。5566 Aztec offscreen：修正前 8 次裡 3 次抓到壞位址（其中 2 次假完成），修正後 11 次全部正常（69–98 fps，隨 CPU 上限變化）、0 次 KGSL fault；5567（Adreno 750）Aztec 9.6–10.3、Manhattan 3.1 18.6–18.9 fps（檢查器開著），MetalCheck 兩台都過
-- ✅ **11-06** 找到它的工具：`TU_DARWIN_CHECK_IBS=1`（GFXBench 用 `GFX_ENV`）在每次送出前檢查 CP 會去讀的每個 GPU 位址（IB、draw state、index buffer、indirect 參數與 count，往下追三層）是否落在活著的 BO 裡，有問題就記下封包和前後的 BO；`=2` 時直接拒送。KGSL 沒辦法 dump 我們匯入的 IB，所以只能在 guest 端查。這次的證據是 `submitted stream 0x0 has no live BO`，以及表裡留下的 `[0x0 +0x0]`（被清成 0、卻從沒經過 finish 的 BO）。另外每次送出也會檢查命令串的 BO 是否已釋放，並記下是哪個 command buffer 和它的狀態（fork 7ec7519、e7d38f9）
-- ✅ **11-06** GPU reset 不再被當成完成：KGSL 會跳過被 reset 的 context 後面的工作、但照樣推進 timestamp，guest 只會看到每個 fence 立刻完成、畫面是空的。drm2kgsl 以前 `MSM_PARAM_FAULTS` 一律回 0、`global_faults` 從不更新；現在 guest 問過 `MSM_PARAM_FAULTS` 之後，每次送出都先用 `KGSL_PROP_GPU_RESET_STAT`（讀了就清掉）看該 queue 的 context 有沒有被 reset，guilty 或 unknown 的 reset 會記進 shmem 的 `global_faults`（innocent 不算，和 Turnip 的 KGSL 後端一樣）。Linux Turnip 只從 shmem 讀、從來不問，所以行為不變（virglrenderer 7e17c8e8）。guest Turnip 在 dwv_open 時問一次，每次送出前讀 shmem 的計數（不用呼叫），有變化就 device lost（fork 7ec7519）
-- ✅ **11-06** 補上我們 Mesa（08-10）之後上游的 A8XX 修正：c88b6ebd（bindless descriptor 失效寫的是 A8XX 沒有欄位的 `SP_UPDATE_CNTL`，a840 從沒真正失效過 descriptor 快取；手動移植）、d286f87b／5b2db4b8（gen8 descriptor）、7ea5e51c（gen8 texture line offset）、14656cee（A8XX 間接繪製拆封包）。7638039f 需要我們沒有的 tu_cs API、兩個 LRZ fast-clear 修正（2ce86eed、e1852a33）依賴上游的 LRZ 重寫，都先不收；LRZ 的 fast-clear 區是固定大小配置，算錯只影響深度剔除、不會寫出界（fork 0156455）
-- ✅ **11-06** 排除 udmabuf 的 cache 維護：gunyah_host_mod 加上每條會做 cache 維護的路徑的計數和 `never_invalidate` 開關（2bec5cb）。5566 整段 GPU 工作裡 map_sync／unmap_sync 都是 0（KGSL 對每個匯入都要求 SKIP_CPU_SYNC，8e3c5a9 起照辦），仍有 fault，所以不是它
-- ✅ **11-06** 網路收包改成中斷驅動：virtio-net 的 64 個 RX buffer 原本每 10 ms 輪詢才補回，一次湧入超過 64 個封包就沒有 buffer 可收。改成睡在裝置的 SPI 上（ADT 的 `droidvm,intid`），睡眠期間清掉 RX queue 的 NO_INTERRUPT，100 ms 保底：手機到 guest 的 TCP 從 6.4 MB/s 提升到 18 MB/s（50 MB，busybox nc），1.6 GB 的 GFXBench IPA 104 秒傳完，閒置也不再每秒醒 100 次（device 65a053a）。注意 Android 的 toybox nc 當傳送端時約 1 MB 就自己停了，大檔請用 `/data/adb/ksu/bin/busybox nc`
-- ✅ **11-06** render server 改成由 host 宣告的角色：frontend 新增 `native_bridge_metal_set_render_server()`，plugin 在 render server 路徑上呼叫；encode 執行緒的 RR 54、encode 執行緒本身、GPU 遺失後結束行程等合成器策略都依這個角色決定，不再寫死 `backboardd`，macOS 移植的 WindowServer 只要呼叫同一個 setter。同時修掉 App 結束時的 abort：GFXBench 的靜態解構在 exit() 時釋放 Metal 物件，碰到已被解構的全域 mutex（client-mem 診斷開著時每次都 crash）；frontend 的全域 mutex 改成永不解構（NativeMetal b0d6a07）
-- ✅ **11-06** client 的 BO 快取上限（16 + 8 MiB）對 3D App 沒有影響：GFXBench offscreen 交替 A/B（plugin 預設 vs Turnip 原本的 96 + 16），5567（Adreno 750）Manhattan 3.1 19.06 vs 19.10、Car Chase 7.75 vs 7.83、Aztec normal 10.06 vs 9.95 fps，blob 建立次數也一樣；5566（Adreno 840）兩臂差異都在熱降頻的範圍內（Manhattan 55–94、Car Chase 42–55、Aztec 72–97 fps）
+- ✅ **11-08** GPU 正確性＋穩定性收尾，效能先告一段落：5567（Adreno 750）回歸 MetalCheck 41/41、GFXBench 三項跑完、UI 與毛玻璃正常；metal2vulkan 現況與瓶頸見 [todo](todo/metal2vulkan.md)
+- ✅ **11-08** 10-29 那次 5567 backboardd 在 `ShadowTarget::Rotated` 的 NULL deref 沒再出現：5567 的 render server 每幀都走 rotated 路徑，11-04 起多次開機與今天的回歸都正常
+- ✅ **11-08** WebGL 2 更多頁正確（5566）：three.js texture2darray、volume_cloud（3D texture）、animation_keyframes（skinning）、ubo_arrays（1 fps、GPU 99%，屬效能）
+- ✅ **11-08** gpu-3d「fence waits timed out」查明：單幀 GPU 工作超過 Turnip 100 ms 的等待段才累加（ubo_arrays 開著一分鐘 +437），關頁即停、KGSL 無 fault，不是 fence 遺失
+- ✅ **11-08** Safari 連開 WebGPU 頁凍結判定為原廠 WebKit（上游 321584 修過的串流 IPC 喚醒），不修；喚醒 port 送訊失敗 0x10000003，未在凍結當下比對 ring 標頭（[細節](todo/webgpu-webgl.md#11-08-safari-連開-webgpu-頁凍結)）
+- ✅ **11-08** cameracaptured 每次開機在 `nmb_compute_pipeline_reflection` 的 SIGSEGV 修好（NativeMetal 3c46b5e）：補 0 重建的 function（`zeroRestFunction`）在重試區塊結束就被 ARC 釋放，接著的 reflection 讀到已釋放的 function；現在活到呼叫結束，開機後沒再出現、MetalCheck 通過
+- ✅ **11-08** GPU 寫過的 ICB 不再每幀都走 host step（board patch 0038，fork 62d0b11）：`gpu_written` 改成記錄可能寫它的 command buffer 數，寫入都完成後由 commit 直接錄製；5566 renderBundles 2.3 → 2.6 fps，錄製從排程執行緒移到 WebKit 的 commit
+- ✅ **11-08** Safari 的 WebGL 2 回來了（NativeMetal 2d7aa95、fork ec5c34e）：iPadOS 27 的 ANGLE 只在 `MTLGPUFamilyApple4` 以上提供 ES 3.0（顧慮 Apple3 的 tier-1 argument buffer），我們是 tier 2，plugin 對 ANGLE 回答 Apple4；get.webgl.org/webgl2、webglreport、three.js UBO 範例都正常
+- ✅ **11-08** WebGPU 範例逐一檢查（5566 Safari）：helloTriangle、rotatingCube、computeBoids、shadowMapping、cornell、skinnedMesh 等畫面都符合各範例原始碼的預期，cubemap 沒有接縫、fractalCube 正確，11-02 留下的「cubemap、fractalCube 待查」結案
+- ✅ **11-08** cube 取樣的方向不再每次都跑完整的 Metal 平手處理（board patch 0037，fork dcdea5f）：先用十幾個運算判斷是否需要，只有邊界方向才走原本的處理；一般路徑的 cube 取樣 86 → 16 條 ir3 指令，face 精確性測試與 MetalCheck 通過
+- ✅ **11-08** 經由 device address 的存取，每個字不再各算一次 64 位元位址（board patch 0036，fork a4c901d）：位移拆成 4 GiB 頁＋32 位元字索引，Turnip 降成 `ldg.a` 並合併讀取；deferredRendering 14.5–15 → 19.8 fps，所有快取的 pipeline 會重編一次
+- ✅ **11-08** WebGPU 重頁面的畫面卡頓修好（device 7651f2b、NativeMetal 0e7550a）：顯示的 swap 只等 render server 自己的工作、提交前等別的程序寫完它要讀的 surface、command buffer 的 scheduled 依 queue 深度節流；deferredRendering 0.5 → 14.5–15 fps
+- ✅ **11-08** 經由「從記憶體讀出的指標」的存取不再每次讀 root table（board patch 0035，fork b43b964）：回移植上游 ce204a121，wide pointer 形成時讀一次 entry，root table 與 resident set 改走 NonWritable 讀取；deferredRendering 每幀 GPU 73 → 60 ms
+- ✅ **11-08** 5566 開 GPU 優先權（VM 環境變數 `DRM2KGSL_PRIORITIES=3`）：WebGPU 吃滿 GPU 時 render server 每次提交 270 ms → 35–58 ms；有了每幀的 KGSL 功耗約束，10-27 的降頻問題沒有重現
+- ✅ **11-07** render encoder 的 resident 集合改成 encoder 層級（board patch 0034，fork e406bf7）：每個 draw 的 resident 前綴由模板 × residency 產生並延伸，各消費者只處理尾段；5566 renderBundles 幀數約 1.75 倍、非 bundle 模式也能跑了，MetalCheck 42/42
+- ✅ **11-07** renderBundles 的 GPU 行程記憶體 444 → 150–175 MB（board patch 0033，fork f63dd55）：取樣式 heap profiler 找出每種 bind shape 都複製整份 used map，改成共享的 UsedShapes、plan 共用內容相同的清單；診斷工具在 NativeMetal e4015b3
+- ✅ **11-07** WebGPU renderBundles 能跑了（board patch 0032，fork d35b31e）：手工 backport 上游 metal2vulkan 一系列 commit，消除每個 draw 跟 resident 資源數成正比的工作；5566 3 fps 持續動畫（之前卡住後被 Safari 殺掉），MetalCheck 42/42
+- ✅ **11-07** Metal 的 indirect command buffer（ICB）接上了（NativeMetal 16f3493）：補上 ICB、命令 setter、reset、`executeCommandsInBuffer:`、ICB 的 useResource 與 blit 等，render encoder 的 memory barrier 也改成真的；renderBundles 的 ICB 配置錯誤消失、MetalCheck 42/42
+- ✅ **11-06** 5566（Adreno 840）的「假完成」和 CP fault 修好（fork 879e93c）：根因是 Turnip darwin 後端的 BO slot 競態（放開 retire 鎖後才清 slot，把重用同一 handle 的新 BO 清成 0），改成先清 slot 再回收 handle；Aztec offscreen 11 次全部正常、0 次 KGSL fault
+- ✅ **11-06** 找到 BO 競態的工具（fork 7ec7519、e7d38f9）：`TU_DARWIN_CHECK_IBS=1`（GFXBench 用 `GFX_ENV`）在每次送出前檢查 CP 會讀的每個 GPU 位址是否落在活著的 BO（`=2` 直接拒送），也檢查命令串的 BO 是否已釋放
+- ✅ **11-06** GPU reset 不再被當成完成（virglrenderer 7e17c8e8、fork 7ec7519）：drm2kgsl 在 guest 問過 `MSM_PARAM_FAULTS` 後，每次送出用 `KGSL_PROP_GPU_RESET_STAT` 查 reset 並記進 shmem 的 `global_faults`，guest Turnip 看到變化就 device lost；Linux 行為不變
+- ✅ **11-06** 補上我們 Mesa（08-10）之後上游的 A8XX 修正（fork 0156455）：c88b6ebd（bindless descriptor 失效，手動移植）、d286f87b／5b2db4b8、7ea5e51c、14656cee；7638039f 與兩個 LRZ fast-clear 修正依賴我們沒有的上游改寫，先不收
+- ✅ **11-06** 排除 udmabuf 的 cache 維護：gunyah_host_mod 加 cache 維護計數與 `never_invalidate` 開關（2bec5cb），5566 整段 GPU 工作 map_sync／unmap_sync 都是 0 仍有 fault，所以不是它
+- ✅ **11-06** 網路收包改成中斷驅動（device 65a053a）：virtio-net 的 RX 從定時輪詢改為睡在裝置 SPI 上（100 ms 保底），手機到 guest 的 TCP 6.4 → 18 MB/s；大檔請用 busybox nc（Android toybox nc 傳約 1 MB 就停）
+- ✅ **11-06** render server 改成由 host 宣告的角色（NativeMetal b0d6a07）：plugin 呼叫 `native_bridge_metal_set_render_server()`，合成器策略不再寫死 `backboardd`；frontend 的全域 mutex 改成永不解構，修好 App 結束時的 abort
+- ✅ **11-06** client 的 BO 快取上限（16 + 8 MiB）對 3D App 沒有影響：GFXBench offscreen 與 Turnip 原本的 96 + 16 交替 A/B，5567 的差異在雜訊內、5566 在熱降頻範圍內，blob 建立次數也一樣
 - ✅ **11-06** 同一版（kernel 加 plugin）部署到 5566（8 Elite Gen 5）：兩台的 OS／SystemOS 映像相同、Data volume UUID 相同，所以同一個開機碟可用（5566 保留自己的 DarwinBoot）；開機正常、MetalCheck 42/42、encode 執行緒 54、GFXBench 與轉場都能跑
-- ✅ **11-06** 靜止畫面的無謂喚醒：開機後顯示 worker 仍照開機 console 的節奏每 1 ms 醒一次（compositor 送畫面之後根本不需要），改成等下一幀才醒，閒置 10 秒的 CPU 0.216→0.049 s；input worker 原本每 4 ms 輪詢一次，改成睡在 virtio-input 的 SPI 上（ADT 的 `droidvm,intid`，處理函式在中斷 context 裡 ACK；睡眠期間清掉 event queue 的 VIRTQ_AVAIL_F_NO_INTERRUPT），手指按著時仍每 4 ms 看一次（held-finger 雜訊），否則 250 ms 保底；閒置喚醒每秒 250→約 100 次（motion sensor 的頻率），CPU 0.226→0.121 s，觸控事件一到就讀、不再最多晚 4 ms（device 4114492、30886ad）。兩種模式各跑 2 輪六種轉場：手勢全部辨識、幀率在雜訊內，漏接中斷 0 次，MetalCheck 42/42
-- ✅ **11-06** 每個 GPU 行程啟動省下約 2–3 s CPU：Mesa 對每個「驅動可能實作」的 Vulkan 進入點取 weak 位址，沒實作的是 NULL；ld64 只有在 `-undefined dynamic_lookup` 下才肯連結，結果是 flat namespace bind，dyld 每次 dlopen Turnip 都要拿 5633 個名字去搜尋行程裡**每一個**映像（App 有數百個）才得到 NULL。設定 App 冷啟動時 PencilKit 在背景建立 Metal device，那條執行緒 2.9–3.0 s CPU、在 50 ms 取樣裡有 60 個樣本落在 dyld 的 `forEachBindTarget → hasExportedSymbol`。連結後把這些 weak import 改綁到 Turnip 自己（`scripts/macho-weak-self-binds.py`，簽章前執行、可重複執行；符號是 hidden 所以照樣是 NULL）：0.17 s，設定 App 9 秒內的 CPU 6.7→4.7 s；MetalCheck 42/42（fork 527b8b7）。App、widget、extension、respring 後的 SpringBoard 都一樣受益
-- ✅ **11-06** 轉場卡頓（優先權反轉）：iPadOS 的 render server（backboardd）把 user-interactive QoS 壓到 37–46，我們的 Metal encode 執行緒因此排在每個 App 主執行緒（47）之下，但 CoreAnimation 的 display 執行緒每一幀都在等它（CA render-server 執行緒是 55）；打開 App 時 App 和 SpringBoard 的主執行緒佔走 CPU，encode 有四分之一的時間在 runnable。改成 backboardd 的 encode 執行緒預設 SCHED_RR 54（NativeMetal fb063de）。同一次開機開／關交替 3 對、每臂 2 輪六種轉場，每 100 幀超過 33 ms 的次數：widgets 12.3→5.6、App Library 5.8→2.9、Spotlight 26.2→4.1、打開設定 14.3→6.1、設定回主畫面 13.2→9.8，平均 fps 多 20–40；MetalCheck 42/42。開在每個行程時 App 切換器反而變差（App 的 encode 高過自己的主執行緒），所以只開在 render server。m2v 自己的 scheduler／handlers／queue-wait 也提高到 54 量不出差別，已撤掉。仍剩的 1% low（8–13 fps）主要是 render server 閒著等 App 交出畫面（App 啟動的 CPU）和手機被限頻到 1.4 GHz 的時段
-- ✅ **11-06** memoryless 附件不再佔真實記憶體：Turnip 的 darwin backend 有 set_iova 但沒有 lazy BO，所以沒有 LAZILY_ALLOCATED 記憶體可用，metal2vulkan 把每個 memoryless（transient）附件都放進 wired 的 guest 記憶體。補上 lazy VMA 的 iova 保留／釋放，lazy BO 在第一個需要 sysmem 的 pass 才配置（`turnip-darwin-lazy-bos.patch`，fork 5c6a422）。同一次開機開／關交替 3 對：render server 515 vs 630 MiB、guest wired 2255 vs 2389 MiB；七個畫面的截圖比對都在雜訊內，MetalCheck 42/42。另外「先放最滿的 block」（0032）量不出差別，已撤掉；0031 是 pool 報告與 0029 的 A/B 開關
-- ✅ **11-06** 一次打開 App 的 4 秒裡有 86 個行程死掉，查明是 jetsam 的 sustained-pressure 政策：壓力停在 warning 超過 10 分鐘後，依序殺 idle band 的行程（多是 1–3 MB 的 daemon，之後又被叫起來），不是每次打開 App 都會發生（對照實驗連開 3 次 0 個行程死掉）。guest 的 kill 計數（`memorystatus_kill_counts`，注意陣列跳過 IdleExit 與 Invalid 兩欄）累計 3196 次 sustained-pressure kill。5 ms 的整機 spindump 本身就吃掉約 3.8 s／5 s 的 CPU，量轉場要用 200 ms 整機（每個執行緒的 cpu time 不受間隔影響）或只取樣目標行程（`-onlyTarget -proc`）
-- ✅ **11-05** Dock、工具列、Spotlight 的毛玻璃不再變黑或變成桌布：CoreAnimation 在 display pass 之間取樣旋轉過的 framebuffer 做 backdrop；pass 的旋轉 twin 和 shader 取樣的 read image 是同一塊 plane bytes 的兩個 shadow，read image 在這一幀第一次 capture 時 copy in，之後被帶到後面的 encoder。render encoder 之間沒有順序，twin 的 copy back 不會經過 `ShadowSync::wrote`（只有它會丟掉帶著走的 entry）→ 後面的 backdrop 一直取樣舊的 read image。修法：copy back 也丟掉跟它寫入同一份資料的 carried shadow，下次用到再 copy in（fork metal2vulkan 0026，181b8b4）。glasstest：Dock 亮度 221–237（原本會掉到黑），MetalCheck 41/41。0023–0025 是追查時加的 A/B 開關（DontCare 全部 STORE、各類附件的 DontCare 遮罩、每個 pass 前完整 barrier），預設全關；DONT_CARE 不是原因
-- ✅ **11-05** guest 記憶體（VM 不能再加 RAM：12 GB 手機、Gunyah 0.5 G、Android 留 5.5 G）。guest wired 2.4–2.8 → 約 1.95–2.15 GB：
-  - 根 policy 的 hash table（兩個碟共 116 MiB）存了 3 份：DarwinBoot 交出的靜態區、kernel 驗證用的 copy、每個碟各自一份。VirtioMmioBlock 0005 讓碟直接對 policy 那份驗證（Security 299 → 181 MB）。firmware 靜態區本身放不掉：physmap 從 kernel data 結尾開始，`ml_static_mfree` 拒絕更低的位址
-  - render server 的 memoryless color backing 只服務同一個 extent，每種 extent 留一個、永不釋放：19 個、254 MiB。metal2vulkan 0029 讓單取樣 backing 服務它涵蓋得到的所有同類附件，新的長到最大那個的大小、被涵蓋的釋放 → 2 個、28 MiB
-  - shadow 的 merge scratch 每個 shadow 永遠留 2 個，靜止的桌布也抱著 64 MiB。0030 讓它們閒置 10 秒後跟著 idle trim 釋放，記憶體壓力時全放
-  - Turnip 的 freed-BO cache：每個常駐 client 的 96 MiB 預算都填滿（桌布 extension 為一張靜止圖片抱 56 MiB、widget／SpringBoard 各 30–40 MiB）；render server 釋放的 64 MiB block 吃掉共用預算，小 BO 一釋放就沒了、下次再重建（每次都要經 host 唯一的 virtio-gpu worker 跑一趟）。改成小 BO（≤1 MiB）有自己的預算（`turnip-darwin-bo-cache-small-budget.patch`）、超過預算的 BO 直接釋放（`-oversize.patch`，原本「最新放入的不淘汰」讓一個 32 MiB block 永遠留在 16 MiB 預算裡）（fork 97dc23e）；client 用 16＋8 MiB，render server 維持預設（NativeMetal 52162a4）
-  - 結果：backboardd 的 GPU 記憶體高原 1031 → 約 642 MiB、桌布 extension 約 326 → 244 MiB；兩輪 sixfps 的開機碟讀取 190–227k → 約 46k 個 block（page cache 不再被擠掉）
-  - 不是洩漏：長時間增加是 metal2vulkan 自己的保留加上 pool 碎片，會停在高原；貼圖在 Metal／Vulkan／Turnip 三層只有一份配置（例外是 host-pointer import 上的 shadow，Turnip 在那裡不綁 image）。Siri／intelligence 共 22 個 process、86–104 MiB（Siri 本體約 35 MiB）
-  - 診斷工具：metal2vulkan 0028 用 `#[track_caller]` 記下每個 placement 的來源行（`m2v_placement_sites`），frontend 記 app 的 Metal 呼叫要了多少（`nmb_memory_row`／`nmb_memory_top`），`/private/var/ngpu/debug/client-mem` 讓每個 GPU client 每 5 秒把這些寫到暫存目錄的 m2v-mem.txt
-- ✅ **11-05** 延遲來源：
-  - ArmCpu 沒有回報 powergate_latency，XNU 的 `cpu_idle_latency` = 0，所以連 1 µs 的 `IODelay` 都去睡全域那一個 `clock_delay_until` 事件，各個 polling driver 的 thread 擠在同一個 waitq 的 lock 上；持有者的 vCPU 被 host 搶走時就 lock timeout panic。改成每個 CPU 回報 25 µs，短延遲改成自旋（ArmCpu 5265ef1）
-  - VirtioMmioBlock 0006：讀取自旋 1 ms 之後改睡在 driver 自己的事件上、等碟的中斷（`droidvm,intid` 經 `armcpu_spi_attach`，最多 2 ms），不再每 20 µs 一次 delay 擠那個共用事件；A/B 跟 polling 一樣快
-  - Data 碟的請求：自旋之後原本每次睡 `IOSleep(1)`（1 ms 以上），同一個碟的請求全排在它後面，主畫面翻頁時 Biome 每秒 200–300 次寫入讓 SpringBoard 主執行緒卡在 fsync。改成 50 µs 自旋＋50 µs 一步，並有等待時間直方圖
-  - virtio-gpu：等 fence、等空位、顯示等 GPU 都改成等 transport 的中斷計數（`returns()`／`awaitReturn()`），不再 `IOSleep(1)` 輪詢；blob 的 GEM_NEW 和 CREATE_BLOB 預設不等回覆（`droidvm_virtgpu_async_create=1`），render server 第一次開 view 時不再每個 blob 等 0.1–15 ms（device 3af9eca、45052cd、6a8076f）
-- ✅ **11-04** IOSurface 的 CPU 存取會等 GPU（Safari WebGPU textured cube 隨機破圖、canvas 像素遺失）：iPadOS 27 的 WebKit.GPU 用 CoreAnimation 的加速 CG（`CA::CG::Queue`，也就是 Metal）畫 2D canvas 和 ImageBitmap，`putImageData` 是先 flush、再 IOSurfaceLock 用 CPU 寫入；Apple 的 IOSurfaceLock 會等這個 surface 上還沒做完的 GPU 工作，這裡沒有 → 晚一步執行的 GPU 清除把 CPU 寫的像素蓋掉，畫完立刻讀回只拿到一半。submit 不會列出它用到的資源，所以改由 Metal plugin 在 commit 時告訴 kernel 這個 command buffer 用了哪些 IOSurface（ticket，分寫入或只讀），做完時結束；XNU 的 `iokit_user_client_trap` 在執行 trap 前呼叫 hook（`droidvm-surface-gpu-wait.patch`），IOSurfaceRootUserClient 的 lock（trap 2，unlock 是 3，27 上實測）等 lock 之前開始的 ticket：讀鎖等寫入、寫鎖連讀取也等，最多 500 ms（device e29d087、NativeMetal 3f8d44a）。5567 實測：flush 後立刻 putImageData 6/6 遺失 → 0、沒畫過的 canvas 5/5 → 0、ImageBitmap 經 copyExternalImageToTexture 20/20 錯 → 0、textured cube 連續重載 4 次都正常、MetalCheck 41/41；真的需要等的 lock 有 120 次（平均 5.3 ms、最長 88 ms、無逾時），合成、遊戲、WebGPU 畫面不經過這個等待。順帶修了 host 的 udmabuf：map/unmap 沒帶 importer 的 DMA 屬性，KGSL 對 IO-coherent 匯入要求的 DMA_ATTR_SKIP_CPU_SYNC 被丟掉，每次 unmap 都對 guest RAM 做 cache invalidate，可能丟掉 guest 還沒寫回的資料（gunyah_host_mod 8e3c5a9，wip/hackintosh 新分支）；原廠 GKI 的 udmabuf 也是這樣，只有載入我們模組的核心（8 Gen 3）修得到，8 Elite 用的是內建版
-- ✅ **11-04** 觸控筆＝Apple Pencil（壓力、懸停、傾斜角、方位角、筆身按鈕）：host 端是通用的 pen tablet，crosvm 新增 `--input stylus`（INPUT_PROP_DIRECT、BTN_TOOL_PEN／RUBBER、BTN_TOUCH、BTN_STYLUS／2、ABS_PRESSURE 0..4095、ABS_DISTANCE 0..255、ABS_TILT_X/Y ±90°，crosvm c9e24ed54），和觸控螢幕是分開的裝置，跟 Linux（wacom、hid-multitouch）、Windows（Pen 與 Touch Screen 是不同 collection）、Apple 硬體的慣例一致。app 新增每個螢幕的 PEN 通道（排在所有輸入裝置最後，原有裝置的 MMIO 位址不變），任何輸入模式下觸控筆都走 pen：觸碰、懸停、筆身按鈕；tilt 是 Android InputReader 換算的精確反函數（有單元測試），離開感應範圍延後 60 ms（Android 在落筆前送 HOVER_EXIT、抬筆後送 HOVER_ENTER）（app fad5042，未推）。guest：virtio-input 的 KIND_PEN 在 kernel 內用整數換算 tilt→polar，發給第三個 HID 裝置「pencil digitizer」（Digitizer/Stylus、Built-In、DisplayIntegrated，report 4）（device b7396ee）。反組譯查到 iPadOS 27 的條件：UIKit 從 stylus 子事件的 **polar** 方向讀角度（altitudeAngle = π/2 − Altitude，azimuth 是 y 朝上逆時針），IOHIDEventDriver 只產生 tilt 型事件且丟掉 tilt → dispatch wrapper 直接改事件資料的 orientationType（+0x58）、用 setFixedValue（vtable slot 26）寫入角度、壓力和 Z；backboardd 的最大壓力取自 service 的 `AccurateMaxDigitizerPressureValue`（缺了網頁 pressure 就是 0），懸停高度取自 `MaxHoverHeight`，而且只讀 usage 0x20 的 service（缺了 UIKit 不產生 hover）。Safari Pointer Events 實測：pointerType pen、pressure 照送入值 0.1→1.0、懸停移動、四個方向的 tilt 與 altitude 都對，手機本身的 OnePlus Pencil Pro 也是；rig 新增 pen.py（經 daemon 送合成筆）、keys.py（鍵盤）
-- ✅ **11-04** iPadOS 27 跑在 5567（8 Gen 3、Adreno 750）：1024x1366 @1x、7 vCPU、5 GiB；Metal（主畫面、widget）、VPU 硬體解碼 720p 95.7 fps、paravirt 硬體編碼 87.6 fps（ffprobe 驗證）都正常，不開 vCPU 防護腳本也沒重開機。全新 Data 的 seed 裡 GPU plugin、gfxprobe、ipatool、lsdiag 是舊版，不在開機碟的 trust cache → AMFI 拒絕（沒有 Metal、工具被 SIGKILL），從 Mac／另一台 guest 補上目前版本即可
-- ✅ **11-03** 5567 之前重開機的原因（不是 PAC）：OPLUS 的 last kmsg（`/data/persist_log/backup/SYSTEM_LAST_KMSG.txt`）顯示 gh-watchdog bite，所有 host CPU 都卡在對 CPU 3 的 smp_call_function，也就是 PAC 探測綁在 cpu3 的 vCPU 一直沒離開 guest（探測在 shim 交接時就壞了，第一個字元都沒印出），屬於 10-25「vCPU 不退出拖死 host 核心」那一類；同型的 A720 核心 cpu2 的 PAC 探測是正常的。vmguard2.sh 修正誤判：只有在 CPU 時間真的增加時才算卡住（7 個 vCPU 時閒置的 vCPU 可以睡超過 1 秒）
-
-- ✅ **11-03** Safari 影片是硬體解碼（查證，無需修改）：WebKit GPU process 把 decompression session 開在 videocodecd（profile 允許 `com.apple.coremedia.videocodecd.decompressionsession.xpc`，和真機一樣），videocodecd 經 paravirt 交給手機 VPU；Big Buck Bunny H.264 10 秒 250/250 格由 videocodecd（paravirt pid）解碼、0 錯誤。WebKit GPU 那筆 `AppleVideoToolboxParavirtualizationUserClient` 拒絕只是 VT 在本地探測 Apple 內部 VM 專用的捷徑（WebKit iOS GPU profile：`(require-all (system-attribute virtual-device) (system-attribute apple-internal))`），被拒就照真機路徑走。VideoToolbox 的 decoder 在本地跑與否由 `VTAreVideoDecodersRunningInProcess` 的旗標決定，預設 0（遠端）
-- ✅ **11-03** GPU 權限 deny-first：由原廠 sandbox 決定誰能開 GPU，profile 拒絕就維持拒絕。原廠 profile 以 class 繼承鏈比對（字串表裡有 IOGPU 家族的 `IOGPUDeviceUserClient`，WebKit 的 GPU process 則拿 `IOGPU` 的 sandbox extension），真機的 AGXDeviceUserClient／AGXAccelerator 繼承 IOGPUDeviceUserClient／IOGPU，我們的同名 class 不是 → 先前連 backboardd 都被擋（實驗時鎖定畫面全黑）。修法：libkern 新增 `OSMetaClassAdoptSuperclass`（只在 0 個 instance、新父類別繼承自原父類別時才換），`publishMetal` 在 publish 前把兩個 class 掛到 IOGPUDeviceUserClient／IOGPU 底下（`ioreg -i` 與真機相同，`droidvm_gpu_chain` = 5）；換成功後 open-service／open-user-client 兩道只由 sandbox 決定，grant 只留給 method filter（原廠規則寫的是真 AGX 的 selector），換不成就維持舊行為。實測 respring 後 0 筆 GPU 拒絕；render server、SpringBoard、poster、widget、Dock、MapKit、Safari 與 WebKit GPU process（WebGPU helloTriangle MSAA）、GFXBench（app sandbox，ALU2 off 359 fps）、MetalCheck 42/42 都經原廠 profile 拿到 GPU（device 504aa0d）
-- ✅ **11-03** GPU 全開（`droidvm-gpu-clients=*`，原廠行為）：每個 process 都能用 GPU。實測穩定後常駐 client 6 個（SpringBoard、Dock 資料夾、一個 poster、widget renderer、icon service、render server），wired 記憶體和名單模式相當（2478 vs 2557 MiB），Maps 地圖正常、render server 沒卡死（device af0c2d2）。11-02 記的「SpringBoard 當 GPU client 讓 home 手勢壞掉」其實是 SpringBoard 有了 Metal 之後 iPadOS 提供「視窗化 App」模式（`SBMedusaMultitaskingEnabled`）：該模式沒有 home 指示條；兩種模式底部上滑都能回主畫面，模式由使用者在設定→多工處理與手勢選，guest 已設回全螢幕
-- ✅ **11-03** GFXBench Aztec high offscreen 不再崩潰：crosvm 的 fd 上限 65536 被 GPU blob 用光（每個 blob 在 host 佔 3 個 dmabuf fd，Aztec high 同時約 12000 個 blob → `drm2kgsl_renderer_get_blob: dup failed: Too many open files`）→ CREATE_BLOB 失敗 → Turnip 的失敗 cs 停在 fail sink，`tu_cs_add_entries` 卻照樣加 entry（讀空 BO 陣列 bos[-1]）而 SIGSEGV。修法：crosvm 啟動時把 `RLIMIT_NOFILE` 拉到 `nr_open`（1048576，crosvm d661920，wip/virtio-mmio 和 wip/hackintosh）；Turnip patch `turnip-cs-failed-stream-entries.patch` 讓失敗的 stream 回報錯誤（fork 32e1738）。實測峰值 66340 fd，5 次連跑全過（42.3／37.2／30.3 fps，熱降頻下）
-- ✅ **11-03** render server 的 spare command pool 不再無限保留：metal2vulkan 把用過的 command pool 連同每個 pass instance 的 secondary 永久留著，Turnip 又在隱式 reset 時保留 command stream BO；視窗模式＋Maps 之後 backboardd 抱著 13890 個 blob（8–128 KiB，約 390 MiB wired）。fork patch metal2vulkan 0022：既有的 kept-memory trim（每 2 秒，壓力時立即）一併釋放閒置 ≥20 秒、最新 8 個以外的 spare pool（壓力時只留 2 個）；實測切 app 時 6343 → 閒置後 3031（fork ef4486d）
-- ✅ **11-03** GFXBench 的 Tessellation 測試不是我們的問題：上游原始碼 `metal_wrapper.h` 寫死 `METAL_LOW_LEVEL_TESS_ENABLED 0`（`mtl_tess.mm` 還有 MTL_TESS_TODO），`metal_tess` id 註冊了卻沒有實作，GFXBench 對 NULL 測試物件呼叫 init0 而崩潰。曲面細分由 Car Chase（螢幕＋offscreen）覆蓋
-- ✅ **11-03** iPadOS 27 任何第三方 app 都有 3D：`droidvm-gpu-clients` 加 `@apps`（主程式在 `/var/containers/Bundle/Application/` 下的 process），plugin 准入（fork 42ab1cd）和 kernel sandbox grant（`droidvm-gpu-grant-apps.patch`）都認它；系統常駐 process 仍逐一列名（每個都有自己的裝置和 64 MiB 記憶體池）。arm64 app 本來就能載入 arm64e 的 plugin（keys-off，PAC 指令等同 NOP；先前「dyld 不載入」的判斷是錯的，fat plugin 試做後撤回）。GFXBench 改簽 App Store app 的 entitlements（加 container-required：trust cache 讓它成為 platform binary）：舊的 no-container 版在 27 上被 System Policy 擋掉寫入自己的容器 → 存檔路徑 nil → 12 秒崩潰。在 sandbox 內跑：ALU2 108.6 fps（CPU 上限 2.75/3.13 GHz）、T-Rex 60、Manhattan 38.3、Manhattan 3.1 27.4、Car Chase 21.2、Aztec normal 30.3／high 21.4 fps（後段手機熱到 CPU 上限 1.0–1.3 GHz）；MetalCheck（arm64）42/42（device af625d8）。Offscreen 1080p：ALU2 333、Driver2 13.7、Fill2 39.0、T-Rex 71.0、Manhattan 88.2、Manhattan 3.1 60.9、Car Chase 40.5、Aztec normal 69.1 fps（CPU 上限約 1.1–2.4 GHz、手機 57–67°C）
-- ✅ **11-03** arm64 process 的 C++ exception 不再崩潰：IB（return address key）也在 EL0 關掉（keys off），libunwind 對 arm64 frame 未簽章的 return address 做 autib 不再 PAC fail（`droidvm-native-pac-user-ib.patch`）。任何會丟 C++ exception 的 arm64 App Store app 原本都會死在 unwinder（device d85806a）
-- ✅ **11-03** iPadOS 27 的 Metal 正確性：MetalCheck（arm64e）42/42 通過，無 GPU 錯誤／逾時／panic。測試工具重新成為 GPU client：`droidvm-gpu-clients` 從命令列搬回內建開機參數並加上 MetalCheck、app_ios、gfxprobe（命令列 1006→891 bytes；device 18e8d3f）
-- ✅ **11-03** GFXBench 裝進 iPadOS 27：trust 加 app_ios CDHash，ipatool／lsdiag 修 27 的 LaunchServices selector（去掉 personaUniqueStrings）、解壓保留 Unix 權限、大 app 不再撐爆記憶體（device 9dca3ac）；IPA 經手機 nc 走網路傳入（ssh 只有 0.6 MB/s）
-- ✅ **11-03** VM 螢幕高度 ≤1920 時 @1x：用 UniXNU 的 native-text-fixup 修補 QuartzCore `-[CADisplayMode preferredScale]` 兩處（虛擬裝置分支改走高度規則、門檻 1080→1920；`make-droidvm-adt.py --text-fixup` 寫 `/chosen/text-fixups`；code-signing bitmap 快速路徑也套用，`droidvm-text-fixup-bitmap.patch`）。1032×1376（13 吋 iPad 的點數、1/4 像素）：@1x、screen type 110 同 2048、首頁／桌布／設定／Safari WebGPU 正常、觸控正確；顯示 surface 85→22 MiB、backboardd GPU 記憶體 617→449 MiB；2048×2732 仍 @2x。VM 螢幕尺寸就是開關（device ffeb241）
-- ✅ **11-03** 解析度／DPI 查明：iPadOS 27 的 UI scale 不看 DPI、`display-scale`、MobileGestalt，由 `-[CADisplayMode preferredScale]` 決定（模式帶 preferredUIScale 就用它，只有外接 digital-out 模式會帶；否則 MobileGestalt `IsVirtualDevice` 為真 → 至少 @2x；否則高度 >1080 px → @2x），而且每個 UIKit 行程各自算。所以 1024×1366 永遠是 @2x、512×683 點、iPad mini 排版。不改 userland 的省法：1536×2048（768×1024 點 @2x，SpringBoard screen type 111），首頁、設定排版正常、觸控正常，像素少 44%，backboardd GPU 記憶體 617→454 MiB、顯示 surface 85→48 MiB；代價是同樣的手機畫面只放 768×1024 點（介面放大約 1.33 倍）。VM 仍維持 2048×2732，換解析度只改 VM 螢幕設定，DPI 不影響
+- ✅ **11-06** 靜止畫面的無謂喚醒修好（device 4114492、30886ad）：顯示 worker 改成等下一幀才醒，input worker 改睡在 virtio-input 的 SPI 上（手指按著時仍輪詢）；閒置喚醒每秒 250 → 約 100 次，手勢與幀率不變
+- ✅ **11-06** 每個 GPU 行程啟動省下約 2–3 s CPU（fork 527b8b7）：Mesa 的 weak import 讓 dyld 每次 dlopen Turnip 都拿數千個名字搜尋行程內每個映像，連結後用 `scripts/macho-weak-self-binds.py` 改綁到 Turnip 自己；App、widget、extension、SpringBoard 都受益
+- ✅ **11-06** 轉場卡頓（優先權反轉）修好（NativeMetal fb063de）：render server 壓低 QoS，Metal encode 執行緒排在 App 主執行緒之下，改成 backboardd 的 encode 執行緒預設 SCHED_RR 54（只開在 render server）；Spotlight 每 100 幀的長幀 26.2 → 4.1 次
+- ✅ **11-06** memoryless 附件不再佔真實記憶體（fork 5c6a422）：Turnip darwin 後端補上 lazy VMA 的 iova 保留／釋放，lazy BO 在第一個需要 sysmem 的 pass 才配置（`turnip-darwin-lazy-bos.patch`）；render server 630 → 515 MiB
+- ✅ **11-06** 查明一次打開 App 時 86 個行程死掉是 jetsam 的 sustained-pressure 政策（壓力長時間停在 warning 後依序殺 idle band），不是每次都會發生；量轉場改用 200 ms 整機 spindump 或 `-onlyTarget -proc`（5 ms 整機取樣本身吃掉大半 CPU）
+- ✅ **11-05** Dock、工具列、Spotlight 的毛玻璃不再變黑或變成桌布（metal2vulkan 0026，fork 181b8b4）：旋轉 twin 的 copy back 不經 `ShadowSync::wrote`，後面的 backdrop 一直取樣舊的 read image；現在 copy back 也丟掉同一份資料的 carried shadow，MetalCheck 41/41
+- ✅ **11-05** guest wired 記憶體 2.4–2.8 → 約 1.95–2.15 GB：碟直接對 policy 的 hash table 驗證（VirtioMmioBlock 0005）、memoryless backing 共用（m2v 0029）、merge scratch 閒置釋放（0030）、Turnip 小 BO 獨立預算（fork 97dc23e、NativeMetal 52162a4）；診斷用 m2v 0028＋client-mem
+- ✅ **11-05** 延遲來源修好：ArmCpu 回報 powergate_latency、短延遲改自旋，避免共用 waitq 的 lock timeout panic（ArmCpu 5265ef1）；VirtioMmioBlock 0006 與 Data 碟改等中斷或短步自旋；virtio-gpu 改等 transport 中斷計數、blob 建立預設不等回覆（device 3af9eca、45052cd、6a8076f）
+- ✅ **11-04** IOSurface 的 CPU 存取會等 GPU（device e29d087、NativeMetal 3f8d44a）：plugin 在 commit 時以 ticket 告訴 kernel 用到哪些 IOSurface，IOSurfaceLock 等之前的 GPU 工作；修好 Safari WebGPU textured cube 破圖與 canvas 像素遺失，順修 host udmabuf 丟掉 SKIP_CPU_SYNC（gunyah_host_mod 8e3c5a9）
+- ✅ **11-04** 觸控筆＝Apple Pencil（壓力、懸停、傾斜、方位角、筆身按鈕）：crosvm 通用的 `--input stylus`（c9e24ed54）、app 每個螢幕的 PEN 通道（fad5042，未推）、guest 第三個 HID 裝置 pencil digitizer（device b7396ee）；Safari Pointer Events 實測 pressure、hover、tilt 都對
+- ✅ **11-04** iPadOS 27 跑在 5567（8 Gen 3、Adreno 750）：1024x1366 @1x，Metal、VPU 硬體解碼、paravirt 硬體編碼都正常；全新 Data seed 裡的 GPU plugin 與工具是舊版、不在 trust cache，要從 Mac／另一台 guest 補上目前版本
+- ✅ **11-03** 5567 之前重開機的原因不是 PAC：OPLUS last kmsg 顯示 gh-watchdog bite，PAC 探測綁在 cpu3 的 vCPU 一直沒離開 guest（10-25「vCPU 不退出拖死 host 核心」那類）；vmguard2.sh 改成 CPU 時間真的增加才算卡住
+- ✅ **11-03** Safari 影片是硬體解碼（查證，無需修改）：WebKit GPU process 把 decompression session 開在 videocodecd，經 paravirt 交給手機 VPU；WebKit 那筆 `AppleVideoToolboxParavirtualizationUserClient` 拒絕只是探測 Apple 內部 VM 的捷徑
+- ✅ **11-03** GPU 權限 deny-first，由原廠 sandbox 決定（device 504aa0d）：libkern 新增 `OSMetaClassAdoptSuperclass`，publish 前把我們的 AGX class 掛到 IOGPUDeviceUserClient／IOGPU 底下，原廠 profile 的繼承鏈比對因此生效；respring 後 0 筆 GPU 拒絕
+- ✅ **11-03** GPU 全開（`droidvm-gpu-clients=*`，原廠行為，device af0c2d2）：每個 process 都能用 GPU，wired 記憶體和名單模式相當；11-02 記的「home 手勢壞掉」其實是 iPadOS 的視窗化 App 模式，guest 已設回全螢幕
+- ✅ **11-03** GFXBench Aztec high offscreen 不再崩潰：crosvm 啟動時把 `RLIMIT_NOFILE` 拉到 `nr_open`（crosvm d661920；GPU blob 用光了 fd），Turnip 的失敗 stream 改成回報錯誤（fork 32e1738）；5 次連跑全過
+- ✅ **11-03** render server 的 spare command pool 不再無限保留（metal2vulkan 0022，fork ef4486d）：既有的 kept-memory trim 一併釋放閒置的 spare pool（只留最新幾個，壓力時更少）；實測切 app 時 6343 → 閒置後 3031
+- ✅ **11-03** GFXBench 的 Tessellation 測試不是我們的問題：上游原始碼寫死 `METAL_LOW_LEVEL_TESS_ENABLED 0`、`metal_tess` 沒有實作，GFXBench 對 NULL 測試物件呼叫 init0 而崩潰；曲面細分由 Car Chase 覆蓋
+- ✅ **11-03** iPadOS 27 任何第三方 app 都有 3D（fork 42ab1cd、device af625d8）：`droidvm-gpu-clients` 加 `@apps`，plugin 准入與 kernel sandbox grant 都認；GFXBench 改簽 App Store app 的 entitlements（含 container-required）後在 sandbox 內跑，ALU2 108.6 fps
+- ✅ **11-03** arm64 process 的 C++ exception 不再崩潰（device d85806a）：EL0 的 IB key 也關掉，libunwind 對未簽章的 return address 做 autib 不再 PAC fail（`droidvm-native-pac-user-ib.patch`）
+- ✅ **11-03** iPadOS 27 的 Metal 正確性：MetalCheck（arm64e）42/42，無 GPU 錯誤／逾時／panic；`droidvm-gpu-clients` 搬回內建開機參數並加上 MetalCheck、app_ios、gfxprobe（device 18e8d3f）
+- ✅ **11-03** GFXBench 裝進 iPadOS 27（device 9dca3ac）：trust 加 app_ios CDHash，ipatool／lsdiag 修 27 的 LaunchServices selector、解壓保留 Unix 權限、大 app 不撐爆記憶體；IPA 經手機 nc 走網路傳入
+- ✅ **11-03** VM 螢幕高度 ≤1920 時 @1x（device ffeb241）：用 native-text-fixup 修補 QuartzCore `-[CADisplayMode preferredScale]` 兩處（門檻 1080→1920）；1032×1376 下首頁、桌布、設定、Safari 正常，2048×2732 仍 @2x，VM 螢幕尺寸就是開關
+- ✅ **11-03** 解析度／DPI 查明：iPadOS 27 的 UI scale 不看 DPI、`display-scale`、MobileGestalt，由 `-[CADisplayMode preferredScale]` 決定（虛擬裝置至少 @2x，高度 >1080 px 也 @2x）；不改 userland 的省法是 1536×2048（像素少 44%，介面放大約 1.33 倍）
 - ✅ **11-02** VideoToolbox paravirt 預設開啟（內建開機參數 `droidvm-vt-paravirt=1`，有 virtio-media 編／解碼裝置才發布）；裝置做不到的（小於 96x96、非 4:2:0）在 `dsta` 就拒絕，VideoToolbox 改用軟體解碼；主畫面、HEIC、JPEG 不受影響（device 706338e）
-- ✅ **11-02** VideoToolbox 編碼走手機 VPU：guest 核心回 paravirtualized 編碼器（`encs`／`+enc`／`esta`／`efrm`→`Efds`／`Eemt`／`ecfr`），接 virtio-media 編碼器；App 的 IOSurface 經 videocodecd 自己的 client 建 port 再查（selector 0x23／0x22）。720p 60 幀：H.264 204 fps、HEVC 292 fps，0 失敗，ffmpeg 解得回來（Y PSNR 37–67 dB）（device 9d5a0ce）
+- ✅ **11-02** VideoToolbox 編碼走手機 VPU（device 9d5a0ce）：guest 核心回 paravirtualized 編碼器、接 virtio-media 編碼器，App 的 IOSurface 經 videocodecd 自己的 client 建 port 再查；720p H.264 204 fps、0 失敗
 - ✅ **11-02** VideoToolbox 解碼走手機 VPU：guest 核心扮演 Apple VM 的 paravirtualization host，接 virtio-media 解碼器（MediaCodec）。720p 60 幀：H.264 135–151 fps、HEVC 159–170 fps，0 失敗，亮度正確（device 1479852）
-- ✅ **11-02** MSAA 在 Adreno 上降到單取樣成本：Turnip 對不儲存的多重取樣附件走 GMEM＋metal2vulkan 對 Turnip 交 DONT_CARE（`turnip-msaa-resolved-prefers-gmem.patch`、`0021-turnip-dont-care-stores.patch`；4x 64 draw 37.5→9.2 ms；fork 803a014）
+- ✅ **11-02** MSAA 在 Adreno 上降到單取樣成本（fork 803a014）：Turnip 對不儲存的多重取樣附件走 GMEM、metal2vulkan 對 Turnip 交 DONT_CARE；4x 64 draw 37.5→9.2 ms
 - ✅ **11-02** 查明誰用 MSAA：系統 UI 不用（backboardd 0 個），只有動態桌布與 Safari 的 WebGL／WebGPU，「關 MSAA 讓 UI 變順」不適用
-- ✅ **11-02** Swift 的計時恢復：`libswift_Concurrency` 把 deadline 寫死成 24 MHz（ns×3÷125），19.2 MHz 的 guest 上 `Task.sleep`／debounce／timeout 永不觸發 → 核心對外呈現 24 MHz 時基（`droidvm-timebase-24mhz.patch`、`droidvm-timebase-hz=24000000`，device 5edbbfc）
+- ✅ **11-02** Swift 的計時恢復（device 5edbbfc）：`libswift_Concurrency` 把 deadline 寫死成 24 MHz，19.2 MHz 的 guest 上 `Task.sleep`／timeout 永不觸發 → 核心對外呈現 24 MHz 時基（`droidvm-timebase-hz=24000000`）
 - ✅ **11-02** 設定側欄出現 Ethernet（時基修好後；詳細頁有 IPv4、遮罩、路由器、DNS、HTTP Proxy；「Optimizing Search and Siri」、TV Provider 也回來）
 - ✅ **11-02** WebGPU 的 MSL 只有編譯警告時不再回 error（WebKit 把任何 error 當失敗）（AdrenoMetal 3a4afd3、fork bb654a0）
-- ✅ **11-02** WebGPU bind group 能用：plugin 包裝 metal2vulkan 的 `ArgumentEncoder`、resource ID、`useResource`／`useHeap`，補 encoder descriptor、indirect draw、帶 options 的 buffer↔texture blit、swizzle view（AdrenoMetal 8841752、f4ce342，fork 667492a）；rotatingCube、computeBoids、texturedCube 等正常
+- ✅ **11-02** WebGPU bind group 能用（AdrenoMetal 8841752、f4ce342，fork 667492a）：plugin 包裝 metal2vulkan 的 `ArgumentEncoder`、resource ID、`useResource`／`useHeap`，補 indirect draw、blit、swizzle view 等；rotatingCube、computeBoids、texturedCube 正常
 - ✅ **11-02** 藍牙可用（On、可被發現、掃描中）：ADT 根層 `bluetooth` 節點（`transport-encoding` 10）讓 bluetoothd 用 Apple VM 的程序內虛擬控制器 BTVC，userland 全 stock（device 126487d）
 - ✅ **11-02** keychain 寫入修好：27 的 NativeKeyStoreEvents 補回 aks_wrap_key／unwrap（selector 10／11，`package/KeyStoreWrap.inc`），bluetoothd 不再因存不了 LE identity root 重啟
 - ✅ **11-02** launchd 90% CPU 修好：不再停用 bluetoothd（BTAudioHALPlugin 找不到它的 Mach 服務就每秒查找約 1900 次）→ 2%
-- ✅ **11-02** Wi-Fi 介面：`package/DroidVMWifi.inc` 的 `IO80211Controller`／`IO80211Interface`＋無傳輸層的 `DroidVMVirtualWifi`（en1），Settings 的 Wi-Fi、Ethernet、Bluetooth 並存、上網走 en0；`droidvm-wifi-ssid=NAME` 測 UI（device 9bcff1a）
+- ✅ **11-02** Wi-Fi 介面（device 9bcff1a）：`DroidVMWifi.inc` 的 `IO80211Controller`／`IO80211Interface`＋無傳輸層的 `DroidVMVirtualWifi`（en1），設定裡 Wi-Fi、Ethernet、藍牙並存，上網走 en0；`droidvm-wifi-ssid=NAME` 測 UI
 - ✅ **11-02** IOKit 會安靜、mobileassetd 不再吃 40% CPU：上游 SoftwareAES 搬到 27 提供 IOAESAccelerator（`package/SoftwareAES-24A446.S`、`SoftwareAESKeys.inc`），AppleImage4 不再卡住 config thread（device a42261e）
-- ✅ **11-02** Safari WebGPU 能用（webgpureport 列出 adreno adapter、helloTriangle）：`com.apple.WebKit.GPU` 加進 GPU client、`owner-hide-vmm` 加 WebKit.GPU、plugin 的 `supportsFamily:` 只對 WebGPU.framework 回 Apple4（device 24a79b2、fork 3d8ef4d、AdrenoMetal 4089943）
+- ✅ **11-02** Safari WebGPU 能用（device 24a79b2、fork 3d8ef4d、AdrenoMetal 4089943）：`com.apple.WebKit.GPU` 加進 GPU client 與 `owner-hide-vmm`，plugin 的 `supportsFamily:` 只對 WebGPU.framework 回 Apple4；webgpureport 列出 adreno adapter、helloTriangle 正常
 - ✅ **11-02** Mesa 在 sandbox 擋 `hw.physmem`／`hw.pagesize` 的行程裡不再算出 0 bytes heap：改讀 `hw.memsize`（fork `mesa-darwin-total-memory-sysctl.patch`）
 - ✅ **11-02** 純 arm64（非 arm64e）程式能跑：JOP 停用的 thread 回 EL0 時用 SCTLR_EL1 關 IA／DA／DB，shared cache auth mapping 與 dyld pager 用不簽章的專屬 key（`droidvm-native-pac-user-jop.patch`，device 8ea1e33）
 - ✅ **11-02** Games 開得起來：加進 `droidvm-gpu-clients`（它的 VFX 沒有 Metal 就結束）（device af2be42）
@@ -99,7 +93,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ✅ **11-01** 開機時 16K 簽章的 4K 雜湊預處理同一 vnode 只做一次（`droidvm-native4k-once.patch`，device 1dc2f68）；SystemOS 開機讀取 12.7→7.4 GB
 - ✅ **11-01** 區塊單次傳輸 256 KB、完成偵測前 150 us 每 2 us 檢查（0003–0004，device 7586bea）
 - ✅ **11-01** virtio-gpu 傳輸層不再因 stray element 停擺：`reap()` 讀 used index 後下 barrier、對不上的重讀後略過計數、client 關閉時 `abandon(ticket)` 交還 slot（device c23dda3）
-- ✅ **11-01** 上游合併 UniXNU 407db1a（merge，fork `wip/droidvm` c4502e8；AdrenoMetal 01a3721、GopFramebuffer ed08bd4、ArmCpu c85e084、DarwinBoot c936dc6）；上游順便修好 CoreImage 的 `externFunctionNames`／kernel by name
+- ✅ **11-01** 上游合併 UniXNU 407db1a（fork `wip/droidvm` c4502e8；AdrenoMetal 01a3721、GopFramebuffer ed08bd4、ArmCpu c85e084、DarwinBoot c936dc6），順便修好 CoreImage 的 `externFunctionNames`／kernel by name
 - ✅ **11-01** render server 不再失去 GPU：drm2kgsl 每個 context 的 GPU VA 2→6 GiB（VBO 192 GiB 切 32 片，virglrenderer 6536a4a8）＋m2v spare 上限 1/16 位址空間、VA 用盡時 Turnip 寫下用量（fork c4502e8）
 - ✅ **11-01** RenderBox `custom_effect` 能連結帶 function constant／靜態初始化的模組：metal2vulkan 0018 連結前在副本裡綁定 constant（fork 6833c6a）
 - ✅ **11-01** iconservicesagent 不再被 jetsam 15 MB 上限殺掉：GPU blob 頁改 purgeable、歸 graphics 帳本不計 footprint（device b846440）
@@ -108,7 +102,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ✅ **11-01** `newFunctionWithDescriptor:` 的 `specializedName` 生效（RenderBox `clampedPlusL_v1` → `custom_blend`）（fork fdd21fe 0016、NativeMetal 6c17c82）
 - ✅ **11-01** plugin 支援 Metal 動態函式庫（`newDynamicLibraryWithURL:`、`supportsDynamicLibraries`、preloaded libraries），CoreImage 的 `ci_stdlib` 等載得到（exp-bgra f926107；union 修好後驗證）
 - ✅ **11-01** guest panic「Resuming from debugger synchronization failed」：內建 `ml-timeout-debug-ack-scale=40`（device 71750ba）
-- ✅ **11-01** owner 除錯權限：帶 `com.apple.private.droidvm.debug` 的 binary 在 `owner-debug=1` 時可取 task port、唯讀讀 vnode（fork `zzye-owner-debug-task-ports`、`zzyf-owner-debug-vnode-read`）；debugserver 能 attach 系統程序、shell 能讀 data vault
+- ✅ **11-01** owner 除錯權限（fork `zzye-owner-debug-task-ports`、`zzyf-owner-debug-vnode-read`）：帶 `com.apple.private.droidvm.debug` 的 binary 在 `owner-debug=1` 時可取 task port、唯讀讀 vnode；debugserver 能 attach 系統程序、shell 能讀 data vault
 - ✅ **11-01** vCPU 依需求 uclamp：GPU constraint 開著時 6 個 vCPU 的 uclamp.min 拉到 1024（virglrenderer 0682b304）；104–105→108–110 fps
 - ✅ **11-01** guest 自己要效能：crosvm virtual cpufreq（`--virt-cpufreq-upstream`，1a5592aa9）＋DarwinBoot 6f5724f `/arm-io/cpufreq`＋`package/DroidVMCpufreq.c` perfcontrol callout（device 5389c07）
 - ✅ **11-01** 大小核 AMP：拓撲由 host 推導（app 74a167f、DarwinBoot 284645c 寫 `cluster-type`、device abd17ab `droidvm-amp.patch` Edge 排程器＋4d4462f 互動 thread group 升頻）；AMP 110–112.6 vs SMP 106–109 fps
@@ -120,7 +114,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ✅ **10-31** 120 Hz：`droidvm-display-hz=120`、`ca-triple-buffer=1`（device 1ab7fdf）
 - ✅ **10-31** complete-on-post：scanout＋flush 一送出就完成 swap（`droidvm_virtio_complete_on_post`，device 905ee57）；翻頁 82→98 fps
 - ✅ **10-31** `bindfs_pagein: ubc_upl_map() failed` panic：GPU blob 配在呼叫端行程的位址空間、kernel 不映射（`droidvm_virtgpu_in_task`，device 0b73c2a）
-- ✅ **10-31** GPU 依 guest 幀需求升頻：guest Turnip 把 render server 的 queue 建成 deadline queue（fork 1e49d86），drm2kgsl 依提交速率設 KGSL power constraint（virglrenderer e68e95d4）；每幀 GPU 6.28→2.69 ms、101–107 fps
+- ✅ **10-31** GPU 依 guest 幀需求升頻：guest Turnip 把 render server 的 queue 建成 deadline queue（fork 1e49d86），drm2kgsl 依提交速率設 KGSL power constraint（virglrenderer e68e95d4）；每幀 GPU 6.28→2.69 ms
 - ✅ **10-30** 27 走 8-bit framebuffer＋virtio display 零 copy scanout：cherry-pick 上游 9eca077 到 NativeMetal `exp-bgra`，render server 出 BGRA；翻頁 14→72 fps
 - ✅ **10-30** display 的 MaxEntries 4096→16384（2048×2732 surface 有 5464 段）（device b1908f8）
 - ✅ **10-30** GPU blob 配不到 64 KiB 連續塊就退回一般頁，不再連續 respring 後一路 NoMemory（device 3089d22）
@@ -170,7 +164,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ✅ **10-29** 8 Elite Gen 5（Adreno 840）的 Metal 修好：Data seed 帶的舊 Turnip 不在開機 trust cache，換成已 trust 的 plugin bundle（seed 也換新）[[gpu-8e5-support]]
 - ✅ **10-29** iPadOS 的 virtio-media 傳輸層：guest 自檢讀到解碼器格式 H.264／HEVC／VP9／AV1 → NV12（crosvm `--virtio-mmio-media` d5c13c494、guest `DroidVMVirtioMedia.c` e66a7b4）
 - ✅ **10-28** TODO 6 電池：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）→ powerd → SpringBoard，放電與充電都驗過 [[droidvm-battery]]
-- ✅ **10-28** TODO 3 音訊原廠堆疊整條通：`IOAudio2Device`（Speaker／Mic 依 UID 分裝置）→ VirtualAudio → HAL → virtio-snd（virtio-mmio 上的 vhost-user AAudio）；PCM 逐位元正確，Safari 播放經手機喇叭出聲（device 3e0d34c、crosvm 8d587f266）[[droidvm-audio]]
+- ✅ **10-28** TODO 3 音訊原廠堆疊整條通（device 3e0d34c、crosvm 8d587f266）：`IOAudio2Device`（Speaker／Mic 依 UID 分裝置）→ VirtualAudio → HAL → virtio-snd（virtio-mmio 上的 vhost-user AAudio）；PCM 逐位元正確，Safari 播放經手機喇叭出聲 [[droidvm-audio]]
 - ✅ **10-28** crosvm 的 vhost-user 能用在 virtio-mmio：activate 不強求 MSI-X、frontend 尊重 `VIRTQ_AVAIL_F_NO_INTERRUPT`
 - ✅ **10-28** entitlement 全集盤點（stock 21H461：3,658 key、247 個 list key；權限類候選全集 3,430 key／約 360 KB）[[entitlement-fullset]]
 - ✅ **10-28** 決定：UniXNUSetting＝ownervisor 的 in-app GUI，要 root 的操作經 socket 交 ownervisor，不做特權 app
@@ -200,79 +194,126 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 未解／待查
 
-- ⬜ **11-05** host 記憶體耗盡時 guest 卡死、恢復不了：5567 在截圖很多的測試裡 host 記憶體用光（anon 72 MB、GFP_NOWAIT 配置失敗、osvelte lowmem），adb 斷線，guest 所有 vCPU 停在 `gh_vcpu_ioctl`、timer 中斷 0、觸控叫不醒，只能重啟 VM；懷疑 crosvm／Gunyah 的中斷路徑在記憶體壓力下掉了 wakeup，未證實。有一次 18 分鐘後自己醒來，launchd reboot 時 APFS unmount panic（`vnode_rele_ext` usecount 變負），是另一個 kernel bug（懷疑 union／Data overlay）
-- ⬜ **11-05** GPU 記憶體還剩的浪費：metal2vulkan pool 的碎片（backboardd 的 64 MiB block 只用了 8–51%，約 200 MiB；桌布約 100 MiB；「先放最滿的 block」量不出差別）；IOSurface 的 shadow 約 57 MiB（架構性，要 dma-buf import 才能省）；render server 自己的 Turnip cache 64–85 MiB
-- ⬜ **11-04** Safari 網址列快速輸入時會掉字（例如一次送 "http://..." 只剩 "http"）：guest kernel 的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
-- ⬜ **11-04** 觸控板：iPadOS 的觸控板手勢要哪種裝置（通用 HID Touch Pad，還是 Apple 的 multitouch 介面）還沒逆向；crosvm 已有 multi-touch-trackpad（缺五指和解析度），app 還是在本地模擬滑鼠
+- ⬜ **11-08** metal2vulkan 效能瓶頸（GPU 告一段落後的起點）：每個 draw 的 CPU（手機約 56 µs，profile 平）、ICB 每幀重錄
+  （renderBundles 2.6 fps）、產生的 shader 比原生肥（GFXBench GPU cycle 1.7–3×、迴圈讀陣列慢）、排程不扣批次、pool 碎片。
+  → [細節](todo/metal2vulkan.md)
+- ⬜ **11-08** 5567 guest 沒有網路：guest 每幾秒廣播一次 DHCP Request，VM 的 tap 上看得到，br-wifi 與 wlan0 上都沒有，
+  是 host 的 pbridge（已連跑近 3 天）把它丟了；非 GPU，沒動 pbridge，5567 上的 Safari 測試因此沒做。
+- ⬜ **11-05** host 記憶體耗盡時 guest 卡死、恢復不了：5567 在截圖很多的測試裡 host 記憶體用光、adb 斷線，所有 vCPU 停在
+  `gh_vcpu_ioctl`、timer 中斷 0，只能重啟 VM；懷疑 crosvm／Gunyah 的中斷路徑掉了 wakeup（未證實）。另有一次自己醒來後
+  launchd reboot 時 APFS unmount panic（`vnode_rele_ext` usecount 變負），是另一個 kernel bug。
+  → [細節](todo/phones-rigs.md#11-05-host-記憶體耗盡-guest-卡死)
+- ⬜ **11-05** GPU 記憶體還剩的浪費：metal2vulkan pool 的碎片（backboardd 的 64 MiB block 只用了 8–51%，約 200 MiB；桌布約 100 MiB；
+  「先放最滿的 block」量不出差別）；IOSurface 的 shadow 約 57 MiB（架構性，要 dma-buf import 才能省）；render server 自己的 Turnip cache
+  64–85 MiB
+- ⬜ **11-04** Safari 網址列快速輸入時會掉字（例如一次送 "http://..." 只剩 "http"）：guest kernel
+  的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
+- ⬜ **11-04** 觸控板：iPadOS 的觸控板手勢要哪種裝置（通用 HID Touch Pad，還是 Apple 的 multitouch 介面）還沒逆向；crosvm 已有
+  multi-touch-trackpad（缺五指和解析度），app 還是在本地模擬滑鼠
 - ⬜ **11-04** Windows guest 的 virtio-input 驅動（vioinput）能不能把 stylus 裝置的壓力、傾斜對應成 HID Pen，尚未確認
-
-- ⬜ **11-03** 偶發：GPU 全開實驗中 backboardd 有一次收到來源不明的 SIGTERM（jetsam reaper 掃過 70 個閒置 process、開始強制 soft memory limit 之後 15 秒），三輪重現都沒再發生；另有一次 VM 重開卡在 root 掛載前（`apfs_sysctl_register` 之後無輸出），同一個 disk 前後兩次都正常
-- ⬜ **11-03** 每個 GPU blob 在 crosvm 佔 3 個 fd（virgl object 的、virgl resource 的、rutabaga resource 的 export），可以降到 1–2 個；fd 上限拉高後不急
-- ⬜ **11-02** VideoToolbox paravirt 編碼器還不吃 App 的設定：`esup` 沒列 AverageBitRate、MaxKeyFrameInterval、RealTime、ProfileLevel 等，VideoToolbox 直接拒絕、不送 `eset`，碼率與 GOP 用 MediaCodec 預設。要做：列進清單、`eset` 對到 V4L2 `V4L2_CID_MPEG_VIDEO_*`，且 codec 要延到第一幀才建立（App 在 session 建好後才設，`esta` 時已經 STREAMON）
-- ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
-- ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
-- ⬜ **11-08** renderBundles（bundle 模式）2.2 fps，同一支手機的 Chrome 59 fps：每幀約 450 ms 是三段串行，WebKit 編碼約 70 ms、metal2vulkan 排程執行緒的 host step 約 280 ms、GPU 約 70 ms（1.2 GHz 時；GPU 閒置多，DCVS 會把它調到 319–555 MHz）。WebKit 的 ICB 是 `inheritPipelineState = NO`、`inheritBuffers = NO`，又有 indexed draw，每幀還先跑一個寫 ICB 的 clamp compute，所以不符合 runtime「完全在 GPU 上執行」的條件（要繼承 encoder 的 pipeline、只有非 indexed draw，見 render/executions/gpu.rs），只能等 GPU 做完再由 host step 在 CPU 上把 5000 個 draw 逐一走完整的 draw 路徑：每個約 56 µs（Aztec 的直接 draw 約 5 µs），分散在 uses（apart_uses_into、settle_resident）、tracker 的 HashMap／BTreeMap（每幀從空的長到 15000 個資源）、綁定、pipeline 實例化等十幾處。要大幅改善得讓 GPU 路徑支援逐命令的 pipeline 與 indexed draw，或在 ICB 內容與狀態不變時重用上一幀錄好的命令。11-08 續查：(1) WebKit 的 clamp 只在 index 驗證還沒快取時才跑（`canSkipDrawIndexedValidation`），穩定後每幀並沒有寫 ICB；每幀都進 host step 是因為 `IndirectCommandBuffer::gpu_written` 一旦被任一次「可寫 residency」標記就永遠為真。(2) 本機 lavapipe 的 icb_scale（5000 draw、2 萬 resident）：host step 每個 draw 約 18 µs，和 encoder 直接畫同樣的 draw（15.6 µs）差不多，所以成本在共用的 draw 路徑本身，不是 host step 特有；profile 很平（draw_resident 56%，底下十幾項各 2–7%，另有每筆約 4 KB 的 CommandRecord 被複製三次約 8%）。(3) UniXNU 上游 11-07 已把 metal2vulkan 釘到 963f0e64（含 draw-again 與 kept chunks）；同一基準下 direct 89.6 ms（我們 82.4）、`each` 跑不完（我們 0033／0034 修掉的 O(N²)）、icb 每幀 commit 約 115 ms 且 `chunks kept 0`：上游的 kept 路徑把透過 heap 讀貼圖的 draw（WebKit 的 bind group 正是）排除在 plain 之外，對 WebKit 的模式沒有效果，所以不升級也不移植。要改善只能自己做：把 `gpu_written` 改成「還有未完成的寫入路徑」，再在 commit 時重用上一次錄好的命令（icb_scale 已有 `WRITE_FRAMES=k` 模擬 WebKit 穩定狀態）
-- ⬜ **11-07** renderBundles 非 bundle 模式的第一幀：WebKit 每個 indexed draw 前跑一次 vertex-only 的 index clamp、再下 buffers 範圍的 barrier，metal2vulkan 每次都得切 render pass instance；pass 有 depth attachment，不能走 inline 錄製（render/inline_first.rs 的條件），所以每次切分是一個 secondary command buffer，一幀 5000 次、峰值 467 MB。要再降：讓有 depth 的 pass 也能 inline 錄製後續 instance，或讓這種 vertex 寫入 → indirect 讀取的 barrier 不必切 instance。bundle 模式剩下的成本是 host step 每幀重錄 5000 個 ICB 命令（上游「GPU 寫入的 ICB 命令沒變時沿用上次的錄製」一系列還沒移植）
-- ⬜ **11-08** deferredRendering 的光照迴圈仍比原生肥（0036 後每個字的位址加法沒了）：剩下的是每次存取各自算的 64 位元 `at`、64 位元界限檢查、sink 的 select 和 miss 檢查（未走的分支裡的 atomic）。同一個指標加常數位移的幾次存取（同一個 struct 的欄位）各做一套；ir3 沒跑 nir_opt_licm
-- ⬜ **11-07** Safari 的 GPU 行程偶爾拿不到 WebGPU adapter（requestAdapter 回 null，行程裡沒有建任何 Metal device），結束 Safari／WebKit 行程重開就好；hide-vmm 對 com.apple.WebKit.GPU 是生效的（同一個 binary 換名字讀 hv_vmm_present 會從 1 變 0）。11-08：不是開機才有（剛跑完長時間 WebGPU 後連開 8 次失敗 2 次，之後 40 次加一次冷開機都正常）。失敗的 GPU 行程在 Safari 啟動 0.2 秒內就起來，但從來沒映射 Metal plugin、沒開 virtio-gpu client，之後也沒有任何 GPU 工作：是 WebContent 端先放棄了 GPU 代理（RemoteGPUProxy 的 m_lost：等 WasCreated 15 秒逾時或回 false），不是 plugin 開裝置失敗。guest 裡讀不到 WebContent 的日誌，原因未明
-- ⬜ **11-02** Wi-Fi 沒有無線電：station 掃描結果為空、沒加入網路（`droidvm-wifi-ssid` 只測 UI）；接真實硬體要在 station 換後端（例如 host 的 Wi-Fi 掃描／連線經 virtio 轉入）
-- ⬜ **11-02** 藍牙只有 Apple VM 的虛擬控制器（LE 走 Bonjour）；接手機真實藍牙未做：bluetoothd 的 "VIRT" driver（`<裝置>-in`／`-out`）由 kernel 轉 virtio，或 H4＋kernel control socket
-- ⬜ **11-08** Safari 連續開很多 WebGPU 頁之後偶爾整頁凍結（5566，兩次：一次在約 25 頁後，generateMipmap 先丟出 JS `RangeError: Range consisting of offset and length are out of bounds`（`getMappedRange()` 回了空的 ArrayBuffer），接著 cornell 凍結；一次是掃完 28 個範例後停在 cornell 約 60 秒時凍結，畫布變黑）。兩次 WebContent 主執行緒都在 JS 的 Full GC 回收**舊頁面**的 WebGPU 物件（`JSGPUTextureView::destroy`、`JSGPUBindGroupLayout::destroy` → `Remote*Proxy` 解構送 destroy 訊息），卡在 `IPC::StreamClientConnectionBuffer::tryAcquire`（串流 ring buffer 滿了）；GPU 行程沒崩潰、所有執行緒閒置，對應的「WebGPU work queue」幾分鐘沒被喚醒，log 在凍結後完全沒有輸出、也沒有 `buffer refused`。每換一頁 GPU 行程就多一條 work queue（舊頁的 RemoteGPU 等 GC 才放），guest 記憶體壓縮器很忙（140 萬次壓縮）。同一個新的 Safari 只開 cornell 跑 5 分鐘不會凍結；全新行程裡 generateMipmap 正常。iPadOS 27.0.1 的 WebKit 早於上游 2026-08 對串流 IPC 初始化與 `IPC::Signal` 的修正（bugs.webkit.org 321584：client 等待／server 喚醒 semaphore 的「容易出錯的初始化等待」、`signal()` 卡住），log 裡也有 `IPC::Signal::signal Could not send mach message, error 10000003`，傾向是原廠 WebKit 的問題被較慢的 VM 放大；要排除我們這邊（共享記憶體頁在壓縮後兩邊不一致）得在凍結時比對兩個行程看到的 ring buffer 標頭（debugserver 取 `tryAcquire` 的 this，`export.py mem` 讀標頭）
-- ⬜ **11-08** WebGPU 沒有 `timestamp-query`：plugin 對 `supportsCounterSampling:` 回 NO（metal2vulkan runtime 本身沒有 counter sample buffer，`RuntimeGap::CounterSampleBuffers`，上游也是），WebKit 因此不開這個 feature（timestampQuery 範例顯示「Timestamp queries are not supported」，畫面照常）；真 iPad 有。要做：timestamp counter set、stage boundary 取樣（render pass 的 start／end of vertex／fragment、compute pass 的 start／end of encoder → vkCmdWriteTimestamp2）、blit 的 `resolveCounters`（vkCmdCopyQueryPoolResults）、`sampleTimestamps:gpuTimestamp:` 的校準，WebKit 還會在 resolve 前後下 shared event 的 signal／wait
-- ⬜ **11-02** 嚴格的 Apple4 做不到：raster order groups、imageblocks、tile shaders、imageblock sample coverage、post-depth coverage 被拒，indirect／ICB 邊角、linear texture、depth/stencil resolve 等有缺口；附件型 ROG／imageblock 可部分模擬；只問 Apple4 以上的 App 會被拒
+- ⬜ **11-03** 偶發：GPU 全開實驗中 backboardd 有一次收到來源不明的 SIGTERM（jetsam reaper 掃過 70 個閒置 process、開始強制 soft memory
+  limit 之後 15 秒），三輪重現都沒再發生；另有一次 VM 重開卡在 root 掛載前（`apfs_sysctl_register` 之後無輸出），同一個 disk 前後兩次都正常
+- ⬜ **11-03** 每個 GPU blob 在 crosvm 佔 3 個 fd（virgl object 的、virgl resource 的、rutabaga resource 的 export），可以降到
+  1–2 個；fd 上限拉高後不急
+- ⬜ **11-02** VideoToolbox paravirt 編碼器還不吃 App 的設定：`esup` 沒列 AverageBitRate、MaxKeyFrameInterval 等，碼率與 GOP
+  用 MediaCodec 預設。要做：列進清單、`eset` 對到 V4L2 控制項，codec 延到第一幀才建立。
+  → [細節](todo/audio-media.md#11-02-videotoolbox-編碼器不吃-app-設定)
+- ⬜ **11-08** renderBundles（bundle 模式）2.6 fps（0038 前 2.2），同一支手機的 Chrome 59 fps：每幀是 WebKit 編碼、metal2vulkan 的 host step
+  （在 CPU 上逐一走 5000 個 draw）、GPU 三段串行；成本在共用的 draw 路徑本身，不是 host step 特有。上游 963f0e64 的 kept
+  路徑對 WebKit 的模式沒有效果，不升級也不移植。要自己做：`gpu_written` 改成「還有未完成的寫入路徑」（已由 0038
+  做到，見已完成 11-08），再在 commit 時重用上一次錄好的命令。→ [細節](todo/webgpu-webgl.md#11-08-renderbundles-bundle-模式太慢)
+- ⬜ **11-07** renderBundles 非 bundle 模式的第一幀峰值 467 MB：WebKit 每個 indexed draw 前的 index clamp＋barrier 讓
+  metal2vulkan 每次切 render pass instance，有 depth attachment 的 pass 不能 inline 錄製，一幀 5000 個 secondary command
+  buffer。方向：讓有 depth 的 pass 也能 inline 錄製後續 instance，或這種 barrier 不必切 instance。
+  → [細節](todo/webgpu-webgl.md#11-07-renderbundles-非-bundle-模式第一幀)
+- ⬜ **11-08** deferredRendering 的光照迴圈仍比原生肥（0036 後每個字的位址加法沒了）：剩下的是每次存取各自算的 64 位元 `at`、64 位元界限檢查、sink 的 select 和
+  miss 檢查（未走的分支裡的 atomic）。同一個指標加常數位移的幾次存取（同一個 struct 的欄位）各做一套；ir3 沒跑 nir_opt_licm
+- ⬜ **11-07** Safari 的 GPU 行程偶爾拿不到 WebGPU adapter（requestAdapter 回 null），結束 Safari／WebKit 行程重開就好，不只在
+  開機時。失敗的 GPU 行程從沒映射 Metal plugin、沒開 virtio-gpu client：是 WebContent 端先放棄了 GPU 代理（RemoteGPUProxy
+  的 m_lost），不是 plugin 開裝置失敗；guest 裡讀不到 WebContent 的日誌，原因未明。
+  → [細節](todo/webgpu-webgl.md#11-07-gpu-行程拿不到-webgpu-adapter)
+- ⬜ **11-02** Wi-Fi 沒有無線電：station 掃描結果為空、沒加入網路（`droidvm-wifi-ssid` 只測 UI）；接真實硬體要在 station 換後端（例如 host 的 Wi-Fi
+  掃描／連線經 virtio 轉入）
+- ⬜ **11-02** 藍牙只有 Apple VM 的虛擬控制器（LE 走 Bonjour）；接手機真實藍牙未做：bluetoothd 的 "VIRT" driver（`<裝置>-in`／`-out`）由
+  kernel 轉 virtio，或 H4＋kernel control socket
+- ⬜ **11-08** WebGPU 沒有 `timestamp-query`：plugin 對 `supportsCounterSampling:` 回 NO（metal2vulkan runtime 沒有
+  counter sample buffer，上游也是），真 iPad 有。要做：timestamp counter set、stage boundary 取樣、
+  blit 的 `resolveCounters`、`sampleTimestamps:gpuTimestamp:` 的校準。
+  → [細節](todo/webgpu-webgl.md#11-08-webgpu-沒有-timestamp-query)
+- ⬜ **11-02** 嚴格的 Apple4 做不到：raster order groups、imageblocks、tile shaders、imageblock sample coverage、
+  post-depth coverage 被拒，indirect／ICB 邊角、linear texture、depth/stencil resolve 等有缺口；附件型 ROG／imageblock 可部分模擬；只問
+  Apple4 以上的 App 會被拒
 - ⬜ **11-02** locationd 每次開機約 10 秒後 PAC 崩潰一次（arm64e，Cohort:0 佇列上已釋放的 dispatch 物件）；重啟後正常，已不波及 UI
-- ⬜ **11-02** 新 Data 第一次產生桌布圖庫時的記憶體風暴：PosterBoard 讓各桌布擴充同時 GPU 渲染，wired 衝到 4.65 GiB、jetsam 殺掉幾十個行程；blob 頁不計 footprint，jetsam 看不到真正的大戶
-- ⬜ **11-02** metal2vulkan keep_room 的空 pooled block（render server 547–616 MiB，`emptied=None`，trim 不釋放）；下一步：壓力 ≥ Warning 時暫停 keep_room，或限制空 block 總量
-- ⬜ **11-02** 16 MiB block 會讓 render server 的 GPU context hang（3/5 vs 64 MiB 0/5，不是 UBWC），根因未查；fork feefe53、AdrenoMetal 8f735a2 未推，手機 plugin 1a47826 沒有除錯檔時預設 16（guest 已寫 64）
-- ⬜ **11-02** kgsl-sync、vrend-sync、Binder:crosvm 被 VM 的 GPU cgroup 放進 `/dev/cpuset/gpuworker`（cpu 7），與 vCPU5 共用 core 7（VM 設定問題，未改）
+- ⬜ **11-02** 新 Data 第一次產生桌布圖庫時的記憶體風暴：PosterBoard 讓各桌布擴充同時 GPU 渲染，wired 衝到 4.65 GiB、jetsam 殺掉幾十個行程；blob 頁不計
+  footprint，jetsam 看不到真正的大戶
+- ⬜ **11-02** metal2vulkan keep_room 的空 pooled block（render server 547–616 MiB，`emptied=None`，trim 不釋放）；下一步：壓力
+  ≥ Warning 時暫停 keep_room，或限制空 block 總量
+- ⬜ **11-02** 16 MiB block 會讓 render server 的 GPU context hang（3/5 vs 64 MiB 0/5，不是 UBWC），根因未查；fork feefe53、
+  AdrenoMetal 8f735a2 未推，手機 plugin 1a47826 沒有除錯檔時預設 16（guest 已寫 64）
+- ⬜ **11-02** kgsl-sync、vrend-sync、Binder:crosvm 被 VM 的 GPU cgroup 放進 `/dev/cpuset/gpuworker`（cpu 7），與 vCPU5
+  共用 core 7（VM 設定問題，未改）
 - ⬜ **11-01** 設定第一次開某頁仍要 300–650 ms：冷 page-in（每次 fault 0.1–0.2 ms），區塊驅動並行化後單執行緒冷讀小檔改善有限
-- ⬜ **11-01** 開機路徑仍有 6 GB 的 4K 雜湊預處理（讀 21 s、雜湊 10.5 s，corecrypto `CC_USE_ASM=0` 純 C SHA）；方向：硬體 SHA 指令，或存下推出來的 4K 雜湊
+- ⬜ **11-01** 開機路徑仍有 6 GB 的 4K 雜湊預處理（讀 21 s、雜湊 10.5 s，corecrypto `CC_USE_ASM=0` 純 C SHA）；方向：硬體 SHA 指令，或存下推出來的
+  4K 雜湊
 - ⬜ **11-01** 09:18 UTC 當機：guest 可用記憶體 150 ms 內掉 1 GB（同時 KaleidoscopePoster OutOfMemory），誰吃掉的待查
 - ⬜ **11-01** 一次開機 SpringBoard 沒起來（只畫 3 格），重開即好，未重現
-- ⬜ **11-01** Adreno740 留在 627836d：合併版在 NativeAdreno `wip/merge-up-1101`（f57a9c6），等移植 `build-droidvm-gpu.py` 對 `NativeAdrenoPublish.cpp` 的文字替換
+- ⬜ **11-01** Adreno740 留在 627836d：合併版在 NativeAdreno `wip/merge-up-1101`（f57a9c6），等移植 `build-droidvm-gpu.py` 對
+  `NativeAdrenoPublish.cpp` 的文字替換
 - ⬜ **11-01** 上游兩個 Turnip patch（render-mode、gmem-mutable-swap）套不上 Droid-VM/mesa，連同 bridge 0020 未收
 - ⬜ **11-01** union 不去重：上下層同名的項目列兩次（`System`、`usr`、`CoreImage.metallib`）
-- ⬜ **11-01** 設定側欄約 60 fps、下拉搜尋 46 fps：Liquid Glass 讓 pass 數與像素暴增；Spotlight 的重幀大半是 metal2vulkan 模擬 no-copy buffer（每幀整塊拷 6–27 MB＋上千次小拷貝）
+- ⬜ **11-01** 設定側欄約 60 fps、下拉搜尋 46 fps：Liquid Glass 讓 pass 數與像素暴增；Spotlight 的重幀大半是 metal2vulkan 模擬 no-copy
+  buffer（每幀整塊拷 6–27 MB＋上千次小拷貝）
 - ⬜ **11-01** 使用者指定的卡頓：設定亂點、旋轉、左側小工具、App 資料庫、下拉搜尋（連帶的 SpringBoard 閃退已修，卡頓仍在）
 - ⬜ **11-01** 翻頁下一步：固定 120 Hz 以上的觸控注入器排除測試方法本身；抓那 1/5 主執行緒連續忙 9–14 ms 的幀在算什麼
-- ⬜ **11-01** 次要：guest GPU 驅動輪詢 `IODelay(5)` 的微阻塞（SpringBoard 主執行緒 6 秒 8,824 次）；host CREATE_BLOB／GEM_CLOSE／CREATE_BLOB_USER 往返偶爾 10–33 ms（`droidvm_virtgpu_slow_ops`）
+- ⬜ **11-01** 次要：guest GPU 驅動輪詢 `IODelay(5)` 的微阻塞（SpringBoard 主執行緒 6 秒 8,824 次）；host
+  CREATE_BLOB／GEM_CLOSE／CREATE_BLOB_USER 往返偶爾 10–33 ms（`droidvm_virtgpu_slow_ops`）
 - ⬜ **11-01** DroidVM 被手動加進 OPLUS 遊戲空間（CPU 上限 1.0–1.1 GHz），是否移出由使用者決定
 - ⬜ **10-31** 手機上的 `usr/lib/libvirglrenderer.so` 是手動換的（原檔 `.bak-098ce1c7`），還沒打包進 APK
 - ⬜ **10-31** 強制 GMEM 會黑畫面，待查
 - ⬜ **10-31** metal2vulkan 排程器從不扣住批次，73% 的提交送出時 GPU 佇列是空的
 - ⬜ **10-31** host blit（prio 5）在 IB 之間搶占，約 30% 的幀多 1.5–2.4 ms
 - ⬜ **10-31** 首頁編輯模式（圖示抖動）58 fps：每幀 47 個 render pass、467 個 draw、6100 萬像素
-- ⬜ **10-31** 下一步候選：GPU 工作不留空檔（縮短每幀 GPU 階段或提前送下一幀）；app 端 `requestUnbufferedDispatch`；毛玻璃多 pass 的 GPU 成本（GMEM／sysmem）；CA tick 對齊 host vsync
+- ⬜ **10-31** 下一步候選：GPU 工作不留空檔（縮短每幀 GPU 階段或提前送下一幀）；app 端 `requestUnbufferedDispatch`；毛玻璃多 pass 的 GPU
+  成本（GMEM／sysmem）；CA tick 對齊 host vsync
 - ⬜ **10-30** 開機時 render server 偶爾卡在 Turnip 的 `CREATE_BLOB_USER`（7 個 GPU 提交沒完成），abort 一次 backboardd 後正常
 - ⬜ **10-30** rig `touch.py`（寫 guest RAM）在 27 上沒效果：HID report 有增加但鎖定畫面與翻頁沒反應（量測改用 `input.py`）
 - ⬜ **10-30** iPadOS 17 也用上游 7183e58 那個 GPU pin，但還沒用這版跑過
 - ⬜ **10-30** 27 還沒搬：tools overlay、麥克風錄音驗收（virtio-media 解碼 11-02 已在 27 上；GPU client 11-03 起全開、由 sandbox 決定）
 - ⬜ **10-30** 一次開機在開機動畫後就沒再出 frame（沒有 GPU fault），同一映像重開正常，當偶發
 - ⬜ **10-30** Liquid Glass 的重影
-- ⬜ **10-30** 關機卸載時 kernel 在 `vnode_rele_ext` panic（usecount 變負；10-29 起）
-- ⬜ **10-29** 上游 RamBlock 4be2d7e 未收：它只在 Install（sheng-data-reset）時建 Data store，DroidVM 新 VM 的空白 data-store.img 會永遠存不進去
+- ⬜ **10-30** 關機卸載時 kernel 在 `vnode_rele_ext` panic（usecount 變負；10-29 起）。11-08 5567 一次：開機約 50 秒時
+  幾十個 daemon 同時 SIGBUS（backboardd 也在內，多數不用 GPU；Data 還有 4.3 GiB），launchd 接著 reboot，卸載時 panic；
+  像第 1 節已知問題 3 的系統卷 EIO
+- ⬜ **10-29** 上游 RamBlock 4be2d7e 未收：它只在 Install（sheng-data-reset）時建 Data store，DroidVM 新 VM 的空白
+  data-store.img 會永遠存不進去
 - ⬜ **10-29** IOHIDFamily 一個只讀不寫的 32 位元旗標沒配對（落在 0 上），先不動
 - ⬜ **10-29** `use_contiguous_hint=0` 是暫解：正解是 emitter 把 4K kernel 的 `__TEXT` 對齊 64 KiB
 - ⬜ **10-29** ArmCpu fe98808 只在 Mac 的 27 樹用 ignored `ipados27/local.toml` 覆寫，fork pin 未動（等 17 量過再釘）
-- ⬜ **10-29** 8 Elite Gen 5 那支的 iPadOS 17 VM 在停／開與重啟 daemon 後開機 panic「offline scratch Data mount failed: 2」，沒修（重建 seed 會清 Data），等使用者決定
-- ⬜ **10-29** 8 Gen 3 那支開機後一次 backboardd NULL deref：`tu_CmdCopyImageToBuffer2` ← metal2vulkan `ShadowCopy::record_gated` 的 `ShadowTarget::Rotated`（我們的 0011 旋轉 patch，只有橫向走這條）
+- ⬜ **10-29** 8 Elite Gen 5 那支的 iPadOS 17 VM 在停／開與重啟 daemon 後開機 panic「offline scratch Data mount failed: 2」，
+  沒修（重建 seed 會清 Data），等使用者決定
 - ⬜ **10-29** GPU parity 只部署到三支手機中的兩支
 - ⬜ **10-29** hostsim 的 deferred-pressure 檢查失敗（上游 Turnip patch 與測試不一致），記在 `release.json` 的 `checks`，不擋 build
 - ⬜ **10-29** iPadOS 17 新 Data 的桌布是黑的（Poster 問題；27 已有桌布）
 - ⬜ **10-29** 兩格小工具首次打開空白
 - ⬜ **10-29** ownervisor 的 serial-shell 有定義但不啟動：本板 `/dev/console` 還沒接到 UART
 - ⬜ **10-28** 陀螺儀待補：單位、動態轉動的實機驗證
-- ⬜ **10-28** 錄音還沒在 app 裡驗到：host 的 capture stream 開著，guest 沒收到 input 的 StartIO；Voice Memos 按錄音沒反應（tccd 處理 `voicememod` 時 LaunchServices 回 -10814）
-- ⬜ **10-28** GPS 暫停：J120 上 locationd 不會啟動 GNSS（WiFi 版 iPad 沒有 GPS provider bit），要換 J121AP 身分；未解的是 J121 走 gpsd 還是基頻 QMI；回來第一步只換 ADT 身分實測 [[droidvm-gps-plan]]
-- ⬜ **10-28** 8 Elite Gen 5 那支的 seed 已換：下一次 `payload-redeploy.sh` 要 `ALLOW_CHANGE=seed`，會重置 Data（先備份 `/private/var/ngpu`）；8 Gen 3 主 tree 的 seed 仍帶未 trust 的舊 Turnip（沒動）
-- ⬜ **10-28** 搬到 8 Elite 那支中止：留下 app r312、crosvm（`crosvm.bak-579d1a5b`）、UniXNU 映像與 VM 項目（data-store 已失效）[[droidvm-5568-state]]
+- ⬜ **10-28** 錄音還沒在 app 裡驗到：host 的 capture stream 開著，guest 沒收到 input 的 StartIO；Voice Memos 按錄音沒反應（tccd 處理
+  `voicememod` 時 LaunchServices 回 -10814）
+- ⬜ **10-28** GPS 暫停：J120 上 locationd 不會啟動 GNSS（WiFi 版 iPad 沒有 GPS provider bit），要換 J121AP 身分；未解的是 J121 走 gpsd
+  還是基頻 QMI；回來第一步只換 ADT 身分實測 [[droidvm-gps-plan]]
+- ⬜ **10-28** 8 Elite Gen 5 那支的 seed 已換：下一次 `payload-redeploy.sh` 要 `ALLOW_CHANGE=seed`，會重置 Data（先備份
+  `/private/var/ngpu`）；8 Gen 3 主 tree 的 seed 仍帶未 trust 的舊 Turnip（沒動）
+- ⬜ **10-28** 搬到 8 Elite 那支中止：留下 app r312、crosvm（`crosvm.bak-579d1a5b`）、UniXNU 映像與 VM 項目（data-store 已失效）
+  [[droidvm-5568-state]]
 - ⬜ **10-28** `board.toml` 的 trust pin 是 8 Elite Gen 5 rig 自己的，沒 commit
 - ⬜ **10-28** no-sandbox staged app 從主畫面啟動未端到端跑（app-launch 半邊等 runtime 安裝器）
 - ⬜ **10-28** UniXNUSetting app 本身未做：staged 系統 app 放唯讀 os.img、SpringBoard 不給刪（`plans/UNIXNUSETTING.md` §3.1）
 - ⬜ **10-28** 持久化 trust 清單改由 kernel 在 Data 掛上時直接讀（`DroidVMTrustCache.c`），未實作
 - ⬜ **10-28** entitlement 要盤一份 curated 清單（不簽 360 KB 全集）；keychain 的 `*` 萬用字元要查 Security 原始碼，未驗
-- ⬜ **10-28** runtime trust cache 實驗（`zzyd` patch、`DroidVMTrustCache.c`）當時是本機 WIP；定案前要收掉 `owner-tc-selftest=1` 與 gfxprobe 的實驗 entitlement
-- ⬜ **10-28** 配對：機內 lockdownd 協定配對走不通（value-only 端點；TCP 62078 要 TLS／passcode）；剩 USB-mux 模擬、無線（設密碼）、直接寫 `/var/db/lockdown` 的 pair record（待逆向格式）
+- ⬜ **10-28** runtime trust cache 實驗（`zzyd` patch、`DroidVMTrustCache.c`）當時是本機 WIP；定案前要收掉 `owner-tc-selftest=1`
+  與 gfxprobe 的實驗 entitlement
+- ⬜ **10-28** 配對：機內 lockdownd 協定配對走不通（value-only 端點；TCP 62078 要 TLS／passcode）；剩 USB-mux 模擬、無線（設密碼）、直接寫
+  `/var/db/lockdown` 的 pair record（待逆向格式）
 - ⬜ **10-28** debug bridge／USB 未做：NCM（USB Ethernet gadget）把 PC 橋到 guest en0；真 usbmux 要 FunctionFS
 
 ## 陷阱與工具（續報整理）
@@ -389,8 +430,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 **已知問題（目前開著的）：**
 1. **render server 的 DeviceLost（偶發）：** host KGSL hang → backboardd client 0 EDEADLK → 畫面閃爍到重開機，沒有自動恢復（人工重啟 backboardd 可重開 context）。Maps 因此刻意不放進 GPU client 名單。
 2. **偶發文字破圖：** 少數情況仍會出現錯位條紋，等重繪才恢復，無法照指令重現（常見那種已修，見 memory [[droidvm-garbled-text]]）。
-3. **健康檢查的 fence waits timed out 計數持續增加**（見第 7 節其他待辦）。
-4. **一次性系統卷讀取失敗（原因未明）：** 陀螺儀那版某次開機約 4 分後 `/dev/disk3s1` 讀取全 EIO、backboardd 崩潰循環；重開後 6+ 分鐘正常，未再現。
+3. **一次性系統卷讀取失敗（原因未明）：** 陀螺儀那版某次開機約 4 分後 `/dev/disk3s1` 讀取全 EIO、backboardd 崩潰循環；重開後 6+ 分鐘正常。
+   11-08 5567 疑似再一次：開機約 50 秒時幾十個 daemon 同時 SIGBUS，launchd reboot，卸載時 `vnode_rele_ext` panic（見「未解／待查」10-30）。
 
 ## 2. 架構
 
@@ -591,98 +632,42 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   再由各 guest（iOS、Windows、Linux）自己的 provider 接到原生 API。線上協定不帶 IOKit selector、Objective-C 物件、Apple struct
   或 host 指標。傳輸能通只代表資料送得到 guest，不代表系統 API 已經接上（例如陀螺儀現在進得了 guest，app 卻讀不到）。
 
-1. ✅ **陀螺儀：原廠路線已完成（2026-10-28）**：kernel HID 服務（`DroidVMMotionHid.inc`）→ locationd/CoreMotion → backboardd；ADT 根 compatible 改 `J120AP`；一般 app `CMMotionManager` 讀得到，自動旋轉不靠 orientd；待補項見「未解／待查」。memory [[droidvm-motion-sensors]]。
-2. **iPadOS 內的 IPA 安裝器 / UniXNUSetting（進行中）。** 見最上面「TODO 2 續報」：runtime 信任快取已證實可行、entitlement 可任意授予。配對先擱著。範圍與動工順序：
-   - **(1) shell 環境（先做）＝ 4 個工具，全部簽上 entitlement 全集 + owner-trust，每個 applet/行程都帶滿權限**（AMFI 對 cdhash-trusted binary 授予任意 entitlement，已驗）：
-     **applebox**（單一 multicall：Apple OSS `_cmds`（file/text/shell/adv/network…）+ toybox 補缺口（xz/timeout/od…）+ zsh，用 `ld -r` + exported-symbols-list 併一顆）、**dropbear**（ssh，login shell exec applebox-zsh → 滿權限 zsh）、**debugutil**（原 gfxprobe）、**libimobiledevice**（備著，待配對通了才用）。entsh 暫不做（這幾顆滿權限的就是它）。
-     `build-applebox.py`：table-driven、per-tool `-Dmain=<t>_main` + `ld -r` localize + 聚合一個 `applebox.json` trust。研究報告見 scratchpad `applebox-research.md`。
-     待辦子項：entitlement 全集要盤一份 curated 清單（多數 boolean、少數陣列值如 iokit-user-client-class/finegrained-*；逐步加、個別 restricted AMFI 可能拒要一加一驗）；terminfo db 要一起 stage（less/vim/top/zsh 互動要）；scp/sftp 用 OpenSSH sftp-server。
-     **entitlement 全集 → 日後搬進 kernel（`cap.sys_admin` 計畫）**：現在「簽滿」是為了快速把全集盤穩；穩了之後定義一個自定義 entitlement **`cap.sys_admin`**（非 apple 前綴，不受 AMFI restriction 檢查，就是個 dict key），工具只簽它，**patch AMFI 在 exec 附掛 entitlement 時、看到 `cap.sys_admin` 就注入 kernel 內 curate 的全集 dictionary**。這個附掛點**一處同蓋 kernel 端（`IOTaskHasEntitlement`／sandbox／MACF）與 userspace （`SecTask`/`csops` → lockdownd 等）**，因兩層都讀 task 附掛的 entitlements；value 型 entitlement（finegrained-*、iokit-user-client-class）要給值/萬用。`cap.*` 命名留擴充空間（日後 `cap.net_admin`、`cap.pairing`… 各映射 entitlement 子集，做成 capability 風格）。取捨：改全集內容「簽滿」是 re-sign（輕）、`cap.sys_admin` 要重建 kernel（重），所以迭代用前者、穩定用後者。
-   - **(2) trust-cache user client（唯一要改 kernel 的一塊）**：讓 userspace 呼叫已驗證的 `load_legacy_trust_cache`（owner-gated）。+ 機內 cdhash 抽取 → **普通 IPA 安裝端到端**（抽 cdhash → runtime 信任 → staged + LaunchServices 登記 → 上主畫面；移除走 SpringBoard 長按）。
-   - **(3) 持久化 trust 清單**：裝好的 cdhash 存到 Data；**開機早期由 kernel（`DroidVMTrustCache.c`）在 Data 掛上時直接讀已存清單重載**（不經 ownervisor 服務——見上方 10-28 下午續報的決定；撐過重開機、不用主機、不重建 kernel）。+ **特權 IPA 安裝/移除**（同 (2) + 全集只簽在 helper；移除：刪 bundle + 從清單移除）。
-   - **(4) serial-shell 服務**（zsh 掛到指定 serial，getty 式）+ **ownervisor `protected` 旗標**（ssh、serial-shell 可停不可刪）+ **服務管理**（新增/刪除/列表/狀態，GUI 由 (5) 經 app socket 交 ownervisor 執行）。
-   - **(5) UniXNUSetting＝ownervisor 的 in-app GUI（10-28 晚修訂，取代「特權 app」與更早的「GUI＋unixnusettingd」）**：staged 系統 app（唯讀 os.img、不可刪）、以 mobile 跑、不簽大 entitlement；要 root 的操作經 app 專用 socket 交 ownervisor 執行，ownervisor 以對端 cdhash 只認 payload 內建的 UniXNUSetting，擋未經授權的第三方 app；debug 工具目錄 root-only。細節 `plans/UNIXNUSETTING.md` §3.1。
-   - **配對（獨立 track，擱置）**：USB-mux 模擬 / 無線（設密碼）/ 直接寫 `/var/db/lockdown` 的 pair record（吃 kernel 控制，待逆向格式）。
+1. ✅ **陀螺儀：原廠路線已完成（2026-10-28）**：kernel HID 服務（`DroidVMMotionHid.inc`）→ locationd/CoreMotion → backboardd；ADT
+   根 compatible 改 `J120AP`；一般 app `CMMotionManager` 讀得到，自動旋轉不靠 orientd；待補項見「未解／待查」。memory
+   [[droidvm-motion-sensors]]。
+2. **iPadOS 內的 IPA 安裝器 / UniXNUSetting（進行中）。**runtime 信任快取已證實可行、entitlement 可任意授予；配對先擱著。
+   動工順序：(1) shell 環境（applebox、dropbear、debugutil、libimobiledevice，簽 entitlement 全集＋owner-trust，日後改成
+   `cap.sys_admin`）→ (2) trust-cache user client＋普通 IPA 安裝端到端 → (3) kernel 在 Data 掛上時重載持久化 trust 清單、
+   特權 IPA 安裝／移除 → (4) serial-shell 服務、ownervisor `protected` 旗標、服務管理 → (5) UniXNUSetting＝ownervisor 的 GUI。
+   → [細節](todo/apps-system.md#10-28-todo-2-ipa-安裝器與-unixnusetting)
 3. **音訊（喇叭、麥克風）：原廠堆疊已通（2026-10-28，5566）。**guest `IOAudio2Device`（Speaker／Mic 依 UID 分裝置）→ VirtualAudio →
    HAL → virtio-snd → crosvm vhost-user AAudio helper（app uid）；PCM 以 self-test＋`backend=file` 驗到逐位元正確。
    **剩：**iOS 裡實際播放（聽得到）與錄音（`droidvm_snd_rx_periods` 會漲）的驗收；commit。見最上面 10-28 晚續報、memory [[droidvm-audio]]。
-4. **VPU（編碼器、解碼器）與相機（含對焦、閃光燈）。**
-   - **host＋Linux guest：已完成。**virtio-media 三個裝置（相機、解碼器、編碼器）、vhost-user helper（app uid）、`media_host`／`media_guest`
-     池、Linux guest driver（DKMS）、libva-v4l2 都做完，Ubuntu 上出貨組態驗收（Firefox 硬解 H.264／VP9／AV1、ffmpeg 硬體編碼、相機）
-     大部分已關；`wip/vpu` 已 rebase 進 `wip/hackintosh`。還開著的：**P-6**（畫面卡死、之後鎖定畫面全黑，blocker，未能重現）、**P-5**
-     （硬體編碼 drain 偶發掉尾幀，非決定性）、P-2（low）、P-9 的 12.4 h 實機 soak 沒做。細節 `plans/VPU_DESIGN.md` §7.8。
-   - ✅ **iPadOS guest：傳輸層第一個里程碑完成（10-29）**：guest 自檢讀到解碼器格式（H264／HEVC／VP90／AV01 → NV12，9 個 command、0 timeout）；crosvm `--virtio-mmio-media`（d5c13c494）、guest 輪詢式 `package/DroidVMVirtioMedia.c`（e66a7b4）、動態 ADT（DarwinBoot b2ad902、device 3f3474d）。memory [[droidvm-dynamic-adt]]、[[droidvm-virtio-media-ios]]。
-     - 陷阱：`VIDIOC_QUERYCAP` 由 driver 用 config space 自己回答，送給 device 會回 ENOTTY。
-     - 解碼、編碼的往返已由下面的 VideoToolbox 路線做完；相機還沒接。
-   - **接 VideoToolbox：用 Apple 自己 VM 的 paravirtualization 通道（11-02 查明，從 24A446 shared cache 讀出）。**
-     - iPadOS 27 的 VideoToolbox 本身帶完整的 paravirtualized 解碼器、編碼器、JPEG、motion estimation（`ParavirtualizedVideoDecoder_*`
-       等；macOS host 那半邊 `VTParavirtualizationHost*` 也編在同一顆）。`VTParavirtualizationIsRunningInGuest` 只看
-       `AppleVideoToolboxParavirtualizationDriver` 打不打得開（不看 `kern.hv_vmm_present`），打得開就讓合格的 codec 全走它。
-       userland 原封不動，XNU 扮演 host，把 session 翻成 virtio-media 的 V4L2：符合「通用 host 裝置、XNU 翻譯、userland 原廠」。
-     - 傳輸（`VideoToolboxParavirtualizationSupport.framework`，8 KB，`AppleParavirtGPU-1`）：IOServiceOpen type 0。
-       selector 0 `{size}`→`{容量, 送出 buffer, 佇列}`（kernel 映射進行程，先 16 KiB）；1／2 註冊／註銷 guest UUID（16 bytes）；
-       3 `{長度, 最多 5 個 IOSurface ID}`→`{status}`；4 佇列取空。host→guest 用 IODataQueue＋notification port（每則 ≤16 KiB）。
-       sandbox 只放行 `AppleVideoToolboxParavirtualizationUserClient` 這個名字（kernel 的 profile 有這串）。
-     - 訊息：48 bytes 的 FigAtom `'vtpv'`（類型 FourCC、flags、guest UUID、request ID），後接序列化 CF 型別與 sample buffer 的 atom。
-       解碼器：guest→host `decs` 列表、`dcap` 能力、`+dec` 建立、`dsta` 開 session、`dcan`、`dfrm` 解一幀、`dfin`、`dcop`／`dset`／
-       `dmul`／`dsup`／`dsav` 屬性、`dinv`、`-dec`、`Bye!`；host→guest `Dbuf` 請 guest 配 pixel buffer（IOSurface）、`Demt` 送出解好的幀、
-       `Ddpa`／`Dpba`／`Drpa` 屬性、`Dfub`。編碼器對稱（`encs`…）。
-     - ✅ **解碼、編碼都通（11-02）**：`package/DroidVMVTParavirt.cpp`（傳輸、Apple 名字的 driver／user client）＋`DroidVMVTHost.cpp`
-       （host：session 依 UUID，V4L2 session、worker thread、IOSurface 查詢）＋`DroidVMVTWire.h`（訊息格式）。device 1479852（解碼）、
-       9d5a0ce（編碼）、706338e（預設開啟）。開機就發布（關掉：命令列 `droidvm-vt-paravirt=0`）；執行中改 `kern.droidvm_vt_paravirt`
-       只影響之後才啟動的行程（videocodecd 若已啟動就不會換）。
-       測試：`gfxprobe vtdecode FILE N`、`gfxprobe vtencode [hevc] W H N`（輸出 `/private/var/ngpu/enc.h264|hevc`）、`gfxprobe imgdecode FILE N`。
-     - 「在 guest 裡」除了 codec 還改了什麼（24A446 shared cache）：VideoToolbox 隱藏非 paravirt 的硬體 codec（AVD、AVE，這裡本來就沒有）；
-       MediaToolbox 放寬防錄影檢查（外部保護不足時不遮畫面，FairPlay 這裡本來就沒有）；CMPhoto 問 paravirt JPEG（`jcap`），被拒後用軟體。
-       實測開／關對照：HEIC、JPEG 像素相同、速度相同；4:2:2 H.264 兩邊都解不了（軟體也不支援）；不開時 H.264 編碼是軟體 `anon-1`（720p 32 fps）。
-       VM 要有 `--virtio-media kind=decoder` 與 `kind=encoder`（＋`--virtio-mmio-media`、`media-host-mb=160`）。
-     - 格式怎麼來的：Mac（macOS 27）上 `tools/vtpv-oracle`：`hostonly` 把 guest 錄到的訊息餵給 VideoToolbox 自己的 host session，
-       錄 host 的回覆（`Efds` 要回真的 format description，host 才會吐 `Eemt`）；編碼器在 macOS 是 out-of-process，loopback 跑不起來。
-     - 陷阱：
-       - guest framework 在 selector 3 整段持鎖，host 不能在 guest 的 thread 上等 guest 回覆（輸入排隊、worker 做事）。
-       - MediaCodec 會扣幀（單張 IDR 也扣），`dfin`／`ecfr` 要 drain（`*_CMD_STOP`→LAST→`*_CMD_START`），兩秒還沒交出的幀回錯誤。
-       - 高通 AVC 解碼器 720p 要 21 個 CAPTURE buffer；c2.qti 解碼最小 96x96。
-       - IOSurface 只能被「建立者 task」或「已持有它的 client」查：解碼的 surface 是 videocodecd 自己建的，核心另開一個 client 查即可；
-         編碼的 surface 是 App 的（XPC 傳進來），要用行程自己的 client（`IOUserClientCreator` 找）建 port 再查。
-         同一個 client 查第二次會被拒，所以依 ID 快取，session 結束 `clientClose` 一次還。
-       - 關鍵幀不能帶 `NotSync`（WebRTC、gfxprobe 都只看有沒有這個 key）。
-       - 解碼器、編碼器 session ID 會重複，媒體事件要依裝置＋session 分派。
-       - VideoToolbox 只轉發 `dsup`／`esup` 支援清單裡有的屬性，清單外的它自己回 -12900、不問 host；目前清單只列
-         `UsingHardwareAccelerated{Decoder,Encoder}`（回 true，device fab4fb1）。HEVC 編碼 session 會主動問
-         `MVHEVCVideoLayerIDs`（多視角 HEVC），回不支援是對的。
-     - 下一步：開機預設發布並測 Safari／AVPlayer 播放與錄影類 App；1080p；VP9／AV1 解碼（VideoToolbox 的 paravirt 清單能不能列）。
-5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**
-   - **GPS：調查完、暫停（使用者 10-28 指示，晚點回來）。**結論見最上面 10-28 晚續報：J120 上 locationd 不會啟動 GNSS（WiFi 版
-     iPad 沒有 `kProviderLocationGps`），要換 J121AP 身分（值已從官方 IPSW 取得）；未解的是 J121 上 locationd 走 gpsd 還是基頻
-     QMI。路線：virtio-console 具名 port（NMEA）→ XNU 驅動提供 `/dev/cu.gps` → gpsd＋薄 vendor plugin。
-   - 磁力計：手機有 mmc56x3x，走第 1 項的 HID 路徑（未做）。
-   - Wi-Fi 唯讀：survey 過，kernel 沒有 IO80211 family、真驅動是 DriverKit，太重，暫不做。
-6. ✅ **電池：已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）→ powerd → SpringBoard，放電、充電都驗過。memory [[droidvm-battery]]。
-7. **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**
-   - iPadOS 上它們不是鍵盤頁（0x07）的鍵，而是 Consumer page（0x0C）的 HID 按鍵事件：Power／Lock 0x30、Volume+ 0xE9、
-     Volume− 0xEA（另有 Mute 0xE2、Home＝Menu 0x40）。backboardd／SpringBoard 依 usage page＋usage 分辨。
-   - 現況：`package/DroidVMVirtioInput.c` 只把 Linux keycode 轉成 boot keyboard 的 report 1，表裡沒有 `KEY_MUTE`(113)、
-     `KEY_VOLUMEDOWN`(114)、`KEY_VOLUMEUP`(115)、`KEY_POWER`(116)，app 送了也會被丟掉。`NativeHidInput` 的 report 2 已是
-     Consumer Menu（Home），但只有 rig 的 `tools/rig/home.py` 在用；上游給 sheng ButtonProbe 的 `native_buttons_set_sink`
-     在 DroidVM 是空 stub（`package/DroidVMStubs.c`）。
-   - 做法：host（app）在 virtio keyboard 上（或另開一個通用的 virtio-input 按鍵裝置，類似 gpio-keys）送標準 Linux keycode，
-     Linux guest 不用改就能用（logind 處理電源鍵）；XNU 把這幾個碼分出來、改送 Consumer report（擴充 report 2，或實作
-     `native_buttons_set_sink`），Home 一併接到 app。
-   - 電源鍵要送真實的按下／放開與按住時間（長按叫 Siri／關機畫面、電源＋音量截圖都靠時序）。待驗：SpringBoard 的鎖定
-     是否要求按鍵服務帶 `Built-In`。
+4. **VPU（編碼器、解碼器）與相機（含對焦、閃光燈）。**host＋Linux guest 已完成，還開著 P-6（blocker，未能重現）、P-5、P-2、
+   P-9 的 soak（`plans/VPU_DESIGN.md` §7.8）。iPadOS：virtio-media 傳輸層（10-29）與 VideoToolbox paravirt 解碼、編碼
+   （11-02，device 1479852、9d5a0ce、706338e）已通；相機還沒接。下一步：Safari／AVPlayer 播放與錄影類 App、1080p、
+   VP9／AV1 解碼。→ [細節](todo/audio-media.md#10-28-todo-4-vpu-與相機)
+5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**GPS 調查完、暫停（使用者 10-28 指示）：J120 上 locationd 不啟動 GNSS，要換
+   J121AP 身分；路線 virtio-console（NMEA）→ `/dev/cu.gps` → gpsd。磁力計走第 1 項的 HID 路徑（未做）；Wi-Fi 唯讀太重，
+   暫不做。→ [細節](todo/input-sensors.md#10-28-todo-5-地理位置)
+6. ✅ **電池：已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）
+   → powerd → SpringBoard，放電、充電都驗過。memory [[droidvm-battery]]。
+7. **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**iPadOS 上是 Consumer page（0x0C）的
+   HID 按鍵，`DroidVMVirtioInput.c` 只轉 boot keyboard、沒有 `KEY_POWER`／`KEY_VOLUMEUP`。做法：host 送標準 Linux keycode
+   （Linux guest 不用改），XNU 分出來改送 Consumer report（擴充 report 2 或實作 `native_buttons_set_sink`）；電源鍵要送
+   真實的按下／放開與按住時間。→ [細節](todo/input-sensors.md#10-30-todo-7-電源鍵與音量鍵)
 
 ### 其他待辦
 
-1. **介面流暢度（2026-10-28 的狀態見最上面的續報）：**瓶頸是 metal2vulkan 每個 draw 約 27 µs。兩條路還沒決定：
-   - A1：一般 draw 的快速路徑（依 pipeline 快取要檢查的功能），工程較大，預估每個 draw 省 30～50%；
-   - A2：零星小修（例如 `render.rs` 的 `sampler_maps` 每個 draw 掃一遍所有 texture），約 5%。
-   另外待查：外掛裡閒置吃 19% CPU 的執行緒（省電）；健康檢查的「fence waits timed out」計數一直增加；
-   把 GPU 頻率拉高能讓顯示階段減半，但屬於耗電策略，要使用者同意。
+1. **GPU 效能（11-08 起暫停：正確性＋穩定性已收尾）：**metal2vulkan 的現況與瓶頸（每個 draw 的 CPU、ICB 重錄、shader 品質、
+   排程、記憶體、跟上游的距離）整理在 [todo/metal2vulkan.md](todo/metal2vulkan.md)。另外待查：外掛裡閒置吃 19% CPU 的執行緒
+   （省電）；把 GPU 頻率拉高能讓顯示階段減半，但屬於耗電策略，要使用者同意。
 2. **GFXBench：**全部 Metal 測試都能跑到出分（這版 iOS 建置沒有 Tessellation 測試）。待辦：把改過的 `libvirglrenderer.so` 正規打包進 APK。
-   - 已完成：記憶體破壞（16 位元 ASID）、持久化 shader 快取（NativeMetal 3eb5926：Car Chase 232 → 133 秒；`NATIVE_METAL_NO_SHADER_CACHE=1` 關閉；
-     GFXBench 的 container 在 `/private/var/mobile/Containers/Data/`，root ssh 列不出來）。
-3. **Metal Check：**host／guest 均 28 PASS、0 FAIL、0 SKIP，三項 benchmark PASS；最後 20 輪 API／counters PASS 但視覺 FAIL（見上文），
-   不是完整的 Metal 或 display conformance。
+   - 已完成：記憶體破壞（16 位元 ASID）、持久化 shader 快取（NativeMetal 3eb5926：Car Chase 232 → 133 秒；
+     `NATIVE_METAL_NO_SHADER_CACHE=1` 關閉；GFXBench 的 container 在
+     `/private/var/mobile/Containers/Data/`，root ssh 列不出來）。
+3. **Metal Check：**11-08 兩支手機（Adreno 840、750）都 41/41 PASS；不涵蓋 argument buffer 與 ICB，也不是完整的 Metal
+   或 display conformance。
 4. **GPU 恢復與文字破圖：**尚無自動 GPU 恢復；若文字破圖重現，立即截圖並記錄 backboardd 的 IOSurface 資訊。
 5. ~~3D 改走 drm2kgsl~~：已完成（2026-10-25 起預設）；venus／gfxstream 之後再評估。
 
@@ -698,3 +683,4 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 裝置 repo `tools/rig/README.md`：rig 工具與變數
 - 裝置 repo `board.toml`：開機參數；每一項都有註解說明為什麼要加
 - 各 repo 的 commit message：每個修正的根因都寫在 commit 裡，這是最完整的歷史
+- `todo/`：未解／待辦項目的完整細節，依主題分檔（`metal2vulkan.md`、`webgpu-webgl.md`、`audio-media.md`、`input-sensors.md`、`apps-system.md`、`phones-rigs.md`）
