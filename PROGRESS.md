@@ -1,12 +1,13 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-07。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-08。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
 
 ## 已完成
 
+- ✅ **11-08** 經由 device address 的存取，每個字不再各算一次 64 位元位址（board patch 0036，fork a4c901d）：存取的位移拆成「4 GiB 頁」（只加一次到 root 的位址上，只動高位字）和 32 位元的字索引，每個字是同一個位址底下 `words[index + j]` 的 place。以前每個字都有自己的 64 位元位址（base + 4×word，在 32 位元 GPU 上是加法、進位比較、再一次加法），驅動沒辦法把它折進讀取指令。Turnip 會把這種 place 降成「64 位元基底＋32 位元偏移」的 `ldg.a`，同一個 leaf 的幾個字也會合成一次讀取。仿 deferredRendering 的 kernel（ir3，noop drm-shim 上的 Adreno 830）：光照迴圈 258 → 217 條，position 的三個字變成一次 vec3 讀取。5566：光照 pass 每幀 60 → 44.5 ms（u_trace），畫面 14.5–15 → 19.8 fps，render server 讀 WebKit surface 的等待不再碰到 100 ms 上限；MetalCheck 通過，核心測試沒有 base 以外的失敗。SEMANTICS_VERSION 1924，所有快取的 pipeline 會重編一次
 - ✅ **11-08** WebGPU 重頁面的畫面卡頓修好：deferredRendering（128 光源）畫面 0.5 fps → 14.5–15 fps（GPU 每幀約 60 ms，上限約 16.6）。根因在 kernel：顯示的每次 swap 都要等**所有程序**在它之前送出的 GPU 工作做完，WebGPU 頁面把 GPU 塞滿時，每次 swap 要等 1.7–1.9 秒（把 `droidvm_virtio_present_wait` 改 0 的 A/B：15.4 fps）。三件事一起修：(1) swap 只等 render server 自己的工作（取 display hold 的程序，device 7651f2b；`droidvm_virtio_present_scope` 是 A/B 開關）；(2) render server 提交前，等別的程序寫完它要讀的 surface（kernel surface ticket 的 awaitWriters，上限 100 ms），因為 GPU 優先權讓它的 ring 跑在 app 前面、KGSL 不替不同 context 排順序；(3) command buffer 的 scheduled 要等同一 queue 前面未完成的少於 3 個才送（NativeMetal 0e7550a）：iPadOS 27.0.1 的 WebKit 只靠 scheduled 節流 WebGPU canvas（在途幀上限與 frame pacer 是 2026-08 才加進 WebKit），以前一送出就 scheduled，WebKit 會一直往前排。A/B（`no-scheduled-pacing`）：有 14.5–14.8、沒有 9.7–9.8 fps 且 render server 的讀取每次都等滿 100 ms。之前以為 pacing 沒效，是因為深度開關用 fopen 讀，WebKit GPU 行程的 sandbox 讀不到，一直都是預設值。MetalCheck 42/42，ALU2 onscreen 86 fps，renderBundles 不變（CPU 受限）
 - ✅ **11-08** 經由「從記憶體讀出的指標」做的存取不再每次讀 root table（board patch 0035，fork b43b964）：WebKit 的 bind group 是 argument buffer，裡面的 buffer 指標到了 metal2vulkan 是 wide pointer，以前每次存取都重讀 root entry 的 host／bind_offset／size 和 sink 位址，而且沒有任何唯讀標記、旁邊還有 miss 計數的 atomic，驅動既不能合併也不能搬出迴圈。webgpu-samples 的 deferredRendering 每個像素對 128 個光源跑迴圈，每個光源讀 20 個欄位。回移植上游 ce204a121（指標改成 (root, at, host, size)，entry 在指標形成時讀一次），root table 與 resident set 的讀取一律走 NonWritable 的 place（`device_place_read_only`，Mesa 會把它們當成可重排的讀取）。ir3（用 Mesa 的 noop drm-shim 在 x86 上以 Adreno 830 編譯同一個 SPIR-V）：每個光源 496 條指令＋363 nop、37 次記憶體操作、11 次 (sy) → 398＋182、17（真正的讀取 7 次）、5；5566 上每幀 GPU 時間 73 → 60 ms（1200×1200、1.2 GHz，WebKit GPU 行程的 Turnip u_trace）。同一支手機的 Android Chrome 約 10 ms。MetalCheck 42/42，核心測試沒有 base 以外的失敗；0034 留下編不過的 used-uses 測試一併修好
 - ✅ **11-08** 5566 開 GPU 優先權（VM 環境變數 `DRM2KGSL_PRIORITIES=3`，render server 走較高的 KGSL ringbuffer）：WebGPU 把 GPU 吃滿時 render server 每次提交從送出到完成平均 270 ms → 35–58 ms。10-27 試過時 GPU 卡在 231 MHz、ALU2 onscreen 減半而關掉；現在有每幀的 KGSL 功耗約束，ALU2 onscreen 86 fps、時脈維持 1200 MHz，沒有重現
@@ -206,8 +207,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **11-02** gpu-3d 的「fence waits timed out」（Turnip 每 100 ms 一段的等待到期）只在較重的 WebGPU 範例出現（deferredRendering、shadowMapping），MSAA 修改前就有，原因待查
 - ⬜ **11-02** 有一次開機 gpu-3d 出現 3 次 fence wait 逾時，待查
 - ⬜ **11-07** renderBundles 非 bundle 模式的第一幀：WebKit 每個 indexed draw 前跑一次 vertex-only 的 index clamp、再下 buffers 範圍的 barrier，metal2vulkan 每次都得切 render pass instance；pass 有 depth attachment，不能走 inline 錄製（render/inline_first.rs 的條件），所以每次切分是一個 secondary command buffer，一幀 5000 次、峰值 467 MB。要再降：讓有 depth 的 pass 也能 inline 錄製後續 instance，或讓這種 vertex 寫入 → indirect 讀取的 barrier 不必切 instance。bundle 模式剩下的成本是 host step 每幀重錄 5000 個 ICB 命令（上游「GPU 寫入的 ICB 命令沒變時沿用上次的錄製」一系列還沒移植）
-- ⬜ **11-08** deferredRendering 的光照迴圈每個光源仍約 400 條 ir3 指令（原生約 30–40）：大多是每次存取各自算的 64 位元位址、對齊、界限檢查與 miss 檢查。ir3 沒跑 nir_opt_licm（試過加上只再少約 40 條）；要再降得讓同一個指標的多次存取共用位址運算
-- ⬜ **11-07** 開機後 Safari 第一個 GPU 行程拿不到 WebGPU adapter（requestAdapter 回 null，行程裡沒有建任何 Metal device），結束 Safari／WebKit 行程重開就好；hide-vmm 對 com.apple.WebKit.GPU 是生效的（同一個 binary 換名字讀 hv_vmm_present 會從 1 變 0），原因未明
+- ⬜ **11-08** deferredRendering 的光照迴圈仍比原生肥（0036 後每個字的位址加法沒了）：剩下的是每次存取各自算的 64 位元 `at`、64 位元界限檢查、sink 的 select 和 miss 檢查（未走的分支裡的 atomic）。同一個指標加常數位移的幾次存取（同一個 struct 的欄位）各做一套；ir3 沒跑 nir_opt_licm
+- ⬜ **11-07** Safari 的 GPU 行程偶爾拿不到 WebGPU adapter（requestAdapter 回 null，行程裡沒有建任何 Metal device），結束 Safari／WebKit 行程重開就好；hide-vmm 對 com.apple.WebKit.GPU 是生效的（同一個 binary 換名字讀 hv_vmm_present 會從 1 變 0）。11-08：不是開機才有（剛跑完長時間 WebGPU 後連開 8 次失敗 2 次，之後 40 次加一次冷開機都正常）。失敗的 GPU 行程在 Safari 啟動 0.2 秒內就起來，但從來沒映射 Metal plugin、沒開 virtio-gpu client，之後也沒有任何 GPU 工作：是 WebContent 端先放棄了 GPU 代理（RemoteGPUProxy 的 m_lost：等 WasCreated 15 秒逾時或回 false），不是 plugin 開裝置失敗。guest 裡讀不到 WebContent 的日誌，原因未明
 - ⬜ **11-07** cameracaptured 在 `nmb_compute_pipeline_reflection` 裡 SIGSEGV（CCPortrait 的 kernel，`FigMetalContext computePipelineStateFor:...reflection:`），每次開機都有，0032 之前就有
 - ⬜ **11-02** WebGPU 的 cubemap、fractalCube 範例待查
 - ⬜ **11-02** Wi-Fi 沒有無線電：station 掃描結果為空、沒加入網路（`droidvm-wifi-ssid` 只測 UI）；接真實硬體要在 station 換後端（例如 host 的 Wi-Fi 掃描／連線經 virtio 轉入）
