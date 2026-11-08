@@ -8,6 +8,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-08** Notes 的觸控筆壓感修好（device de1061a）：壓力改成 0..500、`AccurateMaxDigitizerPressureValue` 500（UIKit force＝壓力÷120，PencilKit 用 force 絕對值），5567 實測 0.1 畫 12 px、1.0 畫 38 px（[細節](todo/input-sensors.md#11-08-觸控筆壓感與橡皮擦端)）
 - ✅ **11-08** GPU 正確性＋穩定性收尾，效能先告一段落：5567（Adreno 750）回歸 MetalCheck 41/41、GFXBench 三項跑完、UI 與毛玻璃正常；metal2vulkan 現況與瓶頸見 [todo](todo/metal2vulkan.md)
 - ✅ **11-08** 10-29 那次 5567 backboardd 在 `ShadowTarget::Rotated` 的 NULL deref 沒再出現：5567 的 render server 每幀都走 rotated 路徑，11-04 起多次開機與今天的回歸都正常
 - ✅ **11-08** WebGL 2 更多頁正確（5566）：three.js texture2darray、volume_cloud（3D texture）、animation_keyframes（skinning）、ubo_arrays（1 fps、GPU 99%，屬效能）
@@ -211,6 +212,9 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **11-04** 觸控板：iPadOS 的觸控板手勢要哪種裝置（通用 HID Touch Pad，還是 Apple 的 multitouch 介面）還沒逆向；crosvm 已有
   multi-touch-trackpad（缺五指和解析度），app 還是在本地模擬滑鼠
 - ⬜ **11-04** Windows guest 的 virtio-input 驅動（vioinput）能不能把 stylus 裝置的壓力、傾斜對應成 HID Pen，尚未確認
+- ⬜ **11-08** 觸控筆的橡皮擦端在 Notes 裡照樣畫線，不會擦：iPadOS 沒有「橡皮擦端」這種 touch（Apple Pencil 沒有），報告裡的
+  Eraser 位元沒人用；可能的路線是把橡皮擦端轉成 Apple Pencil 的雙擊／squeeze（Notes 會切到橡皮擦），還沒查。5567 的筆本身沒有橡皮擦端。
+  → [細節](todo/input-sensors.md#11-08-觸控筆壓感與橡皮擦端)
 - ⬜ **11-03** 偶發：GPU 全開實驗中 backboardd 有一次收到來源不明的 SIGTERM（jetsam reaper 掃過 70 個閒置 process、開始強制 soft memory
   limit 之後 15 秒），三輪重現都沒再發生；另有一次 VM 重開卡在 root 掛載前（`apfs_sysctl_register` 之後無輸出），同一個 disk 前後兩次都正常
 - ⬜ **11-03** 每個 GPU blob 在 crosvm 佔 3 個 fd（virgl object 的、virgl resource 的、rutabaga resource 的 export），可以降到
