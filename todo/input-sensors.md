@@ -40,7 +40,7 @@
   是 force ÷ maximumPossibleForce，比例對，所以 11-04 驗證時看不出來。
 - 修法：壓力送 0..500、`AccurateMaxDigitizerPressureValue` 500，`maximumPossibleForce` 變成 4.17，和 Apple Pencil 一樣。
   5567 用合成筆實測：0.1 畫 12 px、1.0 畫 38 px（修之前兩者都是 10 px），0.05 → 1.0 的一筆由細變粗。
-  Safari 那邊的比例照理不變，但 5567 目前沒有網路，沒有重量 Pointer Events。
+  Safari 那邊的比例照理不變，但 5567 目前沒有網路，沒有重新量 Pointer Events。
 
 **橡皮擦端（未做）。** pen.py `--eraser`（BTN_TOOL_RUBBER → 報告的 Eraser 位元）在 Notes 裡照樣畫線。iPadOS 沒有「橡皮擦端」
 這種 touch（Apple Pencil 沒有，UIKit 的 stylus 事件也沒看到對應欄位）。可能的路線：橡皮擦端接觸時，改送 Apple Pencil 的雙擊或
