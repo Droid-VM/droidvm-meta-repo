@@ -78,3 +78,63 @@ app 對每個原生輸出的畫面都加這個裝置，不分 guest（Linux、Wi
   Tip Switch、Barrel（BTN_STYLUS）、Secondary Barrel（0x5A，BTN_STYLUS2）、In Range（BTN_TOOL_PEN／RUBBER）、Invert（0x3C，
   橡皮擦端在範圍內）、Eraser（0x45，橡皮擦端接觸時取代 Tip）、X、Y、Tip Pressure（0x30）、X／Y Tilt（0x3D／0x3E，單位度）；
   不帶 Contact ID 這些觸控欄位。要開 Windows VM 實測。
+
+## 11-09 觸控板 Linux 與 Windows 用哪些值
+
+計畫把 app 的相對滑鼠模式改成真的觸控板（多指位置、壓力）。crosvm 已有 `--input multi-touch-trackpad`（upstream）：
+INPUT_PROP_POINTER＋BUTTONPAD；BTN_TOUCH、BTN_TOOL_FINGER..QUADTAP（沒有 QUINTTAP）、BTN_LEFT；ABS_MT_SLOT 0..10（11 個 slot）、
+TRACKING_ID、MT_POSITION_X/Y、MT_TOOL_TYPE、MT_PRESSURE／PRESSURE 0..255、MT_TOUCH_MAJOR/MINOR 0..4095、ABS_X/Y，全部沒有解析度。
+
+**手機能給什麼。** 兩台 OnePlus（PLK110、OPD2404）的手指觸控面板 `ABS_MT_PRESSURE` 是 0..0（Android 顯示 "unknown range"，
+PLK110 `touch.pressure.calibration: none`），手指沒有壓力；真正量到的是接觸大小 `ABS_MT_TOUCH_MAJOR` 0..255。所以 guest 要的「壓力」
+只能由接觸大小推算，或乾脆不給。
+
+**Linux（libinput）：現在的裝置就能用，kernel 不用改。** 在 host 上用 uinput 做 crosvm 裝置的雙胞胎，讓 libinput 1.25 吃多指滑動
+（scratchpad 的 trackpad.c）：
+- udev 標成 `ID_INPUT_TOUCHPAD=1`；virtio_input 依 ABS_MT_SLOT 的最大值 `input_mt_init_slots`。
+- 單指 → 游標移動，雙指 → 捲動（scroll finger），三指、四指 → swipe gesture（finger count 3／4），五指 → 沒有任何 gesture（libinput
+  最多四指；有沒有 QUINTTAP 都一樣）。
+- 沒有解析度：`no resolution or size hints, assuming a size of 69x50mm`，照常運作，但速度、加速度和以公釐算的門檻（捲動距離、邊緣
+  palm 區、thumb 區）都照假尺寸算。給 12 單位／mm（106x85 mm）後同一筆滑動的 dx 從 227 變 342。
+- 壓力只用在兩件事，不會交給應用程式：
+  - 判觸碰：`using pressure-based touch detection (25:30)`（範圍的 10%／12%）。實測 0、20 沒有觸碰，40、120 正常。
+  - 判手掌：`palm: pressure threshold is 130`。實測 140、255 被當成手掌整個丟掉。
+  - 裝置不宣告壓力軸：用 tracking ID 判觸碰，一到四指都正常。
+  - 所以 host 若宣告壓力，就必須送合理的值：送 0（手機沒有壓力時最容易犯）手指全部不算，送太大變手掌。
+- TOUCH_MAJOR／MINOR 預設不用（只在 quirks 設了 AttrTouchSizeRange／AttrPalmSizeThreshold 時）。
+- BTN_LEFT＋BUTTONPAD 是 clickpad（整片按下＝左鍵，雙指按下或右下角＝右鍵）。手機螢幕按不下去：要嘛靠 guest 的
+  tap-to-click（libinput 預設關，桌面環境各自決定），要嘛 host 自己判斷「按下」送 BTN_LEFT；Linux 7.1 另有
+  INPUT_PROP_PRESSUREPAD（「壓力觸發點擊」，libinput 1.25 只有 ModelPressurePad quirk）。
+- 應用程式拿不到每根手指（Wayland 只有 pointer、scroll、swipe／pinch／hold gesture）。
+
+**Windows：vioinput 現在不支援觸控板，要另寫 Precision Touchpad。**
+- 分類（`Hid.c`）：滑鼠探測先跑，有 BTN_LEFT 又有 ABS_X/Y，`EXPOSE_ABS_AXES_WITH_BUTTONS_AS_MOUSE`（vioinput.h 預設開）就把它做成
+  「絕對座標滑鼠」。那段迴圈用 `DecodeNextBit` 解碼並清掉 AbsData 的**每一個**位元，認不得的軸（多指那些）也清掉，所以後面的
+  tablet 探測根本不會跑：碰觸控板會讓游標跳到對應的絕對位置。
+- 就算走到 `HidTablet.c` 的多指路線，產生的也是 Touch Screen（0x0D/0x04），不是 Touch Pad（0x05）。
+- Precision Touchpad 規格（Microsoft，"Windows Precision Touchpad Collection" 與 "Configuration Collection"）：
+  - 頂層 Touch Pad（0x0D/0x05）。每個 contact 必填：Contact ID（0x51）、Tip（0x42）、Confidence（0x47，手掌時清掉；寬或高
+    超過 25 mm 必須是 off）、X、Y（logical ≥ 300 DPI，要有 physical 範圍和單位）。選填：Width（0x48）、Height（0x49）、
+    Pressure（0x0D/0x30，範圍不限）、Azimuth（0x3F）。
+  - 報告層必填：Scan Time（0x56，單位固定 100 µs，16 位元會繞回）、Contact Count（0x54）；選填 Button 1（整片按下）、
+    Mechanical Force（0x20/0x494，＝各指壓力總和，單位要和 Pressure 一樣）。
+  - Feature：Contact Count Maximum（0x55，3..5；超過這個數的一幀整個被丟掉）、Pad Type（0x59：0 可按下的 click-pad、
+    1 不能按下的 pressure-pad、2 沒有按鍵）、Device Certification Status（0xFF00/0xC5 的 256 位元組；沒有這份報告 Windows
+    不碰這個裝置，Microsoft 公布了一份預設 blob 可用）、選填 Latency Mode（0x60）、Button Press Threshold（0x0D/0xB0，
+    Windows 11 26027 起讓使用者調點擊力道）。
+  - 另一個頂層 Configuration（0x0D/0x0E）：Input Mode（0x52，0＝滑鼠、3＝PTP）、Surface Switch（0x57）／Button Switch（0x58）。
+  - 手勢（點擊、捲動、三／四指、防誤觸）都由 Windows 自己做；壓力在標準功能裡用不到，pressure-pad 是裝置自己在約 150 g 時報 Button。
+- 要做的事（我們的 fork gunyah-guest-drivers-windows）：INPUT_PROP_POINTER＋MT 的裝置不走滑鼠，改走新的 PTP class：
+  slot → Contact ID，tracking ID ≥ 0 → Tip，MT_TOOL_TYPE＝PALM 或 TOUCH_MAJOR 過大 → Confidence off，MSC_TIMESTAMP → Scan Time，
+  BTN_LEFT → Button 1，Contact Count Maximum 取 min(slot 數, 5)，Pad Type 依 BUTTONPAD／PRESSUREPAD，附預設 blob 和
+  Configuration collection；也順便修絕對滑鼠那段清掉所有軸的迴圈。要開 Windows VM 實測。
+
+**host 裝置建議（通用，Linux 原生語意）。** crosvm 新增或擴充 trackpad 參數：
+- ABS_X/Y、MT_POSITION_X/Y、TOUCH_MAJOR/MINOR 帶解析度（app 用手機 dpi 和觸控板區域的大小算），Linux 用真尺寸，Windows 的 physical
+  範圍也從這裡來。
+- slot 數 5、加 BTN_TOOL_QUINTTAP（Windows 最多 5 點）。
+- 送 MSC_TIMESTAMP（virtio 會成批送達，guest 要用裝置時間算速度；Windows 的 Scan Time 也從這裡來）。
+- 手指沒有壓力就不宣告 ABS_MT_PRESSURE；接觸大小照實送 TOUCH_MAJOR/MINOR。macOS／iPadOS 要的壓力或接觸強度，由 guest 驅動從接觸
+  大小推算，host 不造假。
+- 「按下」由誰決定要先定：guest tap-to-click，或 app 判斷（例如長按或重按）送 BTN_LEFT，後者對應 Linux 的 PRESSUREPAD、
+  Windows 的 Pad Type 1。

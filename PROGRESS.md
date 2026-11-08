@@ -209,8 +209,11 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   64–85 MiB
 - ⬜ **11-04** Safari 網址列快速輸入時會掉字（例如一次送 "http://..." 只剩 "http"）：guest kernel
   的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
-- ⬜ **11-04** 觸控板：iPadOS 的觸控板手勢要哪種裝置（通用 HID Touch Pad，還是 Apple 的 multitouch 介面）還沒逆向；crosvm 已有
-  multi-touch-trackpad（缺五指和解析度），app 還是在本地模擬滑鼠
+- ⬜ **11-04** 觸控板：app 還在本地模擬滑鼠；iPadOS 要哪種裝置（通用 HID Touch Pad 或 Apple multitouch）還沒逆向。11-09 查其他 guest：
+  crosvm 的 multi-touch-trackpad 在 Linux libinput 單指、雙指捲動、三／四指 swipe 都能用（uinput 實測），沒解析度就假設 69x50 mm，
+  壓力只拿來判觸碰（低於 25/255 不算）和手掌（≥130 丟掉）；Windows vioinput 把它當絕對座標滑鼠、多指軸全被清掉，要另寫 Precision
+  Touchpad。手機手指沒有壓力（OnePlus 面板 ABS_MT_PRESSURE 0..0），只有接觸大小
+  → [細節](todo/input-sensors.md#11-09-觸控板-linux-與-windows-用哪些值)
 - ⬜ **11-08** Linux／Windows guest 對 stylus 裝置：Linux kernel 照收，但 libinput 因為 ABS_X/Y 沒有解析度整個忽略（host 上 uinput
   實測，加了解析度就收）→ crosvm 要填解析度，由 app 傳畫面的公釐數；Windows vioinput 把它當成單點 Digitizer，只剩位置、筆尖、
   一顆側鍵，壓力、傾斜、懸停、橡皮擦都丟掉 → 驅動要加 Pen collection，要開 Windows VM 實測
