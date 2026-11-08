@@ -46,3 +46,35 @@
 這種 touch（Apple Pencil 沒有，UIKit 的 stylus 事件也沒看到對應欄位）。可能的路線：橡皮擦端接觸時，改送 Apple Pencil 的雙擊或
 squeeze 事件，讓 Notes 自己切到橡皮擦工具，抬起後再切回來。5567 的 OnePlus Pencil Pro（`touchpanel_pen`）只有
 BTN_TOOL_PEN、BTN_TOUCH、BTN_STYLUS／2，沒有橡皮擦端，這條只影響有橡皮擦端的筆。
+
+## 11-08 Linux 與 Windows guest 的 stylus 支援
+
+crosvm `--input stylus`（c9e24ed54）對 guest 是一個標準的 evdev 筆型數位板：INPUT_PROP_DIRECT、BTN_TOOL_PEN／RUBBER、BTN_TOUCH、
+BTN_STYLUS／2、ABS_X/Y（0..0x7FFF，解析度 0）、ABS_PRESSURE 0..4095、ABS_DISTANCE 0..255、ABS_TILT_X/Y ±90（57 單位／弧度）。
+app 對每個原生輸出的畫面都加這個裝置，不分 guest（Linux、Windows 走 PCI，iPadOS 走 MMIO）。
+
+**Linux：kernel 認得，桌面（libinput）不收。**
+- `drivers/virtio/virtio_input.c` 把 EV／KEY／ABS 位元、absinfo（含 res）和 INPUT_PROP 照抄成 input_dev，不用改；udev 標成
+  `ID_INPUT_TABLET=1`。
+- libinput（GNOME、KDE、wlroots、Xorg 的 xf86-input-libinput）要求平板的 ABS_X/Y 有解析度（`tablet_reject_device`），沒有就整個忽略。
+  在 host 上用 uinput 做一個能力相同的裝置，讓 libinput 1.25 判一次（scratchpad 的 pentab.c）：
+  - 解析度 0（現況）：`libinput bug: missing tablet capabilities: resolution. Ignoring this device.`，裝置沒加進來。
+  - 解析度 128（單位／mm）：加進來，是 tablet-tool。
+- Android guest 的 InputReader 不需要解析度，應該直接能用（沒實測）。
+- 修法（host 通用）：crosvm stylus 的 ABS_X/Y 填解析度＝範圍 ÷ 畫面實際的公釐數。app 知道 guest 畫面在手機上佔多少 px，也知道手機的
+  xdpi／ydpi，可以算好傳給 crosvm（例如新增 `width-mm`／`height-mm` 參數）。iPadOS 不看這個值；觸控（multi-touch）不需要。
+
+**Windows：vioinput 認得，但只剩位置、筆尖和一顆側鍵。**
+- 分類（`vioinput/sys/Hid.c` 的 `VIOInputBuildReportDescriptor`）：滑鼠只收 BTN_MOUSE 範圍的按鍵、搖桿只收 BTN_JOYSTICK 範圍，
+  這個裝置都沒有，所以落到 `HidTablet.c` 的單點（ST）路線。
+- 產生的 HID：頂層 collection 是 Digitizer（0x0D/0x01，外接數位板），不是 Pen（0x02）；logical collection 是 Stylus，欄位只有
+  Tip Switch、In Range、Barrel Switch、X、Y，另外帶著觸控才用的 Contact ID、寬高、Contact Count／Max。
+- 事件（`HIDTabletEventToReport`）：BTN_TOUCH → Tip＋In Range（只有碰到時才 in range，沒有懸停），BTN_STYLUS → Barrel。
+  BTN_TOOL_PEN（懸停）、BTN_TOOL_RUBBER（橡皮擦）、BTN_STYLUS2、ABS_PRESSURE、ABS_TILT_X/Y、ABS_DISTANCE 全部丟掉。
+- 小 bug（upstream 也有）：`HIDTabletProbe` 收按鍵的迴圈拿 `pAxes` 的 bitmap 解碼（應該是 `pButtons`），按鍵沒從 KeyData 拿掉；
+  BTN_* 不在鍵盤表裡，所以目前沒有多出一個鍵盤裝置。
+- Windows 會不會把 0x01 Digitizer 當成筆（Windows Ink），沒在 Windows guest 上實測。
+- 修法（guest 驅動，我們的 fork gunyah-guest-drivers-windows）：有 BTN_TOOL_PEN 的單點裝置另走一條 Pen 路線：頂層 Pen（0x02）；
+  Tip Switch、Barrel（BTN_STYLUS）、Secondary Barrel（0x5A，BTN_STYLUS2）、In Range（BTN_TOOL_PEN／RUBBER）、Invert（0x3C，
+  橡皮擦端在範圍內）、Eraser（0x45，橡皮擦端接觸時取代 Tip）、X、Y、Tip Pressure（0x30）、X／Y Tilt（0x3D／0x3E，單位度）；
+  不帶 Contact ID 這些觸控欄位。要開 Windows VM 實測。

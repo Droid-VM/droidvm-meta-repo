@@ -211,7 +211,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
 - ⬜ **11-04** 觸控板：iPadOS 的觸控板手勢要哪種裝置（通用 HID Touch Pad，還是 Apple 的 multitouch 介面）還沒逆向；crosvm 已有
   multi-touch-trackpad（缺五指和解析度），app 還是在本地模擬滑鼠
-- ⬜ **11-04** Windows guest 的 virtio-input 驅動（vioinput）能不能把 stylus 裝置的壓力、傾斜對應成 HID Pen，尚未確認
+- ⬜ **11-08** Linux／Windows guest 對 stylus 裝置：Linux kernel 照收，但 libinput 因為 ABS_X/Y 沒有解析度整個忽略（host 上 uinput
+  實測，加了解析度就收）→ crosvm 要填解析度，由 app 傳畫面的公釐數；Windows vioinput 把它當成單點 Digitizer，只剩位置、筆尖、
+  一顆側鍵，壓力、傾斜、懸停、橡皮擦都丟掉 → 驅動要加 Pen collection，要開 Windows VM 實測
+  → [細節](todo/input-sensors.md#11-08-linux-與-windows-guest-的-stylus-支援)
 - ⬜ **11-08** 觸控筆的橡皮擦端在 Notes 裡照樣畫線，不會擦：iPadOS 沒有「橡皮擦端」這種 touch（Apple Pencil 沒有），報告裡的
   Eraser 位元沒人用；可能的路線是把橡皮擦端轉成 Apple Pencil 的雙擊／squeeze（Notes 會切到橡皮擦），還沒查。5567 的筆本身沒有橡皮擦端。
   → [細節](todo/input-sensors.md#11-08-觸控筆壓感與橡皮擦端)
