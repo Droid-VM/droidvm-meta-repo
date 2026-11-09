@@ -222,7 +222,25 @@ Trackpad，Windows 之後實作 Precision Touchpad。
 觸控(0) → 滑鼠(1) → 觸控板(3) → 滑鼠(1) → 觸控板(3)，圖示變成觸控板；觸控板模式滑動沒有錯誤。iPadOS guest 目前把這個裝置判成
 KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；測完切回觸控。
 
+**XNU：映射成 Magic Trackpad 要什麼（11-10 調查）。**
+- guest 的 kernel collection 只有 32 個 kext（profile 的 `roots`，再和我們的 XNU 重新配對；`fileset-reviewed.json` 補人工配對），
+  沒有多點觸控驅動。Apple 原版 24A446 kernelcache（308 個）有 AppleMultitouchDriver、AppleActuatorDriver、AppleMultitouchSPI、
+  AppleHIDTransport*（MultitouchSoftware-10100.44）。
+- AppleMultitouchDriver 的比對規則（原版 prelink）：AppleMultitouchHIDService 接 IOHIDInterface，Manufacturer "Apple" 的
+  0x0D/0x00、0x0D/0x04、0x0D/0x20（內建螢幕和筆，MT Built-In、parser-type 1／4、IOCFPlugInTypes → MultitouchHID.plugin），
+  以及 **MTUserDevice**：usage page 0xFF60 usage 7，不限製造商。kernel 裡沒有藍牙 Magic Trackpad 專用驅動：iOS 的藍牙 HID 在
+  userspace（bluetoothd），推測它為 Magic Trackpad 建一個 FF60/7 的 IOHIDUserDevice，交給 AppleMultitouchHIDService →
+  AppleMultitouchDevice → userspace 的 MultitouchHID.plugin／MultitouchSupport 解析（待逆向確認）。
+- 相依：AppleMultitouchDriver 要 AppleARMPlatform（已有）、AppleInputDeviceSupport（沒有）、IOHIDFamily、IOReportFamily。
+- 計畫：
+  1. profile roots 加 AppleMultitouchDriver＋AppleInputDeviceSupport，配對缺的 kernel 符號，開機確認。
+  2. 逆向 bluetoothd 為 Magic Trackpad 建的 user device：report descriptor、屬性（parser-type、Family ID、感測面尺寸等）、
+     frame 格式（應是 Magic Trackpad 2 的原始報告，Linux hid-magicmouse 解的那種：每指 9 bytes，X/Y 13 位元）。
+  3. DroidVMVirtioInput 加 KIND_TRACKPAD（MT 位置、INPUT_PROP_POINTER），NativeHidInput 發佈 FF60/7 裝置，把 virtio 的幀轉成
+     Magic Trackpad 2 的幀（mm → MT2 座標，接觸大小 → size／pressure）。
+  4. 5567 實測：游標、輕點、雙指捲動、三指手勢。
+
 **還沒做。**
-- XNU：DroidVMVirtioInput 新增 KIND_TRACKPAD，映射成 Magic Trackpad 給 stock iPadOS。
+- XNU：上面的 1–4。
 - Windows：vioinput 的 Precision Touchpad class（之後）。
 - Linux guest 端到端（libinput 行為已用 uinput 雙胞胎驗過）。
