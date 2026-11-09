@@ -277,12 +277,23 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
   trackpad interaction"。
 - 坑：adb `input swipe` 是忙迴圈，一毫秒好幾幀 → "Frame interval is zero!"、速度歸零，backboardd 佇列 overrun（"Pointer event
   dropped"）→ 加了 8 ms 合併。
-- **還沒好：畫面上看不到游標。** pointeruid 說可見、視窗 1024×1366，但截圖差異比對找不到。backboardd 的游標區域是
-  512×683（5567 的 VM 是 1024×1366 @1x，靠 ffeb241 的 text fixup；backboardd 這邊的比例來源仍當 @2x），可能是原因之一。
-  還有 SpringBoard 的 Passive 連線、AttentionAwareness 監看連線會 overrun。
+- 設定 → 一般 出現 **Trackpad** 頁（追蹤速度、自然捲動、點一下來按一下、兩指輔助按一下）；5567 上已打開「點一下來按一下」。
+- 游標位置是對的：左右滑動游標跟著走、推到邊緣停住；SpringBoard／App 收到 hover（log 的 "Entered region"：狀態列、
+  小工具 376×180、圖示 87.5×87.5；視窗化 App 右下角的縮放角、側欄邊緣提示都會出現）。
+- **還沒好：游標本身沒畫出來。** pointeruid "Unhiding pointer"、狀態 Visible，但游標在畫面中間時截圖差異找不到；
+  輔助使用 → 指標控制 打開「增加對比」、最大尺寸、關掉自動隱藏也一樣；@1x（1024×1366）和 @2x（2048×2732）都一樣。
+  - @1x 另有比例不一致：backboardd "StartWindowServer: MG scale:2 display preferredScale:1"，window server display 是
+    scale 2，游標區域 512×683（ffeb241 的 fixup 只改 preferredScale；MG main-screen-scale 仍是 2）。@2x 時區域 1024×1366。
+  - 游標的承載：pointeruid 的 pointerRenderingScene 放在 SpringBoard presentation binder 的 level -1000（來源），
+    systemPointerScene 在 level 10000015.5，都裝在 SBFSecureTouchPassThroughWindow 裡；SpringBoard 那層
+    "PresentationBinderIndirectAccessHosting" 的 content state 一直是 preparing（pointeruid 端的 scene 已 ready）；pointeruid
+    有 "Scene create completion block was not called"（Apple 自己的繞過訊息）。backboardd 有 "secure rendering service"、
+    "IOMFBSupportHWSecureAnimation not found"。下一步：分辨是 secure window／portal 合成，還是 indirect hosting 沒 ready；
+    跟觸控板無關，換成滑鼠也會遇到。
+  - 既有的雜訊：swap_wait 0xe00002d5（觸控板之前就有）、sharingd／AttentionAwareness 監看連線 overrun。
 - 驗證工具：`gfxprobe ioreg CLASS`（guest-run.sh）、`guest-newlogs.sh` 後篩 com.apple.Multitouch／PointerUI／BKSendHIDEvent；
   peek：droidvm_input_kinds、native_hid_trackpad_load_status、droidvm_trackpad_hid（送出、feature 次數、set 次數、丟棄）。
 
 **還沒做。**
-- 游標顯示（先試 2048×2732 @2x 的 VM 排除比例問題）；手勢（雙指捲動、三指上滑、捏合）要多指輸入（adb 只能單指，考慮手機端
-  uinput 觸控裝置）；點一下來按一下要在設定裡打開；接觸大小目前固定（VoodooInput 的值），手機有接觸大小時之後再接上。
+- 游標的合成（見上）；手勢（雙指捲動、三指上滑、捏合）要多指輸入（adb 只能單指，考慮手機端 uinput 觸控裝置）；
+  @1x 的 MG scale；接觸大小目前固定（VoodooInput 的值），手機有接觸大小時之後再接上。
