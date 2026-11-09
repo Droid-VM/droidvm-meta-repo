@@ -194,3 +194,35 @@ TRACKING_ID、MT_POSITION_X/Y、MT_TOOL_TYPE、MT_PRESSURE／PRESSURE 0..255、M
 - Windows：現在的 vioinput 把它當絕對座標滑鼠，沒有任何手勢。有 PTP class 之後，點擊、點兩下拖曳、雙指右鍵、三／四指手勢都是 Windows
   自己做，只要 Contact ID、Tip、Confidence、X/Y、Scan Time、Contact Count；Width/Height 選填（不能送 0，沒有就不宣告），
   Pressure 選填。Windows 沒有 Force Click；pressure-pad 是裝置自己判斷「按下」送 Button。
+
+## 11-10 trackpad 裝置與 app 切換
+
+使用者決定：點擊用方案 A（裝置沒有按鍵，guest 輕點即點擊）；原本的模擬滑鼠保留；新的通用裝置叫 trackpad，XNU 內映射成 Magic
+Trackpad，Windows 之後實作 Precision Touchpad。
+
+**crosvm（23ed5ac72，wip/virtio-mmio 與 wip/hackintosh）。** 沿用 `trackpad` 這個種類，加 `contacts` 就變成多指觸控板，不加維持原本
+的單指觸控板（左右鍵）：
+- `trackpad[path,width,height,name,contacts=N,res=R,touch-size=BOOL]`
+- INPUT_PROP_POINTER、沒有按鍵；BTN_TOUCH、BTN_TOOL_FINGER..（依 N，最多 QUINTTAP）；ABS_MT_SLOT 0..N-1、TRACKING_ID、
+  MT_POSITION_X/Y 和 ABS_X/Y（解析度 R 單位／mm）、MT_TOOL_TYPE（0..2，2＝手掌）；touch-size 時加 MT_TOUCH_MAJOR/MINOR 0..255
+  （面板範圍的比例，不是長度）；EV_MSC MSC_TIMESTAMP。
+
+**app（33d0a76，本地）。**
+- 新通道 TRACKPAD＝6（VM 全域，socket `dvmin_<vm>_tp.sock`），裝置名 "DroidVM Trackpad"，排在所有輸入裝置最後（MMIO 位址不動）。
+- daemon：邊長＝手機螢幕長邊的 mm×20（DisplayManager real metrics；5567 是 5020＝251 mm）；`touch-size` 由 `getevent -lp`
+  判斷（有 INPUT_PROP_DIRECT、MT_POSITION_X、MT_TOUCH_MAJOR 且 max>min），不用 InputManager，因為螢幕關著時 Android 不給範圍。
+- 選單的滑鼠按鈕：從觸控／手寫板按 → 相對滑鼠；在滑鼠或觸控板時再按 → 切到另一個，圖示跟著換（InputModeToggle，原生顯示和 VNC
+  共用）。模式 ordinal：TRACKPAD＝3。
+- TrackpadEncoder：每個事件送整幀（所有手指位置），第 6 指起整段忽略；位置＝view px × 20×25.4/dpi；接觸大小＝getTouchMajor／
+  該裝置 AXIS_TOUCH_MAJOR 範圍上限 × 255；FLAG_CANCELED 的 UP 和 ACTION_CANCEL 先標 MT_TOOL_PALM 再放開；MSC_TIMESTAMP 用事件
+  時間（µs）；手指停著時每 50 ms 送 keepalive；離開觸控板模式時放開所有手指。硬體滑鼠在觸控板模式仍走相對滑鼠。
+
+**5567 實測。** 裝 APK 後 root daemon 還是舊的，要停 VM、依 pid 結束 daemon、`daemon-recover.sh` 重啟才會帶新參數。crosvm 參數
+`trackpad[...,width=5020,height=5020,res=20,contacts=5,touch-size=true,name=DroidVM Trackpad]`，VM 正常開機。選單切換：
+觸控(0) → 滑鼠(1) → 觸控板(3) → 滑鼠(1) → 觸控板(3)，圖示變成觸控板；觸控板模式滑動沒有錯誤。iPadOS guest 目前把這個裝置判成
+KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；測完切回觸控。
+
+**還沒做。**
+- XNU：DroidVMVirtioInput 新增 KIND_TRACKPAD，映射成 Magic Trackpad 給 stock iPadOS。
+- Windows：vioinput 的 Precision Touchpad class（之後）。
+- Linux guest 端到端（libinput 行為已用 uinput 雙胞胎驗過）。
