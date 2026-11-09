@@ -240,7 +240,49 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
      Magic Trackpad 2 的幀（mm → MT2 座標，接觸大小 → size／pressure）。
   4. 5567 實測：游標、輕點、雙指捲動、三指手勢。
 
-**還沒做。**
-- XNU：上面的 1–4。
+**還沒做。** 見下一節。
 - Windows：vioinput 的 Precision Touchpad class（之後）。
 - Linux guest 端到端（libinput 行為已用 uinput 雙胞胎驗過）。
+
+## 11-10 XNU：觸控板發佈成 Magic Trackpad 2（device 0c3fa5d）
+
+**iPadOS 怎麼接 Magic Trackpad（逆向結果，修正上一節的推測）。**
+- bluetoothd 的 TrackpadInputDevice 為一個 MT2 建四個 IOHIDUserDevice，描述格式寫死在程式裡：管理（0xff00/0x0b）、觸控板、
+  致動器（0xff00/0x0d）、第四個（0xff00/0x03）。觸控板的描述格式（110 bytes）和 acidanthera VoodooInput 模擬 MT2 用的
+  **完全相同**：mouse report 2、Digitizer/Touch Pad（0x0d/0x05，report 0x3f）、vendor 0xff00/0x0c（report 0x44，1387 bytes）。
+- 比對它的是 AppleTopCaseDriverV2 的 personality "Magic Trackpad BT iOS/tvOS Event Driver - TopCase - 613"（VendorID 76、
+  ProductID 613、usage 1/2）→ AppleTopCaseHIDEventDriver 的 AppleMultitouchTrackpadHIDEventDriver → AppleMultitouchDevice
+  （DefaultMultitouchProperties：HSTouchHIDService）→ backboardd 的 HSTouchHIDService.plugin。MTUserDevice（0xff60/7）不是這條路。
+- 幀格式：report 2，12 bytes 表頭（[1] 按鍵、[7] 3 有手指／2 沒有、[8] 0x31、[9..11] 毫秒時間戳 `ms<<3|4`）＋每指 9 bytes
+  （X、Y 各 13 位元有號、手指種類 3 位元、狀態 3 位元：3 落下、4 接觸、7 抬起；major、minor、size、pressure；id 4 位元＋角度）。
+- 驅動會讀 feature report：Family ID（0xd1，0x81）、Sensor Rows/Columns（0xd3）、Sensor Region（0xd0、0xa1）、Sensor Surface
+  Width/Height（0xd9，0.01 mm），回答照 VoodooInput。
+
+**實作。**
+- DroidVMVirtioInput.c：kind 6 trackpad（MT 位置、INPUT_PROP_POINTER、沒有 DIRECT），每幀把落下的和這幀抬起的手指交給 sink，
+  座標換成 0.01 mm。
+- DroidVMTrackpadHid.inc：DroidVMTrackpadHIDDevice，描述格式、VendorID 76／VendorIDSource 1／ProductID 613、Transport
+  Bluetooth、ExtendedData 都照 bluetoothd；不設 HIDDefaultBehavior（不讓通用的 IOHIDEventDriver 當成滑鼠搶走）。表面大小用
+  virtio 的解析度算（5567：251.05 mm 見方）。送幀節奏 8 ms（MT 裝置的 ReportInterval），中間來的幀合併；時間戳嚴格遞增。
+  沒按鍵：點擊要靠 iPadOS 的「點一下來按一下」（預設關，ApplePreferencesDefaultPreferences Clicking=0）。
+- board.toml `[kernel.prelink] roots` 加 AppleTopCaseDriverV2、AppleTopCaseHIDEventDriver；相依的 AppleMultitouchDriver、
+  AppleInputDeviceSupport、AppleMultitouchSPI、AppleHIDKeyboard、IOSlaveProcessor 自動帶進（非 root 的比對規則會被丟掉）。
+  它們的 __DATA 都在 Libm 之後，native __DATA 空間不變。fileset-reviewed 加兩組配對：os_log_info_enabled、
+  IOBufferMemoryDescriptor::inTaskWithGuardPages（原本會變成未配對的 stub）。
+
+**5567 實測。**
+- 整條鏈接起來了：DroidVMTrackpadHIDDevice → IOHIDInterface → AppleMultitouchTrackpadHIDEventDriver → AppleMultitouchDevice
+  （Family ID 129、parser-type 1001、Sensor 22×30、有 user client）。backboardd 的 HSTouch 解析手指（"[TP] Dispatching digitizer
+  event"），BKMousePointerController 把它當指標裝置（HIDTrackpadAcceleration），pointeruid "Unhiding pointer: definitive
+  trackpad interaction"。
+- 坑：adb `input swipe` 是忙迴圈，一毫秒好幾幀 → "Frame interval is zero!"、速度歸零，backboardd 佇列 overrun（"Pointer event
+  dropped"）→ 加了 8 ms 合併。
+- **還沒好：畫面上看不到游標。** pointeruid 說可見、視窗 1024×1366，但截圖差異比對找不到。backboardd 的游標區域是
+  512×683（5567 的 VM 是 1024×1366 @1x，靠 ffeb241 的 text fixup；backboardd 這邊的比例來源仍當 @2x），可能是原因之一。
+  還有 SpringBoard 的 Passive 連線、AttentionAwareness 監看連線會 overrun。
+- 驗證工具：`gfxprobe ioreg CLASS`（guest-run.sh）、`guest-newlogs.sh` 後篩 com.apple.Multitouch／PointerUI／BKSendHIDEvent；
+  peek：droidvm_input_kinds、native_hid_trackpad_load_status、droidvm_trackpad_hid（送出、feature 次數、set 次數、丟棄）。
+
+**還沒做。**
+- 游標顯示（先試 2048×2732 @2x 的 VM 排除比例問題）；手勢（雙指捲動、三指上滑、捏合）要多指輸入（adb 只能單指，考慮手機端
+  uinput 觸控裝置）；點一下來按一下要在設定裡打開；接觸大小目前固定（VoodooInput 的值），手機有接觸大小時之後再接上。

@@ -209,10 +209,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   64–85 MiB
 - ⬜ **11-04** Safari 網址列快速輸入時會掉字（例如一次送 "http://..." 只剩 "http"）：guest kernel
   的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
-- ⬜ **11-04** 觸控板：11-10 host 端完成：crosvm `trackpad[contacts=5,res=20,touch-size=...]`（23ed5ac72，無按鍵、點擊交給 guest），
-  app 的滑鼠按鈕再按一次切成觸控板（app 33d0a76，本地），5567 實測裝置建立（250 mm 見方、有接觸大小）、切換正確。還沒做：XNU 把它
-  映射成 Magic Trackpad（iPadOS 目前忽略這個裝置）；Windows Precision Touchpad（之後）；Linux guest 端到端實測
-  → [細節](todo/input-sensors.md#11-10-trackpad-裝置與-app-切換)
+- ⬜ **11-04** 觸控板：host 端完成（crosvm 23ed5ac72、app 33d0a76 本地）；XNU 發佈成 Magic Trackpad 2（device 0c3fa5d），5567 上
+  Apple 的 AppleMultitouchTrackpadHIDEventDriver／HSTouch 接上、backboardd 當成指標裝置。還沒做：游標沒畫到 VM 畫面上（游標區域
+  512×683，懷疑 @1x 比例）、手勢未測（要多指輸入）；Windows Precision Touchpad（之後）；Linux guest 端到端
+  → [細節](todo/input-sensors.md#11-10-xnu觸控板發佈成-magic-trackpad-2device-0c3fa5d)
 - ⬜ **11-08** Linux／Windows guest 對 stylus 裝置：Linux kernel 照收，但 libinput 因為 ABS_X/Y 沒有解析度整個忽略（host 上 uinput
   實測，加了解析度就收）→ crosvm 要填解析度，由 app 傳畫面的公釐數；Windows vioinput 把它當成單點 Digitizer，只剩位置、筆尖、
   一顆側鍵，壓力、傾斜、懸停、橡皮擦都丟掉 → 驅動要加 Pen collection，要開 Windows VM 實測
