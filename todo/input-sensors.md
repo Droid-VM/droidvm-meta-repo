@@ -117,7 +117,7 @@ TRACKING_ID、MT_POSITION_X/Y、MT_TOOL_TYPE、MT_PRESSURE／PRESSURE 0..255、M
   - 所以 host 若宣告壓力，就必須送合理的值：送 0（手機沒有壓力時最容易犯）手指全部不算，送太大變手掌。
 - TOUCH_MAJOR／MINOR 預設不用（只在 quirks 設了 AttrTouchSizeRange／AttrPalmSizeThreshold 時）。
 - BTN_LEFT＋BUTTONPAD 是 clickpad（整片按下＝左鍵，雙指按下或右下角＝右鍵）。手機螢幕按不下去：要嘛靠 guest 的
-  tap-to-click（libinput 預設關，桌面環境各自決定），要嘛 host 自己判斷「按下」送 BTN_LEFT；Linux 7.1 另有
+  tap-to-click（libinput 在裝置有 BTN_LEFT 時預設關、沒有時預設開，桌面環境可改），要嘛 host 自己判斷「按下」送 BTN_LEFT；Linux 7.1 另有
   INPUT_PROP_PRESSUREPAD（「壓力觸發點擊」，libinput 1.25 只有 ModelPressurePad quirk）。
 - 應用程式拿不到每根手指（Wayland 只有 pointer、scroll、swipe／pinch／hold gesture）。
 
@@ -133,7 +133,7 @@ TRACKING_ID、MT_POSITION_X/Y、MT_TOOL_TYPE、MT_PRESSURE／PRESSURE 0..255、M
   - 報告層必填：Scan Time（0x56，單位固定 100 µs，16 位元會繞回）、Contact Count（0x54）；選填 Button 1（整片按下）、
     Mechanical Force（0x20/0x494，＝各指壓力總和，單位要和 Pressure 一樣）。
   - Feature：Contact Count Maximum（0x55，3..5；超過這個數的一幀整個被丟掉）、Pad Type（0x59：0 可按下的 click-pad、
-    1 不能按下的 pressure-pad、2 沒有按鍵）、Device Certification Status（0xFF00/0xC5 的 256 位元組；沒有這份報告 Windows
+    1 不能按下的 pressure-pad、2 表面不能按、另有獨立按鍵的 discrete-pad）、Device Certification Status（0xFF00/0xC5 的 256 位元組；沒有這份報告 Windows
     不碰這個裝置，Microsoft 公布了一份預設 blob 可用）、選填 Latency Mode（0x60）、Button Press Threshold（0x0D/0xB0，
     Windows 11 26027 起讓使用者調點擊力道）。
   - 另一個頂層 Configuration（0x0D/0x0E）：Input Mode（0x52，0＝滑鼠、3＝PTP）、Surface Switch（0x57）／Button Switch（0x58）。
@@ -153,3 +153,44 @@ TRACKING_ID、MT_POSITION_X/Y、MT_TOOL_TYPE、MT_PRESSURE／PRESSURE 0..255、M
   沒有接觸大小就給固定值；host 不造假。
 - 「按下」由誰決定要先定：guest tap-to-click，或 app 判斷（例如長按或重按）送 BTN_LEFT，後者對應 Linux 的 PRESSUREPAD、
   Windows 的 Pad Type 1。
+
+## 11-10 三個層次的觸控板能力：手機、虛擬裝置、各 guest
+
+**手機（Android MotionEvent）。** 一定有：每個觸點的 pointer id、x/y（浮點）、事件時間（一幀內的歷史樣本）、按下／放開／取消
+（取消或 FLAG_CANCELED 表示系統判成誤觸）。選填：接觸大小、壓力、方向、工具類型。三台手機：接觸大小有（單位不明，只能當相對值），
+壓力沒有，方向沒有，TOUCH_MINOR 只有 PLK110；OnePlus 最多 10 點。
+
+**虛擬裝置（crosvm virtio-input，evdev 語意）。**
+- 一定送：slot、tracking ID、MT_POSITION_X/Y 和 ABS_X/Y（帶解析度）、BTN_TOUCH、BTN_TOOL_FINGER..QUINTTAP、MSC_TIMESTAMP。
+- 手機有才送：TOUCH_MAJOR/MINOR（正規化）。Android 判成誤觸的觸點送 MT_TOOL_PALM（libinput 當手掌、Windows 清 Confidence）。
+- 不送：壓力（手機沒有；Linux 收到 0 會忽略手指、≥130 當手掌）。
+- 點擊要選一種：
+  - 不宣告 BTN_LEFT：Linux 自動開 tap-to-click（實測），Windows PTP 用 Pad Type 2 不報按鍵（tap 由 Windows 自己做）。
+  - 宣告 BTN_LEFT（BUTTONPAD，或 Linux 7.1 的 PRESSUREPAD）＋app 判斷「按下」：Linux 的 tap 要使用者自己開；Windows Pad Type 0／1；
+    macOS 可以拿這個按下當 Force Click。
+
+**只有位置時 Linux 能做什麼（uinput 實測，scratchpad 的 tapdrag.c，libinput 1.25，裝置只有位置、沒有壓力和大小）：**
+
+| 動作 | tap 關（有 BTN_LEFT 時的預設） | tap 開（沒有 BTN_LEFT 時的預設） |
+|---|---|---|
+| 單指輕點 | 沒反應 | 左鍵 |
+| 雙指／三指輕點 | 沒反應 | 右鍵／中鍵 |
+| 點一下，64 ms 內再按住移動 | 只有移動 | 拖曳（左鍵按住，放開約 300 ms 後才放鍵） |
+| 點一下，400 ms 後再按住移動 | 只有移動 | 一次點擊，再移動 |
+| 按著 BTN_LEFT 移動 | 拖曳 | 拖曳 |
+| 開 drag lock，拖曳中抬手 120 ms 再拖 | — | 同一次拖曳 |
+
+三指拖曳要 libinput 1.28 以上。libinput 沒有 force click；接觸大小預設不用；壓力只拿來判觸碰和手掌。
+
+**各 guest：**
+- iPadOS：游標、輕點即點擊（設定）、點住再滑＝拖曳、雙指捲動和次要點按、捏合、三指回主畫面／切 app；輔助使用的
+  「指標控制」有點兩下拖移（版本間有出入，要在 guest 裡確認）。Apple 的 iPad 手勢表沒有 Force Click，觸控板上的「重按」就是點住不放，
+  所以不需要力度。要哪種裝置（Apple multitouch 或通用 HID Touch Pad）還沒逆向。
+- macOS：手勢只走 Apple 自己的 multitouch 驅動（黑蘋果用 VoodooInput 模擬 Magic Trackpad 2）。Force Touch 的模擬方式
+  （VoodooPS2）：1 按下＝Force Click、輕點＝一般點擊；2 接觸面積變大＝Force Click；4 依公式送壓力（3 直接送原值，不建議）。
+  VoodooRMI：按下加面積門檻，或只看面積。沒有面積就用 1；查詢與資料偵測器也可改成三指輕點。拖曳（按住拖、點兩下拖、三指拖）
+  都只要位置。
+- Linux：見上表。
+- Windows：現在的 vioinput 把它當絕對座標滑鼠，沒有任何手勢。有 PTP class 之後，點擊、點兩下拖曳、雙指右鍵、三／四指手勢都是 Windows
+  自己做，只要 Contact ID、Tip、Confidence、X/Y、Scan Time、Contact Count；Width/Height 選填（不能送 0，沒有就不宣告），
+  Pressure 選填。Windows 沒有 Force Click；pressure-pad 是裝置自己判斷「按下」送 Button。
