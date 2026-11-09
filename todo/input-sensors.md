@@ -85,9 +85,23 @@ app 對每個原生輸出的畫面都加這個裝置，不分 guest（Linux、Wi
 INPUT_PROP_POINTER＋BUTTONPAD；BTN_TOUCH、BTN_TOOL_FINGER..QUADTAP（沒有 QUINTTAP）、BTN_LEFT；ABS_MT_SLOT 0..10（11 個 slot）、
 TRACKING_ID、MT_POSITION_X/Y、MT_TOOL_TYPE、MT_PRESSURE／PRESSURE 0..255、MT_TOUCH_MAJOR/MINOR 0..4095、ABS_X/Y，全部沒有解析度。
 
-**手機能給什麼。** 兩台 OnePlus（PLK110、OPD2404）的手指觸控面板 `ABS_MT_PRESSURE` 是 0..0（Android 顯示 "unknown range"，
-PLK110 `touch.pressure.calibration: none`），手指沒有壓力；真正量到的是接觸大小 `ABS_MT_TOUCH_MAJOR` 0..255。所以 guest 要的「壓力」
-只能由接觸大小推算，或乾脆不給。
+**手機能給什麼。** 三台手機的手指觸控面板（getevent -lp、dumpsys input）：
+
+| 手機 | 壓力 | 接觸大小 | Android 的換算 |
+|---|---|---|---|
+| OnePlus PLK110 | `ABS_MT_PRESSURE` 0..0 | TOUCH_MAJOR、MINOR 0..255 | size GEOMETRIC，pressure none |
+| OnePlus OPD2404 | `ABS_MT_PRESSURE` 0..0 | TOUCH_MAJOR 0..255（沒有 MINOR） | size GEOMETRIC，pressure none |
+| Lenovo TB322FC（Novatek） | `ABS_MT_PRESSURE` 0..1 | TOUCH_MAJOR 0..255（沒有 MINOR） | size GEOMETRIC，pressure physical |
+
+- 沒有一台的手指有壓力。範圍 0..0 的軸 EventHub 當成不存在，`MotionEvent.getPressure()` 觸碰時固定 1.0；0..1 那台只有 0 或 1，
+  等於「有沒有碰到」。
+- 接觸大小也不是每台 Android 都有：Linux 多點觸控協定只要求位置，TOUCH_MAJOR／WIDTH_MAJOR 都是選填。沒有的話 Android 的
+  `touch.size.calibration` 是 none，`getTouchMajor()`、`getSize()` 都是 0。
+- 有的話單位也不可靠：三台都沒有 IDC 檔，GEOMETRIC 假設大小和位置同單位、照螢幕比例縮放，但位置是 0..21199 而大小只有 0..255，
+  換成畫素最多約 36 px（OPD2404，3000 px 寬），一根手指約 80 px。所以 app 只能把它當相對值（`getSize()`＝原始值／最大值），
+  不能當公釐。
+- 範圍是驅動宣告的；實際手指送出多少（會不會只有幾個固定值）要有人摸螢幕才量得到，還沒量。
+- 結論：guest 要的「壓力」只能由接觸大小推算，或乾脆不給；連接觸大小都要當成「可能沒有」。
 
 **Linux（libinput）：現在的裝置就能用，kernel 不用改。** 在 host 上用 uinput 做 crosvm 裝置的雙胞胎，讓 libinput 1.25 吃多指滑動
 （scratchpad 的 trackpad.c）：
@@ -134,7 +148,8 @@ PLK110 `touch.pressure.calibration: none`），手指沒有壓力；真正量到
   範圍也從這裡來。
 - slot 數 5、加 BTN_TOOL_QUINTTAP（Windows 最多 5 點）。
 - 送 MSC_TIMESTAMP（virtio 會成批送達，guest 要用裝置時間算速度；Windows 的 Scan Time 也從這裡來）。
-- 手指沒有壓力就不宣告 ABS_MT_PRESSURE；接觸大小照實送 TOUCH_MAJOR/MINOR。macOS／iPadOS 要的壓力或接觸強度，由 guest 驅動從接觸
-  大小推算，host 不造假。
+- 手指沒有壓力就不宣告 ABS_MT_PRESSURE；手機有接觸大小（InputDevice 有 AXIS_SIZE 的範圍）才宣告 TOUCH_MAJOR/MINOR，照實送
+  （正規化成 0..1 再換成裝置範圍，不用 Android 換算出的畫素）。macOS／iPadOS 要的壓力或接觸強度，由 guest 驅動從接觸大小推算，
+  沒有接觸大小就給固定值；host 不造假。
 - 「按下」由誰決定要先定：guest tap-to-click，或 app 判斷（例如長按或重按）送 BTN_LEFT，後者對應 Linux 的 PRESSUREPAD、
   Windows 的 Pad Type 1。
