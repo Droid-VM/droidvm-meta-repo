@@ -23,7 +23,8 @@
   - 手機 GNSS 晶片：GPS provider 的 fix（帶 GNSS 時間）加 GnssStatus 的衛星（星系、svid、C/N0、仰角方位角、是否參與、頻點），
     DOP 由參與定位衛星的幾何算。VM 執行期間晶片一直開著。
   - 僅位置：fused provider，每秒以現在時間報告、最多保留 60 s，搭配 8 顆固定的合成 GPS 衛星，GST 帶真實精度。
-  - 自動：daemon 依 `FEATURE_LOCATION_GPS` 決定。另有「標成模擬」開關（GGA 品質 8、RMC 模式 S）。
+  - 自動：兩個一起（11-10 晚起，見「自動＝接收器＋位置」）；手機沒有晶片（`FEATURE_LOCATION_GPS`）就等於僅位置。
+    另有「標成模擬」開關（GGA 品質 8、RMC 模式 S）。
 - 高度要有垂直精度才報（fused 的 0 m 是佔位值），用 AltitudeConverter 換成海平面高度；沒有就留空，不拿橢球高充數。
 
 **分工**
@@ -125,6 +126,21 @@ XNU 只收 ABS_X..ABS_RZ、motion HID 服務每 10 ms 輪詢，所以 iPadOS VM 
 - **真實晶片（精確位置、app 在前景）**：開始時 guest 收到 14 顆有 C/N0 的衛星，五個系統都有（晶片報 49 顆）；約 1 分鐘後 OPLUS
   的定位省電 `NavigationStatusLightMonitor`（靜止＋光感 0 lux）`stopNavigating`，之後天空變空。管線是通的；fix 要在戶外、
   手機不在靜止＋暗處時才看得到（還沒做到）。
+
+## 11-10 晚 自動＝接收器＋位置（app 6f28b91）
+
+使用者看到 GPS Status 一下定位中、一下有結果（螢幕逾時後背景節流＋OPLUS 靜止／暗處省電，GNSS 開約 60 s 就被關），要卡片能選後端、
+加一個自動選項。
+
+- **自動**：接收器有 fix 就送它的 fix 與衛星；某一秒沒有（室內，或手機省電關了 GNSS）就送 fused 位置，標成推算（GGA 品質 6、
+  RMC 模式 E；開了「標成模擬」則是 8／S），配僅位置那 8 顆合成衛星。手機沒有晶片時自動＝僅位置。
+- **「手機的 GNSS 接收器」**改成只用接收器：沒有 fix 時 guest 也沒有。
+- **不能用真實天空配推算位置**：gpsd 看到 GGA 的參與衛星數是 0 就當沒有 fix，不管品質欄。實測每個 epoch 會在 mode 1、2 之間閃
+  （欄位填 00 或空白都一樣，填 08 就穩定）。所以退回時改用合成衛星。
+- **編輯頁閃退（同一個 commit 修好）**：來源選單在卡片被重用、重新綁定時，`configure()` 觸發了上一次綁定的 listener，而那個 listener
+  在 layout 途中呼叫 `notifyItemChanged` → `IllegalStateException`。現在 `configure()` 前先拿掉 listener，選項改變時直接更新說明。
+- **驗證（5566 Ubuntu，從 app 啟動）**：三個選項的說明都對；反覆切換並把卡片捲出、捲回不再閃退；`GNSS sources 0 -> 3`
+  （接收器＋fused 都開）；室內 guest 的 gpsd 每個 epoch 都是 `status 5`（推算）、`mode 2`。`NmeaTest` 9 項通過。
 
 ## 10-30 TODO 7 電源鍵與音量鍵
 

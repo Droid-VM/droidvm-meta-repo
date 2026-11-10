@@ -10,6 +10,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 - ✅ **11-10** 震動馬達 host＋Linux guest 完成（crosvm f82707d2c、app 902fa32 本地、guest additions ed96a62）：virtio-input `vibrator`（FF_RUMBLE），guest 的 rumble 由 daemon 以 PHYSICAL_EMULATION 播在手機馬達上；5566 實測振幅與時長正確 → [細節](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
 - ✅ **11-10** 磁力計 host＋Linux guest 完成（crosvm cee8d210a、app 4ed9a06 本地、guest additions b21673b）：motion 裝置 `magnetometer=true` 加磁場（HAT0X/HAT0Y/HAT1X）與傾斜補償航向（HAT1Y）；Ubuntu 的 droidvm-compass 模組發佈成 IIO 指南針，`monitor-sensor --compass` 有航向 → [細節](todo/input-sensors.md#11-10-磁力計hostlinux-guest)
+- ✅ **11-10** GNSS 卡片的「自動」＝接收器＋手機位置：接收器沒有 fix（室內、OPLUS 省電關掉 GNSS）時改送 fused 位置，標成推算（app 6f28b91 本地，順手修了來源選單的閃退）→ [細節](todo/input-sensors.md#11-10-晚-自動接收器位置app-6f28b91)
 - ✅ **11-10** GNSS 接收器 host＋Linux guest 完成（crosvm 91724fac2、app 6e38a07 本地、guest additions 5c5f270）：具名 virtio-console port `org.droidvm.gnss.0` 送 NMEA 4.11（所有星系一條串流），來源可選手機 GNSS 晶片或僅位置（合成衛星）；Ubuntu 的 gpsd 開機自動接上 → [細節](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)
 - ✅ **11-08** Notes 的觸控筆壓感修好（device de1061a）：壓力改成 0..500、`AccurateMaxDigitizerPressureValue` 500（UIKit force＝壓力÷120，PencilKit 用 force 絕對值），5567 實測 0.1 畫 12 px、1.0 畫 38 px（[細節](todo/input-sensors.md#11-08-觸控筆壓感與橡皮擦端)）
 - ✅ **11-08** GPU 正確性＋穩定性收尾，效能先告一段落：5567（Adreno 750）回歸 MetalCheck 41/41、GFXBench 三項跑完、UI 與毛玻璃正常；metal2vulkan 現況與瓶頸見 [todo](todo/metal2vulkan.md)
@@ -662,11 +663,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
    （11-02，device 1479852、9d5a0ce、706338e）已通；相機還沒接。下一步：Safari／AVPlayer 播放與錄影類 App、1080p、
    VP9／AV1 解碼。→ [細節](todo/audio-media.md#10-28-todo-4-vpu-與相機)
 5. **地理位置（GPS、磁力計、震動；Wi-Fi 唯讀不做）。**11-10 使用者排定 GPS → 磁力計 → 震動馬達，先做 host＋Linux guest。
-   GPS 的 host＋Linux 完成（見已完成 11-10）；剩：戶外實測真實晶片的 fix（室內 5566 只有星曆、OPLUS 的 FreezeControl 會凍結靜止
-   手機的 GPS listener）、iPadOS（J120 的 locationd 不啟動 GNSS，要換 J121AP 身分，路線 port → XNU → gpsd 外掛）、Windows。
-   磁力計、震動的 host＋Linux 也完成（見已完成 11-10）；11-10 晚在 5566 上機驗過卡片、權限、console 覆寫、整包安裝，修了大概位置
-   要等 10 分鐘的問題（app 1d02de6）。剩：真實晶片在戶外的 fix（OPLUS 靜止＋暗處會關 GNSS）、iPadOS（GPS 換 J121AP、compass
-   HID；iPad 沒有震動）、Windows。
+   三項的 host＋Linux 都完成，11-10 晚在 5566 上機驗過（見已完成 11-10）；GNSS 的「自動」在室內退回手機位置。
+   剩：真實晶片在戶外的 fix（OPLUS 靜止＋暗處會關 GNSS）、iPadOS（GPS 換 J121AP、compass HID；iPad 沒有震動）、Windows。
    → [GNSS](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)、[磁力計](todo/input-sensors.md#11-10-磁力計hostlinux-guest)、[震動](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
 6. ✅ **電池：已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）
    → powerd → SpringBoard，放電、充電都驗過。memory [[droidvm-battery]]。
