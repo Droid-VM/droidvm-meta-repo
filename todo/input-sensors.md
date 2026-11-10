@@ -108,6 +108,24 @@ XNU 只收 ABS_X..ABS_RZ、motion HID 服務每 10 ms 輪詢，所以 iPadOS VM 
 
 **還沒做**：卡片沒上機看過；Windows（HID haptics 或 XInput 震動）；iPadOS 不需要（iPad 沒有 Taptic Engine）。
 
+## 11-10 晚 三項的上機驗證（5566，畫面解鎖）
+
+- **卡片與權限（繁中 UI）**：GNSS 卡片拒絕權限 → 提示「未授予位置權限，因此沒有新增 GNSS 接收器」、不加卡片；第二次先出現
+  我們的說明對話框再到系統對話框；只給大概位置 → 提示「只允許了大概位置…」並加上卡片。來源選單（自動／GNSS 接收器／
+  僅位置）會換說明；「標成模擬」開關；GNSS 與 Vibrator「只能有一個」；GyroScope 的「磁力計」開關預設開；Vibrator 卡片
+  說明手機有馬達。存檔寫進 vms.json，重開編輯頁還在；從清單啟動時 crosvm 參數帶齊三個裝置；刪卡片也正常。
+- **console 覆寫**：console 在前景、畫面方向 0 時，guest 的磁場等於手機 ak0991x 的讀數；畫面右轉一格後 guest 收到
+  (x, y) → (−y, x)、航向 +90°（227° → 318°），手機自己的讀數不變 → 是 app 轉過再送的。
+- **guest additions 整包安裝**（r25 → r29 deb，`dpkg -i`）：80 s，dkms 對兩個 kernel 都編好五個模組；重開機後 droidvm-compass、
+  droidvm-vibrator、virtio_gpu、gunyah_guest 從 updates/dkms 載入（virtio_media 沒載是因為這台沒開 VPU），桌面正常；
+  兩條 udev 規則、gpsd AppArmor 那行都在。震動用套件裡的模組：0x6000 → 振幅 0.376、900 ms。
+- **找到並修好（app 1d02de6）**：只給大概位置時 Android 把 fused 的 1 s 請求改成每 10 分鐘一次（`@+10m LOW_POWER`），最後已知位置
+  又可能是空的 → 開機要等最多 10 分鐘才有 fix，之後每次更新 60 s 就掉。現在啟動時取各 provider 最新的最後位置並
+  `getCurrentLocation` 一次，僅位置模式保留 15 分鐘。驗證：開機 30 s 內有 fix（GGA 品質 8、RMC 模式 S、GST σ 約 1.3 km），撐過 60 s。
+- **真實晶片（精確位置、app 在前景）**：開始時 guest 收到 14 顆有 C/N0 的衛星，五個系統都有（晶片報 49 顆）；約 1 分鐘後 OPLUS
+  的定位省電 `NavigationStatusLightMonitor`（靜止＋光感 0 lux）`stopNavigating`，之後天空變空。管線是通的；fix 要在戶外、
+  手機不在靜止＋暗處時才看得到（還沒做到）。
+
 ## 10-30 TODO 7 電源鍵與音量鍵
 
 **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**

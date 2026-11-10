@@ -664,8 +664,9 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 5. **地理位置（GPS、磁力計、震動；Wi-Fi 唯讀不做）。**11-10 使用者排定 GPS → 磁力計 → 震動馬達，先做 host＋Linux guest。
    GPS 的 host＋Linux 完成（見已完成 11-10）；剩：戶外實測真實晶片的 fix（室內 5566 只有星曆、OPLUS 的 FreezeControl 會凍結靜止
    手機的 GPS listener）、iPadOS（J120 的 locationd 不啟動 GNSS，要換 J121AP 身分，路線 port → XNU → gpsd 外掛）、Windows。
-   磁力計、震動的 host＋Linux 也完成（見已完成 11-10）。三項都剩：卡片與 console 覆寫上機看過（5567 有 PIN 鎖著）、
-   iPadOS（GPS 換 J121AP、compass HID；iPad 沒有震動）、Windows。
+   磁力計、震動的 host＋Linux 也完成（見已完成 11-10）；11-10 晚在 5566 上機驗過卡片、權限、console 覆寫、整包安裝，修了大概位置
+   要等 10 分鐘的問題（app 1d02de6）。剩：真實晶片在戶外的 fix（OPLUS 靜止＋暗處會關 GNSS）、iPadOS（GPS 換 J121AP、compass
+   HID；iPad 沒有震動）、Windows。
    → [GNSS](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)、[磁力計](todo/input-sensors.md#11-10-磁力計hostlinux-guest)、[震動](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
 6. ✅ **電池：已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）
    → powerd → SpringBoard，放電、充電都驗過。memory [[droidvm-battery]]。
