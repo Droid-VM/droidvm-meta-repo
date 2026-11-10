@@ -280,7 +280,7 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
 - 設定 → 一般 出現 **Trackpad** 頁（追蹤速度、自然捲動、點一下來按一下、兩指輔助按一下）；5567 上已打開「點一下來按一下」。
 - 游標位置是對的：左右滑動游標跟著走、推到邊緣停住；SpringBoard／App 收到 hover（log 的 "Entered region"：狀態列、
   小工具 376×180、圖示 87.5×87.5；視窗化 App 右下角的縮放角、側欄邊緣提示都會出現）。
-- **還沒好：游標本身沒畫出來。** pointeruid "Unhiding pointer"、狀態 Visible，但游標在畫面中間時截圖差異找不到；
+- **游標本身沒畫出來（11-10 修好，根因和修法見本段最後的「根因」）。** pointeruid "Unhiding pointer"、狀態 Visible，但游標在畫面中間時截圖差異找不到；
   輔助使用 → 指標控制 打開「增加對比」、最大尺寸、關掉自動隱藏也一樣；@1x（1024×1366）和 @2x（2048×2732）都一樣。
   - @1x 另有比例不一致：backboardd "StartWindowServer: MG scale:2 display preferredScale:1"，window server display 是
     scale 2，游標區域 512×683（ffeb241 的 fixup 只改 preferredScale；MG main-screen-scale 仍是 2）。@2x 時區域 1024×1366。
@@ -301,6 +301,36 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
       "3 passes (offscreen-flags [backdrop-copy mask])"。matrix 的 alpha 列 = 0.208r+0.232g+0.045b+a−0.403：backdrop 取到
       全透明時 alpha 夾成 0，游標就完全看不見 → 嫌疑是 backdrop-copy（離屏、有 mask、經 portal）在 metal2vulkan 上取到空的。
     - 下一步：`gfxprobe cabackdrop` 逐步重現（backdrop、加 matrix、加 mask、加 0.85 群組、經 portal），找出哪一步變透明。
+    - **根因方向（11-10 晚）：只有橫向介面看不到。** `gfxprobe orient 1`（直向，不旋轉）後游標正常出現（灰色箭頭＋紅框，會跟著
+      移動）。橫向時 iPadOS 把整個介面轉 90° 畫在直向的 1024×1366 framebuffer 上，pointeruid 的視窗根層帶旋轉；游標的離屏群組
+      （backdrop-copy＋mask）在旋轉下畫不出來，推到邊緣才畫出條紋。我的未旋轉測試方塊（cabackdrop 0–11）都正常，滑鼠模式也一樣
+      看不到 → 跟觸控板無關。CA_PRINT_OFFSCREENS（cadebug 31）：橫向時游標在中間的幀幾乎沒有它的 mask／backdrop-copy pass。
+    - **根因（11-10 晚，修好）：CoreAnimation 自己在「GPU 旋轉 framebuffer」這條路上的路徑覆蓋率算錯，不是 metal2vulkan。**
+      - 重現：`gfxprobe cabackdrop` 第 12、13 格用游標的箭頭路徑（三次曲線）當 mask，一格紅色圖層、一格 backdrop。直向畫得出來，
+        橫向兩格都空 → 不需要 backdrop／portal，任何曲線路徑的 shape mask 在橫向都會消失。
+      - 橫向時 framebuffer 紋理是 rot3（frame 1366×1024，存成直向 1024×1366 的 IOSurface）。路徑的 pass：path_clear／path_rect／
+        path_cubic 把覆蓋率累加進 memoryless R32Float（c2），path_blit 用 framebuffer fetch 讀回。path_*_frag 拿 `[[position]]`
+        跟 vertex shader 算的像素座標比，而 vertex shader 用一個「viewport」uniform（vertex buffer 5）把 NDC 換成像素：CA 傳的是
+        `1024 1366`（surface 未轉的尺寸），pass 的 frame／viewport 卻是 1366×1024 → 覆蓋率幾乎全 0，只在兩套座標剛好重疊的邊緣有值
+        （= 推到邊緣看到的條紋）。QuartzCore：`PathFiller` 建構子讀 `context->surface(+0x2d0)` 的 +0x30／+0x34，而
+        `MetalContext::get_surface` 把 WindowServer surface 的寬高（+0x38，IOSurface 的 1024×1366）原樣放進 +0x30，轉過的寬高另存。
+      - 不是 metal2vulkan：`gfxprobe rotfetch W H ROT FLAGS`（旋轉 fbonly c0＋memoryless R32Float c2，清除／加覆蓋率／fetch 讀回）
+        在 rot 0／1／3 各種組合都對（4720/4800）。Mac M4 上真的 Metal（scratchpad ptr/rotpos.m）：旋轉 target 的 `[[position]]` 是
+        frame 座標，CA 的公式用 vp 1366×1024 → 5103 個紅點，用 1024×1366 → 只剩 1449。也就是這條路在 Apple 硬體上一樣會壞。
+      - 為什麼會走到這條路：backboardd 的 `UpdateMirroredDisplayOrientationWithInterfaceOrientationForSource:` 依介面方向對 CA
+        顯示器 `setOrientation:`（log "Updating external display interface orientation from portrait to landscapeLeft"；來源 UUID
+        空時取 `[CADisplay mainDisplay].uniqueId`，所以轉的就是主顯示器）。顯示器能旋轉掃描輸出時（`display_supports_rotation_p`：
+        IOMFB 的 IOMFBSupportsRotation＋壓縮過的 framebuffer surface），CA 交給顯示器轉；否則它用 Metal 的 rotation 自己轉。
+        真機的 DCP 吃 AGX 壓縮 framebuffer，不會走 GPU 旋轉；我們沒有壓縮格式，只能走它。
+      - 試過但沒用：kernel 顯示驅動加 IOMFBSupportsRotation=YES（log 變 "Rotation Support Enabled: YES"，swap 全部接受），
+        framebuffer 照樣是 rot3、箭頭還是空的 → 已還原，沒提交。
+      - **修法（device 8d8f023）：backboardd 設定 `BKForceMirroredOrientation = portrait`**（mobile 的 com.apple.backboardd；BKSDefaults
+        forceMirroredOrientation：backboardd 開機時把顯示器設成它，之後忽略鏡像方向更新）。CA 顯示器維持 rot0，畫面像素一樣（GPU
+        旋轉本來就是轉進 frame 再存回去），路徑 mask 正確，也省掉每個 pass 旋轉 framebuffer 的進出複製。5567 實測：橫向鎖定畫面／
+        主畫面正確，第 12、13 格箭頭畫出來，觸控板游標（灰色箭頭＋紅框）在橫向跟著移動。
+        - 新 seed：`build-droidvm-data-seed.py` 的 PREFS 加上這一項。既有 VM（新 seed＝新 Data UUID，不要重做）：
+          `tools/rig/guest-pref.py mobile com.apple.backboardd BKForceMirroredOrientation=portrait --restart backboardd`。
+        - 副作用：CADisplay currentOrientation 永遠 rot0；只影響鏡像到外接顯示器（AirPlay）時的方向，這台沒有。
   - 多指注入工具（scratchpad xnu-tp/mt：mtinject.c 靜態 aarch64、mtgesture.py）：直接寫 5567 的 /dev/input/event6，Android
     收到真的多指 MotionEvent。座標：畫面 x = raw y/10、y = 2120 − raw x/10。注意：點到 app 工具列返回鍵會離開顯示頁，再打開
     就是 "Failed to start native display"，要 vm.sh 重開。
