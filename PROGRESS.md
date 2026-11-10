@@ -1,6 +1,6 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-08。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-10。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
@@ -8,6 +8,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-10** GNSS 接收器 host＋Linux guest 完成（crosvm 91724fac2、app 6e38a07 本地、guest additions 5c5f270）：具名 virtio-console port `org.droidvm.gnss.0` 送 NMEA 4.11（所有星系一條串流），來源可選手機 GNSS 晶片或僅位置（合成衛星）；Ubuntu 的 gpsd 開機自動接上 → [細節](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)
 - ✅ **11-08** Notes 的觸控筆壓感修好（device de1061a）：壓力改成 0..500、`AccurateMaxDigitizerPressureValue` 500（UIKit force＝壓力÷120，PencilKit 用 force 絕對值），5567 實測 0.1 畫 12 px、1.0 畫 38 px（[細節](todo/input-sensors.md#11-08-觸控筆壓感與橡皮擦端)）
 - ✅ **11-08** GPU 正確性＋穩定性收尾，效能先告一段落：5567（Adreno 750）回歸 MetalCheck 41/41、GFXBench 三項跑完、UI 與毛玻璃正常；metal2vulkan 現況與瓶頸見 [todo](todo/metal2vulkan.md)
 - ✅ **11-08** 10-29 那次 5567 backboardd 在 `ShadowTarget::Rotated` 的 NULL deref 沒再出現：5567 的 render server 每幀都走 rotated 路徑，11-04 起多次開機與今天的回歸都正常
@@ -658,9 +659,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
    P-9 的 soak（`plans/VPU_DESIGN.md` §7.8）。iPadOS：virtio-media 傳輸層（10-29）與 VideoToolbox paravirt 解碼、編碼
    （11-02，device 1479852、9d5a0ce、706338e）已通；相機還沒接。下一步：Safari／AVPlayer 播放與錄影類 App、1080p、
    VP9／AV1 解碼。→ [細節](todo/audio-media.md#10-28-todo-4-vpu-與相機)
-5. **地理位置（磁力計、GPS、Wi-Fi 唯讀）。**GPS 調查完、暫停（使用者 10-28 指示）：J120 上 locationd 不啟動 GNSS，要換
-   J121AP 身分；路線 virtio-console（NMEA）→ `/dev/cu.gps` → gpsd。磁力計走第 1 項的 HID 路徑（未做）；Wi-Fi 唯讀太重，
-   暫不做。→ [細節](todo/input-sensors.md#10-28-todo-5-地理位置)
+5. **地理位置（GPS、磁力計、震動；Wi-Fi 唯讀不做）。**11-10 使用者排定 GPS → 磁力計 → 震動馬達，先做 host＋Linux guest。
+   GPS 的 host＋Linux 完成（見已完成 11-10）；剩：戶外實測真實晶片的 fix（室內 5566 只有星曆、OPLUS 的 FreezeControl 會凍結靜止
+   手機的 GPS listener）、iPadOS（J120 的 locationd 不啟動 GNSS，要換 J121AP 身分，路線 port → XNU → gpsd 外掛）、Windows。
+   磁力計、震動接著做。→ [細節](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)
 6. ✅ **電池：已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）
    → powerd → SpringBoard，放電、充電都驗過。memory [[droidvm-battery]]。
 7. **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**iPadOS 上是 Consumer page（0x0C）的

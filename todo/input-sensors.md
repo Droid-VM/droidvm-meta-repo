@@ -12,6 +12,49 @@
 - 磁力計：手機有 mmc56x3x，走第 1 項的 HID 路徑（未做）。
 - Wi-Fi 唯讀：survey 過，kernel 沒有 IO80211 family、真驅動是 DriverKit，太重，暫不做。
 
+## 11-10 GNSS 接收器（host＋Linux guest）
+
+使用者 11-10 排定：GPS → 磁力計 → 震動馬達，先做 host（app 定位權限、卡片、crosvm 串接）與 Linux guest，iOS 晚點。
+
+**設計**
+- guest 看到一顆 GNSS 接收器：virtio-console 具名 port `org.droidvm.gnss.0`，每秒一個 NMEA 0183 4.11 epoch，所有星系一條串流：
+  RMC／GGA／GST 用 `GN`（一個合算解）；GSA 每個系統一句，最後一欄是系統 ID；GSV 依系統＋頻點分組（`GP GL GA GB GQ GI`，帶 signal ID）。
+- 來源由卡片選（`GnssSource`）：
+  - 手機 GNSS 晶片：GPS provider 的 fix（帶 GNSS 時間）加 GnssStatus 的衛星（星系、svid、C/N0、仰角方位角、是否參與、頻點），
+    DOP 由參與定位衛星的幾何算。VM 執行期間晶片一直開著。
+  - 僅位置：fused provider，每秒以現在時間報告、最多保留 60 s，搭配 8 顆固定的合成 GPS 衛星，GST 帶真實精度。
+  - 自動：daemon 依 `FEATURE_LOCATION_GPS` 決定。另有「標成模擬」開關（GGA 品質 8、RMC 模式 S）。
+- 高度要有垂直精度才報（fused 的 0 m 是佔位值），用 AltitudeConverter 換成海平面高度；沒有就留空，不拿橢球高充數。
+
+**分工**
+- crosvm 91724fac2（兩個 wip 分支都推了）：`--serial ...,name=X` 的 virtio-console 改成 multiport（名字只能經 control queue 送），
+  guest 沒開 port 時丟棄輸入（否則無上限累積、開啟時讀到舊資料）。沒名字的 console 與 vhost-user console 不變。
+- app 6e38a07（本地）：`PeripheralType.VIRTIO_GNSS`（前景服務型別 location）、卡片（來源、說明、標成模擬）、`LocationPermission`
+  （新增卡片時要權限，精確與大概一起問，拒絕就不加）。`PeripheralForegroundService` 帶 location 型別時跑 `GnssFeeder`（app uid）
+  → `gnss_feed` → daemon 的 `GnssHub` 寫每台 VM 一個非阻塞 pipe（`--serial type=sink,hardware=virtio-console,name=...,input=/proc/self/fd/N`）。
+  沒有權限時服務只拿掉 location 型別，不連累相機。feeder 每 5 s 心跳，daemon 15 s 沒聽到就重新拉起服務（退避到 5 分鐘）。
+- guest additions 5c5f270（`wip/hackintosh`）：udev 規則（dialout、`/dev/gnss-droidvm`、`gpsdctl@`）；在 gpsd 的
+  `local/usr.sbin.gpsd` 加 `/dev/vport*` 的 AppArmor 規則（有標記，移除套件時只拿掉自己那段）。
+
+**驗證**
+- 5567（沒有 GNSS 晶片）的 Ubuntu：卡片「自動」顯示「這支手機沒有 GNSS 接收器」；新增時跳出系統定位權限；guest 有
+  `/dev/virtio-ports/org.droidvm.gnss.0`；gpsd 開機經 udev 自動接上（NMEA0183、TPV 2D、eph 來自 GST）；殺掉 app 進程 11 s 後恢復。
+- 5566（Qualcomm 雙頻）真實晶片模式：GSV 有 GPS 13、GLONASS 7、Galileo 13、北斗 15、QZSS 3（星曆位置）；室內沒有訊號、沒有 fix。
+- `NmeaTest`（82 字元上限、checksum、編號、signal ID、DOP、GST sigma）；guest additions 的 `test-hooks.sh` 新增 6 項通過（原本那 1 項失敗不變）。
+- 測試後的狀態：5567 的 Ubuntu VM 留著 GNSS 卡片，guest 裝了 gpsd（gpsd-clients 下載到一半被我中止，沒裝上）；5566 的 Ubuntu
+  設定已還原、定位權限已撤銷，app 與 crosvm 維持新版，UniXNU 27 已重新開機。
+
+**陷阱**
+- Ubuntu 的 gpsd AppArmor profile 只允許 tty／pps／rfcomm，開 `/dev/vport*` 是 EACCES；symlink 沒用（AppArmor 看實際節點）。
+- OPLUS 的 FreezeControl 會凍結「靜止、判定在室內」的手機上 app 的 GPS listener（`dumpsys location` 有 `freezed(gpsListener: 1)`）。
+- 編輯頁存檔只寫 app 的 `vms.json`；從 app 啟動 VM 時才以 `vm_modify` 推給 daemon（只用 IPC `vm_start` 的話 daemon 沒有新設定）。
+- `test-hooks.sh` 有案例不經 `run_case` 直接 source hooks：新的路徑覆寫要 export，否則會寫到跑測試那台機器的 `/etc`（發生過一次，已清掉）。
+
+**還沒做**
+- 戶外實測真實晶片的 fix；星系勾選（現在送 host 有的全部）；guest 開 port 才開晶片（crosvm 已追蹤 port 開關，還沒告訴 daemon）。
+- iPadOS：J120 的 locationd 不啟動 GNSS → 換 J121AP；port → XNU → gpsd 外掛（見上面 10-28）。
+- Windows：沒有內建 NMEA 驅動，要另寫 GNSS driver。rpm（Fedora）的 SELinux 沒處理。
+
 ## 10-30 TODO 7 電源鍵與音量鍵
 
 **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**
