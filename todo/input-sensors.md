@@ -341,6 +341,12 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
     約 1–1.5 s 後跳出右鍵選單（拷貝／在背景打開／編輯／分享／刪除）。第一次以為沒反應是 2 s 內截圖太早；延遲比真機長，之後可再看。
   - BKForceMirroredOrientation 的副作用檢查：介面方向照樣跟著裝置（App 版面、主畫面橫排、另一個橫向會翻過來），只是 CA 顯示器
     的 currentOrientation 固定 rot0。橫向截圖（⌘⇧3）存成 1366×1024、方向正確，跟修之前的截圖一樣。
+  - 四個方向（11-10，用 app 選單的「Display 轉向」按鈕：轉畫面、也轉餵給 guest 的重力）：轉向值 0／1／2／3 對到
+    portrait／landscapeRight／portraitUpsideDown／landscapeLeft（backboardd log），每個方向主畫面版面都是正的、游標畫得出來，
+    觸控板手指往右／往下游標就往右／往下（截圖差分量位移）。工具：scratchpad xnu-tp/mt/approtate.sh（先看選單開了沒再按，
+    取樣點要在 guest 畫面外：(2900,1830)），mode.sh 同樣改了，ptrmove.py（兩張截圖差分找紅框游標）。
+  - 待查：一次 App 切換器開著時轉向，切換器卡片排成新方向，但 Dock 和卡片快照停在舊方向（之後轉回主畫面就正常）。還沒重現第二次，
+    也還不知道跟 BKForceMirroredOrientation 有沒有關係（要 A/B）。
   - device fe3b622：手指停著時每 8 ms 重送（真的 MT2 一直送；app 端停著只每 50 ms 送）：停 2 秒 45 → 222 份 report。
   - 既有的雜訊：swap_wait 0xe00002d5（觸控板之前就有）、sharingd／AttentionAwareness 監看連線 overrun。
 - 驗證工具：`gfxprobe ioreg CLASS`（guest-run.sh）、`guest-newlogs.sh` 後篩 com.apple.Multitouch／PointerUI／BKSendHIDEvent；
