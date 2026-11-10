@@ -55,6 +55,32 @@
 - iPadOS：J120 的 locationd 不啟動 GNSS → 換 J121AP；port → XNU → gpsd 外掛（見上面 10-28）。
 - Windows：沒有內建 NMEA 驅動，要另寫 GNSS driver。rpm（Fedora）的 SELinux 沒處理。
 
+## 11-10 磁力計（host＋Linux guest）
+
+**設計**
+- 沿用 motion 這個 virtio-input 裝置（同一幀有重力向量，guest 才能做傾斜補償；app 的畫面校正也一起轉）。crosvm
+  `--input motion[...,magnetometer=true]` 多宣告四個軸：磁場 `ABS_HAT0X/HAT0Y/HAT1X`（每 µT 16 單位，±2048 µT）、
+  航向 `ABS_HAT1Y`（從磁北到裝置 Y 軸、順時針、傾斜補償，0.01°）。evdev 沒有磁場的碼，hat 是加速度計不會有的軸，讀者
+  分得出來；語意等同 HID Compass 3D（磁場＋航向）。
+- 航向用 Android `SensorManager.getRotationMatrix`／`getOrientation` 的算法（east＝磁場×反作用力、north＝反作用力×east）。
+  crosvm 用最新的加速度算；app 的 console 覆寫時，用轉過的磁場與加速度重算（畫面轉了，guest 面板的航向就不是手機的）。
+- Linux：guest additions 第四個 DKMS 模組 `droidvm-compass`：input handler 綁「加速度計＋四個 hat 軸」的裝置，發佈成
+  IIO 磁力計，通道比照 hid-sensor-magn-3d（`in_magn_{x,y,z}` 高斯、`in_rot_from_north_magnetic_tilt_comp` 度），
+  triggered buffer＋名為 `<name>-dev<N>` 的 trigger（iio-sensor-proxy 就是這樣找 trigger）。udev 依 modalias 自動載入。
+
+**commit**：crosvm cee8d210a（兩個 wip 分支）、app 4ed9a06（本地；GyroScope 卡片加「磁力計」開關，新列與舊列預設開）、
+guest additions b21673b（`wip/hackintosh`）。
+
+**驗證（5567 Ubuntu）**：motion 裝置 `ABS=f003f`（多了 HAT0X–HAT1Y）；模組在裝置加入時自動載入，`iio:device0 droidvm-compass`、
+trigger `droidvm-compass-dev0`；iio-sensor-proxy 標成 `iio-buffer-compass`，`monitor-sensor --compass` 每次變化都報航向；
+磁場與手機 mmc56x3x 自己的讀數一致到 0.01 µT（這台平板周圍磁鐵很強，|B| 約 850 µT）。航向公式以四個已知方向測過。
+XNU 只收 ABS_X..ABS_RZ、motion HID 服務每 10 ms 輪詢，所以 iPadOS VM 多了這些軸不受影響。
+
+**還沒做**
+- console 覆寫路徑（HostMotionSensor 送磁場＋航向）與卡片開關沒有上機看過：5567 鎖著（有 PIN），這次的列是 IPC 加的。
+- 完整套件安裝（dkms 一次編四個模組、重建 initramfs）沒跑，只在 guest 單獨編了這個模組。
+- iPadOS：XNU 把這四個軸轉成 compass HID 服務（CoreMotion／locationd 的 heading）；Windows：HID Sensor Compass 3D。
+
 ## 10-30 TODO 7 電源鍵與音量鍵
 
 **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**
