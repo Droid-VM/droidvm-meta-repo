@@ -81,6 +81,33 @@ XNU 只收 ABS_X..ABS_RZ、motion HID 服務每 10 ms 輪詢，所以 iPadOS VM 
 - 完整套件安裝（dkms 一次編四個模組、重建 initramfs）沒跑，只在 guest 單獨編了這個模組。
 - iPadOS：XNU 把這四個軸轉成 compass HID 服務（CoreMotion／locationd 的 heading）；Windows：HID Sensor Compass 3D。
 
+## 11-10 震動馬達（host＋Linux guest）
+
+**設計**
+- crosvm `--input vibrator[path=,name=]`：只聽不報的 virtio-input 裝置，宣告 `EV_FF`/`FF_RUMBLE`，ids `BUS_VIRTUAL 4456:0001`。
+  guest 經 status queue 每次變化送一個事件：`EV_FF`、code `FF_RUMBLE`、value 高 16 位元 strong、低 16 位元 weak（都 0 是停）。
+  計時由 guest 做（Linux memless），host 只照著強度。crosvm 本來就把 EV_MSC 以外的 status 寫回 socket。
+- daemon：input bridge 多一個 VM 層級的 channel `VIBRATOR`（`_vib.sock`），讀回的紀錄交給 `HostVibrator`：取所有 VM 中最強的
+  強度，以 `USAGE_PHYSICAL_EMULATION`（手把震動；背景也允許）在預設馬達上播 one-shot（最長 5 s，每次變化重發，guest 停止
+  說話也不會一直震）；VM 停止時一併停。root 呼叫 VibratorManagerService 不檢查 package。不需要前景服務。
+- Linux：stock virtio_input 只回送 LED 與聲音、不給 FF，所以 guest additions 第五個模組 `droidvm-vibrator`：綁 4456:0001，
+  註冊 "DroidVM Vibrator"（4456:0002，避免綁到自己）帶 memless FF_RUMBLE，播放時經 host 裝置自己的 event callback 送出
+  （input_inject_event 會丟掉 EV_FF）。udev 規則標 `FEEDBACKD_TYPE=vibra` 給 feedbackd。
+- 只在有輸出畫面的 VM（有 input bridge）才有；卡片說明手機有沒有馬達。
+
+**commit**：crosvm f82707d2c（兩個 wip 分支）、app 902fa32（本地）、guest additions ed96a62（`wip/hackintosh`）。
+
+**驗證**：5566（PLK110）Ubuntu：開機依 modalias 自動載入；EVIOCSFF rumble 0xc000 → 振幅 0.749、播 1500 ms 後停，0xffff → 1.0、
+700 ms（vibrator HAL log；dumpsys 記為 uid 0 的 PHYSICAL_EMULATION）；rmmod／modprobe 後仍只有一個 rumble 裝置；
+`FEEDBACKD_TYPE=vibra`。5567（沒有馬達）：daemon 記一次「沒有震動器」。
+
+**陷阱**
+- crosvm 的 `virtio_input_device_ids::new` 參數順序是 `(bustype, product, vendor, version)`（第一版 vendor/product 反了）。
+- input handler 的 connect／disconnect 持有 input core 的鎖，裡面呼叫 `input_(un)register_device` 會卡住（第一版 insmod 卡死，
+  只能 kill）；改由 ordered workqueue 註冊／移除。
+
+**還沒做**：卡片沒上機看過；Windows（HID haptics 或 XInput 震動）；iPadOS 不需要（iPad 沒有 Taptic Engine）。
+
 ## 10-30 TODO 7 電源鍵與音量鍵
 
 **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**

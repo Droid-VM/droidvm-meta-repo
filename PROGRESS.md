@@ -8,6 +8,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-10** 震動馬達 host＋Linux guest 完成（crosvm f82707d2c、app 902fa32 本地、guest additions ed96a62）：virtio-input `vibrator`（FF_RUMBLE），guest 的 rumble 由 daemon 以 PHYSICAL_EMULATION 播在手機馬達上；5566 實測振幅與時長正確 → [細節](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
 - ✅ **11-10** 磁力計 host＋Linux guest 完成（crosvm cee8d210a、app 4ed9a06 本地、guest additions b21673b）：motion 裝置 `magnetometer=true` 加磁場（HAT0X/HAT0Y/HAT1X）與傾斜補償航向（HAT1Y）；Ubuntu 的 droidvm-compass 模組發佈成 IIO 指南針，`monitor-sensor --compass` 有航向 → [細節](todo/input-sensors.md#11-10-磁力計hostlinux-guest)
 - ✅ **11-10** GNSS 接收器 host＋Linux guest 完成（crosvm 91724fac2、app 6e38a07 本地、guest additions 5c5f270）：具名 virtio-console port `org.droidvm.gnss.0` 送 NMEA 4.11（所有星系一條串流），來源可選手機 GNSS 晶片或僅位置（合成衛星）；Ubuntu 的 gpsd 開機自動接上 → [細節](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)
 - ✅ **11-08** Notes 的觸控筆壓感修好（device de1061a）：壓力改成 0..500、`AccurateMaxDigitizerPressureValue` 500（UIKit force＝壓力÷120，PencilKit 用 force 絕對值），5567 實測 0.1 畫 12 px、1.0 畫 38 px（[細節](todo/input-sensors.md#11-08-觸控筆壓感與橡皮擦端)）
@@ -663,8 +664,9 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 5. **地理位置（GPS、磁力計、震動；Wi-Fi 唯讀不做）。**11-10 使用者排定 GPS → 磁力計 → 震動馬達，先做 host＋Linux guest。
    GPS 的 host＋Linux 完成（見已完成 11-10）；剩：戶外實測真實晶片的 fix（室內 5566 只有星曆、OPLUS 的 FreezeControl 會凍結靜止
    手機的 GPS listener）、iPadOS（J120 的 locationd 不啟動 GNSS，要換 J121AP 身分，路線 port → XNU → gpsd 外掛）、Windows。
-   磁力計的 host＋Linux 也完成（見已完成 11-10），剩 console 覆寫路徑上機實測與 iPadOS／Windows；震動接著做。
-   → [GNSS](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)、[磁力計](todo/input-sensors.md#11-10-磁力計hostlinux-guest)
+   磁力計、震動的 host＋Linux 也完成（見已完成 11-10）。三項都剩：卡片與 console 覆寫上機看過（5567 有 PIN 鎖著）、
+   iPadOS（GPS 換 J121AP、compass HID；iPad 沒有震動）、Windows。
+   → [GNSS](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)、[磁力計](todo/input-sensors.md#11-10-磁力計hostlinux-guest)、[震動](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
 6. ✅ **電池：已完成（2026-10-28）**：crosvm goldfish battery（通用 sysfs backend）→ `DroidVMBattery`（`IOPMPowerSource` 子類別）
    → powerd → SpringBoard，放電、充電都驗過。memory [[droidvm-battery]]。
 7. **電源鍵、音量鍵（使用者 2026-10-30 加；DroidVM app 目前沒有這些按鍵）。**iPadOS 上是 Consumer page（0x0C）的
