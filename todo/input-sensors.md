@@ -335,8 +335,11 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
     收到真的多指 MotionEvent。座標：畫面 x = raw y/10、y = 2120 − raw x/10。注意：點到 app 工具列返回鍵會離開顯示頁，再打開
     就是 "Failed to start native display"，要 vm.sh 重開。
   - 手勢實測（11-10，5567）：雙指捲動 ✅（主畫面翻頁）、三指上滑回主畫面 ✅（鎖定畫面直接解鎖；App 裡也行，前景有對話框時被
-    擋）、點一下來按一下 ✅（游標停在圖示上 hover 浮起後輕點打開 App）。三指上滑停住 → 仍回主畫面，沒有 App 切換器（待查；
-    SpringBoard 有跑 SBDeckSwitcherPanGestureWorkspaceTransaction）。雙指輕點（次要按鍵）、捏合未確認。
+    擋）、點一下來按一下 ✅（游標停在圖示上 hover 浮起後輕點打開 App）。三指上滑停住 → App 切換器 ✅
+    （11-10 晚重測：之前是我注入的上滑太長，卡片推到頂、放開就回主畫面；上滑約 250 px 再停 1.5 s 就停在切換器格狀畫面）。
+    雙指捏合 ✅（Safari 頁面放大，文字上的游標變 I 形）。雙指輕點（次要按鍵）❌：游標停在 Safari 起始頁的書籤圖示上（有 hover）
+    兩指輕點沒有選單；guest 沒有 com.apple.AppleMultitouchTrackpad 偏好（用預設），觸控板設定看來存在 com.apple.backboardd 的
+    BKGlobalMouseDevicePreferences（protobuf）裡 → 下一步：看設定頁的「兩指輔助按一下」、HSTouch 的 tap 辨識 log。
   - device fe3b622：手指停著時每 8 ms 重送（真的 MT2 一直送；app 端停著只每 50 ms 送）：停 2 秒 45 → 222 份 report。
   - 既有的雜訊：swap_wait 0xe00002d5（觸控板之前就有）、sharingd／AttentionAwareness 監看連線 overrun。
 - 驗證工具：`gfxprobe ioreg CLASS`（guest-run.sh）、`guest-newlogs.sh` 後篩 com.apple.Multitouch／PointerUI／BKSendHIDEvent；
