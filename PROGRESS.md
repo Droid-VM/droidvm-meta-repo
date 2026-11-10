@@ -212,8 +212,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **11-04** 觸控板：host 端完成（crosvm 23ed5ac72、app 33d0a76 本地）；XNU 發佈成 Magic Trackpad 2（device 0c3fa5d），5567 上
   Apple 的 AppleMultitouchTrackpadHIDEventDriver／HSTouch 接上、設定出現 Trackpad 頁、游標位置和 hover 正確；雙指捲動、三指上滑回
   主畫面、點一下來按一下實測可用（手機端多指注入）；橫向的箭頭游標 11-10 修好（CA 的 GPU 旋轉路徑算錯曲線 mask → backboardd
-  BKForceMirroredOrientation=portrait，device 8d8f023）；App 切換器（三指上滑停住）、捏合也可以。還沒做：兩指輕點的次要按鍵
-  沒反應；Windows Precision Touchpad（之後）；Linux guest
+  BKForceMirroredOrientation=portrait，device 8d8f023）；App 切換器（三指上滑停住）、捏合、兩指次要按鍵也可以。還沒做：
+  Windows Precision Touchpad（之後）；Linux guest
   → [細節](todo/input-sensors.md#11-10-xnu觸控板發佈成-magic-trackpad-2device-0c3fa5d)
 - ⬜ **11-08** Linux／Windows guest 對 stylus 裝置：Linux kernel 照收，但 libinput 因為 ABS_X/Y 沒有解析度整個忽略（host 上 uinput
   實測，加了解析度就收）→ crosvm 要填解析度，由 app 傳畫面的公釐數；Windows vioinput 把它當成單點 Digitizer，只剩位置、筆尖、

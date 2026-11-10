@@ -337,9 +337,10 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
   - 手勢實測（11-10，5567）：雙指捲動 ✅（主畫面翻頁）、三指上滑回主畫面 ✅（鎖定畫面直接解鎖；App 裡也行，前景有對話框時被
     擋）、點一下來按一下 ✅（游標停在圖示上 hover 浮起後輕點打開 App）。三指上滑停住 → App 切換器 ✅
     （11-10 晚重測：之前是我注入的上滑太長，卡片推到頂、放開就回主畫面；上滑約 250 px 再停 1.5 s 就停在切換器格狀畫面）。
-    雙指捏合 ✅（Safari 頁面放大，文字上的游標變 I 形）。雙指輕點（次要按鍵）❌：游標停在 Safari 起始頁的書籤圖示上（有 hover）
-    兩指輕點沒有選單；guest 沒有 com.apple.AppleMultitouchTrackpad 偏好（用預設），觸控板設定看來存在 com.apple.backboardd 的
-    BKGlobalMouseDevicePreferences（protobuf）裡 → 下一步：看設定頁的「兩指輔助按一下」、HSTouch 的 tap 辨識 log。
+    雙指捏合 ✅（Safari 頁面放大，文字上的游標變 I 形）。雙指輕點（次要按鍵）✅：游標停在 Safari 起始頁的書籤圖示上兩指輕點，
+    約 1–1.5 s 後跳出右鍵選單（拷貝／在背景打開／編輯／分享／刪除）。第一次以為沒反應是 2 s 內截圖太早；延遲比真機長，之後可再看。
+  - BKForceMirroredOrientation 的副作用檢查：介面方向照樣跟著裝置（App 版面、主畫面橫排、另一個橫向會翻過來），只是 CA 顯示器
+    的 currentOrientation 固定 rot0。橫向截圖（⌘⇧3）存成 1366×1024、方向正確，跟修之前的截圖一樣。
   - device fe3b622：手指停著時每 8 ms 重送（真的 MT2 一直送；app 端停著只每 50 ms 送）：停 2 秒 45 → 222 份 report。
   - 既有的雜訊：swap_wait 0xe00002d5（觸控板之前就有）、sharingd／AttentionAwareness 監看連線 overrun。
 - 驗證工具：`gfxprobe ioreg CLASS`（guest-run.sh）、`guest-newlogs.sh` 後篩 com.apple.Multitouch／PointerUI／BKSendHIDEvent；
