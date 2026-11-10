@@ -285,11 +285,29 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
   - @1x 另有比例不一致：backboardd "StartWindowServer: MG scale:2 display preferredScale:1"，window server display 是
     scale 2，游標區域 512×683（ffeb241 的 fixup 只改 preferredScale；MG main-screen-scale 仍是 2）。@2x 時區域 1024×1366。
   - 游標的承載：pointeruid 的 pointerRenderingScene 放在 SpringBoard presentation binder 的 level -1000（來源），
-    systemPointerScene 在 level 10000015.5，都裝在 SBFSecureTouchPassThroughWindow 裡；SpringBoard 那層
-    "PresentationBinderIndirectAccessHosting" 的 content state 一直是 preparing（pointeruid 端的 scene 已 ready）；pointeruid
-    有 "Scene create completion block was not called"（Apple 自己的繞過訊息）。backboardd 有 "secure rendering service"、
-    "IOMFBSupportHWSecureAnimation not found"。下一步：分辨是 secure window／portal 合成，還是 indirect hosting 沒 ready；
-    跟觸控板無關，換成滑鼠也會遇到。
+    systemPointerScene 在 level 10000015.5，各自裝在一個 SBFSecureTouchPassThroughWindow 裡。（更正：兩邊的 scene 最後都是
+    ready，之前寫「一直 preparing」是看了被截斷的輸出。）跟觸控板無關，換成滑鼠也會遇到。
+  - 11-10 下午追到的（gfxprobe 新指令：`casnap`、`cadebug N V`、`cafilter`、`cahost`、`cabackdrop`，見 gfxprobe.m 開頭）：
+    - 游標不是硬體游標：顯示只宣告 1 層，swap 永遠只有第 0 格（拒絕 0 次），virtio-gpu 的游標平面沒被用到。
+    - 濾鏡（blur、alphaThreshold、plusL、colorMatrix、opacityPair）、secure context、disableUpdateMask 0x20 都畫得出來。
+    - CAPortalLayer：同一 context 正常；portal 所在的頂層 context 比來源高時是空的（加 crossDisplay=1 就有），兩邊都被
+      CALayerHost 承載時正常。CA 的 prepare_layer0 只在這次 update 已準備好的 LayerNode 裡找來源（找不到會標記 dependence）。
+    - 但游標本身的 portal 有找到來源：`gfxprobe cadebug 209 1`（CA_PRINT_PORTALS）後 log 有 "Portal … found source … from
+      context <pointerRenderingWindow>"，沒有 "cannot find"。
+    - 截圖差分：自由移動的游標畫面完全不變；游標吸附到 Home 指示條時外框有出現；推到邊緣時出現一排稀疏的水平條紋。
+    - render tree（`cadebug 5 1`＝CA_PRINT_TREE；guest 的 /private/var/preferences/Logging/Subsystems/
+      com.apple.coreanimation.plist 和 com.apple.PointerUI.plist 設 Default-Privacy-Setting Public，重啟 logd 後才不會被遮；
+      每則最多 32 KB）：游標是 CABackdropLayer＋游標形狀 mask＋PointerUI 的 vibrant colorMatrix，外層 opacity 0.85，
+      "3 passes (offscreen-flags [backdrop-copy mask])"。matrix 的 alpha 列 = 0.208r+0.232g+0.045b+a−0.403：backdrop 取到
+      全透明時 alpha 夾成 0，游標就完全看不見 → 嫌疑是 backdrop-copy（離屏、有 mask、經 portal）在 metal2vulkan 上取到空的。
+    - 下一步：`gfxprobe cabackdrop` 逐步重現（backdrop、加 matrix、加 mask、加 0.85 群組、經 portal），找出哪一步變透明。
+  - 多指注入工具（scratchpad xnu-tp/mt：mtinject.c 靜態 aarch64、mtgesture.py）：直接寫 5567 的 /dev/input/event6，Android
+    收到真的多指 MotionEvent。座標：畫面 x = raw y/10、y = 2120 − raw x/10。注意：點到 app 工具列返回鍵會離開顯示頁，再打開
+    就是 "Failed to start native display"，要 vm.sh 重開。
+  - 手勢實測（11-10，5567）：雙指捲動 ✅（主畫面翻頁）、三指上滑回主畫面 ✅（鎖定畫面直接解鎖；App 裡也行，前景有對話框時被
+    擋）、點一下來按一下 ✅（游標停在圖示上 hover 浮起後輕點打開 App）。三指上滑停住 → 仍回主畫面，沒有 App 切換器（待查；
+    SpringBoard 有跑 SBDeckSwitcherPanGestureWorkspaceTransaction）。雙指輕點（次要按鍵）、捏合未確認。
+  - device fe3b622：手指停著時每 8 ms 重送（真的 MT2 一直送；app 端停著只每 50 ms 送）：停 2 秒 45 → 222 份 report。
   - 既有的雜訊：swap_wait 0xe00002d5（觸控板之前就有）、sharingd／AttentionAwareness 監看連線 overrun。
 - 驗證工具：`gfxprobe ioreg CLASS`（guest-run.sh）、`guest-newlogs.sh` 後篩 com.apple.Multitouch／PointerUI／BKSendHIDEvent；
   peek：droidvm_input_kinds、native_hid_trackpad_load_status、droidvm_trackpad_hid（送出、feature 次數、set 次數、丟棄）。

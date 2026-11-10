@@ -210,8 +210,9 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **11-04** Safari 網址列快速輸入時會掉字（例如一次送 "http://..." 只剩 "http"）：guest kernel
   的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
 - ⬜ **11-04** 觸控板：host 端完成（crosvm 23ed5ac72、app 33d0a76 本地）；XNU 發佈成 Magic Trackpad 2（device 0c3fa5d），5567 上
-  Apple 的 AppleMultitouchTrackpadHIDEventDriver／HSTouch 接上、設定出現 Trackpad 頁、游標位置和 hover 正確。還沒做：游標本身沒
-  合成到畫面上（@1x、@2x 都一樣，pointer scene 的承載）、手勢未測（要多指輸入）；Windows Precision Touchpad（之後）；Linux guest
+  Apple 的 AppleMultitouchTrackpadHIDEventDriver／HSTouch 接上、設定出現 Trackpad 頁、游標位置和 hover 正確；雙指捲動、三指上滑回
+  主畫面、點一下來按一下實測可用（手機端多指注入）。還沒做：自由移動的箭頭游標畫不出來（吸附元件時的外框可以；portal 找得到來源，
+  差異還在追）、App 切換器手勢、捏合；Windows Precision Touchpad（之後）；Linux guest
   → [細節](todo/input-sensors.md#11-10-xnu觸控板發佈成-magic-trackpad-2device-0c3fa5d)
 - ⬜ **11-08** Linux／Windows guest 對 stylus 裝置：Linux kernel 照收，但 libinput 因為 ABS_X/Y 沒有解析度整個忽略（host 上 uinput
   實測，加了解析度就收）→ crosvm 要填解析度，由 app 傳畫面的公釐數；Windows vioinput 把它當成單點 Digitizer，只剩位置、筆尖、
