@@ -87,3 +87,20 @@ Miracast（Wi-Fi Display；5566 有這個功能，目前關著）、開發者選
     投放時手機是輸入裝置，操作頁本來就保持亮屏；app 在背景、手機鎖起來時外接螢幕會顯示鎖定畫面。第 1 階段試
     `FLAG_SHOW_WHEN_LOCKED`／`setShowWhenLocked` 能不能蓋過，不行就記成限制。
   - 模擬器自己放在主螢幕上的小視窗在關螢幕後會消失（模擬器的行為，不是我們的視窗）。
+
+## 11-11 第 1 階段：native display 投到外部顯示器（app e26c6af，本地）
+
+- 操作頁選單：「在外部顯示器顯示」（只有一台就直接投，多台跳清單）／投放中變「拉回本機」。
+- `VmOutputRouter`：每個 VM 螢幕的畫面在哪（一個螢幕一個擁有者，crosvm 一個螢幕只有一個 scanout 槽）；用顯示器**名稱**
+  記住選擇（顯示器重新接上 id 會變），操作頁打開時那台在就自動投過去，直到使用者拉回。
+- `ExternalOutputService`：每個螢幕一個 Presentation；顯示器消失時通知 router（畫面自動回操作頁，記住的選擇保留）；
+  通知上的「拉回本機」把全部拉回。
+- `NativeExternalOutput`：Presentation 裡的 scanout＋游標 SurfaceView 交給 crosvm（自己的 broker attach＋DisplayProvider），
+  依 guest 比例置中，游標層跟著 guest 回報的位置。
+- 操作頁的 `DisplayProvider.setHeld(true)`：把 crosvm 的槽還回去（先存畫面）、關掉游標串流、不再送 Surface；SurfaceView 的
+  版面不動，上面疊一個由同一個 viewport 擺放的深色色塊，所以觸控換算完全不變。`DaemonDisplayAttach` 改吃 Context。
+- 5566 模擬次要螢幕實測：外部有畫面、手機是色塊；在色塊上點「設定」，外部打開設定；app 到背景再開操作頁不搶回；
+  選單拉回、通知拉回；拔掉顯示器自動回本機；app 被殺掉後再開操作頁，自動投回重新接上的顯示器。
+- **限制**：手機鎖定時系統的鎖定畫面蓋住外接螢幕（關螢幕時是黑的），`FLAG_SHOW_WHEN_LOCKED` 蓋不過；解鎖後恢復。
+- 測試中碰到一次 iPadOS 主畫面大片黑塊：是 PosterBoard 沒在跑（桌布那層空的），拉回本機一樣黑，respring 後正常，
+  跟外部輸出無關（見 phones-rigs／下午的桌布問題）。
