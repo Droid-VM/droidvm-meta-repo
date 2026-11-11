@@ -8,7 +8,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
-- ✅ **11-11** iPadOS 27 的序列埠與 virtio-console（本地未 commit）：SBSA UART（xnu-12377 的 PL011_UART）與新寫的 16550 驅動當 kernel serial console，`serial=3` 內建，/dev/console 可讀寫（5567 雙向實測）；16550 用 `serial-device-name=comN` 指定（實測 kernel 輸出到 serial1）；virtio-console 驅動 `package/DroidVMVirtioConsole.c`（multiport＋中斷，每個 port 一個 BSD tty `/dev/cu.<名字>`，兩個 port 雙向實測）；DarwinBoot 從 FDT 產生 `uart0`／`com1-4`／`virtio-console-N` 與 `/defaults droidvm,serial-device`；crosvm `--virtio-mmio-console`、virtio-mmio 上限 16→32。陷阱：fileset matcher 把 `PAGE_SHIFT_CONST` 配成 `cons_ops_index`，APFS pagein 每次開機 panic，已寫進 `fileset-reviewed.json`
+- ✅ **11-11** iPadOS 27 的序列埠與 virtio-console（device 77bb46b、DarwinBoot c3ff6e4（前一個 a348165 是先前未提交的 intid＋cluster-type）、crosvm 83b3a15e6、app 7ab8caf 本地；fork 的 DarwinBoot pin 未更新）：SBSA UART（xnu-12377 的 PL011_UART）與新寫的 16550 驅動當 kernel serial console，`serial=3` 內建，/dev/console 可讀寫（5567 雙向實測）；16550 用 `serial-device-name=comN` 指定（實測 kernel 輸出到 serial1）；virtio-console 驅動 `package/DroidVMVirtioConsole.c`（multiport＋中斷，每個 port 一個 BSD tty `/dev/cu.<名字>`，兩個 port 雙向實測）；DarwinBoot 從 FDT 產生 `uart0`／`com1-4`／`virtio-console-N` 與 `/defaults droidvm,serial-device`；crosvm `--virtio-mmio-console`、virtio-mmio 上限 16→32。陷阱：fileset matcher 把 `PAGE_SHIFT_CONST` 配成 `cons_ops_index`，APFS pagein 每次開機 panic，已寫進 `fileset-reviewed.json`
 - ✅ **11-10** 震動馬達 host＋Linux guest 完成（crosvm f82707d2c、app 902fa32 本地、guest additions ed96a62）：virtio-input `vibrator`（FF_RUMBLE），guest 的 rumble 由 daemon 以 PHYSICAL_EMULATION 播在手機馬達上；5566 實測振幅與時長正確 → [細節](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
 - ✅ **11-10** 磁力計 host＋Linux guest 完成（crosvm cee8d210a、app 4ed9a06 本地、guest additions b21673b）：motion 裝置 `magnetometer=true` 加磁場（HAT0X/HAT0Y/HAT1X）與傾斜補償航向（HAT1Y）；Ubuntu 的 droidvm-compass 模組發佈成 IIO 指南針，`monitor-sensor --compass` 有航向 → [細節](todo/input-sensors.md#11-10-磁力計hostlinux-guest)
 - ✅ **11-11** 觸控板觸覺回饋通道（給之後的 Windows PTP／macOS 驅動）：trackpad 宣告 HID Haptics 波形為 EV_FF，guest 回報的點擊／按下／放開／持續震動由手機馬達播（crosvm 98ed82e55、app f4a9f30 本地；APK 要配這版以後的 crosvm）→ [細節](todo/input-sensors.md#11-11-觸控板觸覺回饋通道給-windowsmacos-guest)
@@ -313,7 +313,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **10-29** iPadOS 17 新 Data 的桌布是黑的（Poster 問題；27 已有桌布）
 - ⬜ **10-29** 兩格小工具首次打開空白
 - ⬜ **10-29** ownervisor 的 serial-shell 有定義但不啟動：11-11 起 /dev/console 已接到 SBSA UART（VM 要有 SBSA port），服務可以打開了，還沒做
-- ⬜ **11-11** 序列埠收尾：app 的 `--virtio-mmio-console`（有 virtio-console port 或 GNSS 時加）還沒建 APK 驗證；各 repo 未 commit；5567 測試中 hugepage pool 從 2560 縮到約 2370 補不回（手機記憶體碎片），VM 暫以 4608 MB 開機
+- ⬜ **11-11** 序列埠收尾：app 的 `--virtio-mmio-console`（有 virtio-console port 或 GNSS 時加）已建進 APK 並裝到兩支手機，但還沒在有 console port 的 VM 上驗證；5567 的大頁池縮到約 2370 是已知現象（每次關 VM 碎片化加劇），11-11 重開手機補回 2560，根治列為未來待辦
 - ⬜ **10-28** 陀螺儀待補：單位、動態轉動的實機驗證
 - ⬜ **10-28** 錄音還沒在 app 裡驗到：host 的 capture stream 開著，guest 沒收到 input 的 StartIO；Voice Memos 按錄音沒反應（tccd 處理
   `voicememod` 時 LaunchServices 回 -10814）

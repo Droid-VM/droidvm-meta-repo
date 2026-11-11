@@ -8,8 +8,8 @@ host 端（手機、Gunyah、crosvm）的未解項目完整細節，從 `PROGRES
 5567 停掉 UniXNU 27（為了換新 crosvm＋app）之後，池子只有 2370／2560 頁：停之前就是閒置 66 頁＋VM 用的 2304 頁，沒有掉頁
 （abandoned、orphan 都是 0）。acquire 3、2 都回 `acquire_stop_reason=cma sources exhausted`；drop_caches＋compact_memory
 之後也一樣（MemAvailable 約 1.6 GB）。vm.sh 依規則不開機（池子不滿開出來的 VM 會被少給頁面）。手機開機 6.4 天。
-可能的解法：重開手機（之後要使用者 insmod KernelSU 目錄裡的 gh_hugepage_reserve.ko），或由使用者決定在不滿的池子上開
-（VM 本身只要 2304 頁）。教訓：停掉一台 VM 之前先看 `pool_avail + served` 有沒有到 `pool_want`，沒到就是停了可能開不回來。
+使用者 11-11：已知現象，每次關 VM 碎片化都會加劇一些，列為未來待解決事項；這次的處理是重開手機（之後使用者 insmod
+KernelSU 目錄裡的 gh_hugepage_reserve.ko）。教訓：停掉一台 VM 之前先看 `pool_avail + served` 有沒有到 `pool_want`，沒到就是停了可能開不回來。
 
 ## 11-05 host 記憶體耗盡 guest 卡死
 
