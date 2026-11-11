@@ -689,9 +689,9 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
    或 display conformance。
 4. **GPU 恢復與文字破圖：**尚無自動 GPU 恢復；若文字破圖重現，立即截圖並記錄 backboardd 的 IOSurface 資訊。
 5. ~~3D 改走 drm2kgsl~~：已完成（2026-10-25 起預設）；venus／gfxstream 之後再評估。
-6. **VM 操作介面重構（11-11 規劃，未動工）：**輸出（本機／外部顯示器，沿用 Presentation、改由前景服務持有、記住狀態）與輸入
+6. **VM 操作介面重構（11-11 規劃；第 0 階段完成，app db2c8da）：**輸出（本機／外部顯示器，沿用 Presentation、改由前景服務持有、記住狀態）與輸入
    （鍵盤區上／下、其餘是指標區）解耦；VNC 投放頁與 USB HID 直通拿掉，改成 USB 直通彈窗（含 everyone／hid）；長按鍵盤換位置、
-   長按滑鼠叫出左右鍵。先在「模擬次要螢幕」上實測服務持有的 Presentation。→ [細節](todo/console-ui.md)
+   長按滑鼠叫出左右鍵。服務持有的 Presentation 實測可行（不需懸浮窗權限、背景與關螢幕都撐住；手機鎖定時被系統鎖定畫面蓋住）。→ [細節](todo/console-ui.md)
 
 使用者允許 Luna（max）承接明確、機械性的工作；Sol承接大範圍程式碼／文檔粗篩，由主agent細讀。
 

@@ -73,3 +73,17 @@ Miracast（Wi-Fi Display；5566 有這個功能，目前關著）、開發者選
 - 鍵盤獨占（`PhysicalKeyboardGrab`，daemon 的 `EVIOCGRAB`）現在離開前景就放開；投放中要不要繼續獨占（傾向：繼續，通知上
   可放開）。
 - 觸控板點擊、左右鍵按下時由 app 讓手機短震（不經 guest）要不要做成開關。
+
+## 11-11 第 0 階段：服務持有的 Presentation（app db2c8da，本地）
+
+- `ui/vm/display/external/ExternalOutputService`：前景服務（type specialUse），在服務自己的 window context（`TYPE_PRESENTATION`，
+  SDK 隱藏的常數 2037）上開 `Presentation`，不綁 activity；通知上的按鈕收回。這一階段畫面是跳動的時鐘。
+- 5566 用模擬次要螢幕（`settings put global overlay_display_devices 1280x720/240`，顯示器 4；看內容用
+  `screencap -d <SurfaceFlinger 的 virtual display id>`）實測：
+  - **不需要「顯示在其他應用程式上層」權限**，app 不在前景時（root `am start-foreground-service`）就能開。
+  - app 在背景、在 app 裡切頁再回桌面、關螢幕 60 秒：視窗一直在，時鐘沒斷（程序沒被凍結）。
+  - 顯示器被拿掉：不崩潰，但服務還在前景 → 第 1 階段要在 `onDisplayRemoved` 收掉並回本機。
+  - **手機鎖定時，系統的鎖定畫面（KeyguardDisplayManager 的 presentation）會蓋住副螢幕**，解鎖後我們的視窗回來。
+    投放時手機是輸入裝置，操作頁本來就保持亮屏；app 在背景、手機鎖起來時外接螢幕會顯示鎖定畫面。第 1 階段試
+    `FLAG_SHOW_WHEN_LOCKED`／`setShowWhenLocked` 能不能蓋過，不行就記成限制。
+  - 模擬器自己放在主螢幕上的小視窗在關螢幕後會消失（模擬器的行為，不是我們的視窗）。
