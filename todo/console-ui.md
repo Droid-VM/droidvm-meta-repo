@@ -104,3 +104,58 @@ Miracast（Wi-Fi Display；5566 有這個功能，目前關著）、開發者選
 - **限制**：手機鎖定時系統的鎖定畫面蓋住外接螢幕（關螢幕時是黑的），`FLAG_SHOW_WHEN_LOCKED` 蓋不過；解鎖後恢復。
 - 測試中碰到一次 iPadOS 主畫面大片黑塊：是 PosterBoard 沒在跑（桌布那層空的），拉回本機一樣黑，respring 後正常，
   跟外部輸出無關（見 phones-rigs／下午的桌布問題）。
+
+## 11-11 第 2 階段：VNC 投到外部顯示器，舊投放頁拿掉（app 0b35661，本地）
+
+- `VncSession`（程序層級，`acquire`／`release` 引用計數，key = VM／螢幕）：RFB 連線、自動重連、H.264 管線從 activity 拆出來，
+  操作頁與外部視窗共用一條連線；H.264 的 TextureView 同時只有一個擁有者（`setH264View`／`releaseH264View`），晚加入的
+  listener 由 `replay` 補上狀態、尺寸、畫面。`BaseVncActivity` 1085 → 700 行。
+- `ExternalOutputService` 依 `EXTRA_VNC` 開不同的視窗：native 是自己的 SurfaceView，VNC 是 `DisplayPresentation`＋
+  `VncExternalOutput`（加入同一個 session，圖在 ImageView、H.264 在 TextureView）。`VmOutputRouter.Screen` 多一個 `vnc`。
+- VNC 操作頁：「在外部顯示器顯示／拉回本機」、viewport 同時擺圖、解碼 view 與深色色塊；投放中不畫圖、把解碼 view 讓出去
+  （`wantsH264View()`）；路由的 key 用開頁時的螢幕 id（session 之後才解析出螢幕時也不變，外部視窗才不會開第二條連線）。
+- 兩個 console 的外部顯示選單、挑顯示器、色塊文字共用 `ExternalOutputControl`。
+- 刪掉：`VMVncPresentationActivity`（＋版面、選單、manifest）、`UsbHidInput`、`DisplayTouchPadPanel`、`VncTouchPadPanel`、
+  沒有實作的 `DisplayInputBackend`，以及只有它們用的 19 個字串（四種語言）。
+- 5566 實測（Ubuntu 的 gpu-0 暫時改成 VNC 輸出，測完還原）：外部顯示 Ubuntu 登入畫面、手機是色塊；色塊上方的全鍵盤打字
+  進到 guest；app 到背景外部畫面不斷，再開操作頁不搶回；選單拉回；拿掉顯示器自動回本機、記住的選擇保留，之後再開操作頁
+  自動投回去。
+
+## 11-11 第 3 階段：鍵盤上／下、左右鍵（app 945b748，本地）
+
+- `ConsoleWorkspace`：把操作頁根 LinearLayout 的子 view 重排——鍵盤（Extra／FNx 列、全鍵盤）放在指標區上方或下方。系統 IME
+  是 Android 畫的，永遠在最下面，選「上」時只有 app 自己的鍵盤列移上去。
+- 左右鍵按鈕列（`view_pointer_buttons`）只在滑鼠、觸控板模式出現，送 BTN_LEFT／BTN_RIGHT 到 VM 的相對滑鼠（觸控板模式也是
+  送到滑鼠裝置）；按下／放開有手機自己的觸感回饋（VIRTUAL_KEY），沒做開關。
+- 選單長按：鍵盤列任一個按鈕 → 鍵盤換邊；滑鼠按鈕 → 左右鍵顯示／隱藏；toast 說新狀態。設定存在 `droidvm_prefs`
+  （`display_keyboard_on_top`、`display_pointer_buttons`），兩個 console 共用。
+- 絕對模式的座標換算沒有改：色塊和畫面由同一個 viewport 擺放，框外貼齊邊緣仍是原本那一份程式。
+- 測試時看到：Surface 重建或改尺寸後 guest 畫面偶爾出現黑塊，像是 host 只把部分畫面複製進新的 BufferQueue buffer；和
+  11-11 在 5566 看到的狀態列黑塊閃爍（某一個 CoreAnimation framebuffer 裡留著舊的黑塊，全畫面重畫才清掉）可能同源，待查。
+
+## 11-11 第 4 階段：USB 直通彈窗與規則的類別層（app 180532a，本地）
+
+- 操作頁選單「USB 直通」：先確認這台 VM 有 xHCI 控制器（沒有就說明）；勾選項目是 everyone（ANY 層指向這台 VM）、hid
+  （新的類別層，class `03`）與現在插著的每個裝置（DEVICE 層 vid:pid）。只改有變動的列，這台 VM 的規則插在最前面，
+  `usb_rules_set` 寫回；「規則」按鈕開 `UsbRulesActivity`。
+- daemon `UsbRules`：EXACT > PORT > DEVICE > CLASS > ANY；類別層比對裝置類別或任一介面類別（`Device.classes`）；
+  類別層是空的時候 JSON 不寫 `class`，舊版 daemon／app 還讀得懂（可降版）。
+- 規則頁多一個「類別」區段（類別挑選器、`UsbClasses` 名稱），VM 編輯器的 xHCI 綁定差異保留類別。單元測試 610 個全過。
+- 5566 實測：勾 hid → 規則檔多出 `"class": [{"class": "03", "target": "vm", ...}]`，Windows VM 原本的 ANY 規則沒動；
+  再開彈窗 hid 是勾著的；取消 → 規則檔的 `class` 整個消失。
+
+## 11-11 第 5 階段：兩個 console 共用輸入控制器與選單（app 766e4a6，本地）
+
+- `ConsoleInput`：輸入模式（app 一個設定；這個螢幕的輸入關著時選絕對模式的提示；同步告訴 workspace、forwarder、手勢轉譯）、
+  送進 VM 的路徑（daemon binder 到了走 socket，之前與失敗時走 vm_input）、滑鼠右／中鍵不進觸控路徑也不變成 BACK、觸控板
+  手指、收起系統鍵盤。觸控落在畫面哪裡仍是各自的：native 是會旋轉的 SurfaceView，VNC 是可縮放的圖與 RFB 的 tablet。
+- `ConsoleMenu`：兩個 console 的選單（輸入模式、鍵盤兩列與長按、console 自己的列——native 的旋轉列、全螢幕、外部顯示、
+  USB 直通）。原計畫的 `DisplayInputBackend` 介面沒有做成兩份實作，直接刪掉，共用的部分收進這兩個類別。
+- 測試找到的回歸：VM 一啟動 app 就開操作頁，那時 VNC server 還沒起來，重連 5 次後放棄；共用 session 之後，晚開的操作頁
+  加入的是放棄了的 session。修正：加入 ERROR 狀態的 session 會重連一次（以前每頁自己一條連線的行為）。
+- 5566 實測（Ubuntu VNC、UniXNU 27 native）：選單切模式、左右鍵與相對拖曳（guest evtest）、觸控板手指、觸控點擊、觸控解鎖、
+  兩個長按、投到模擬次要螢幕再拉回。5566 的 iPadOS 看不到觸控板游標是已知的（游標修正只在 5567，見觸控板記錄）。
+
+**剩下的限制與未定**
+- 手機鎖定時，系統鎖定畫面蓋住外接螢幕（第 1 階段）。
+- 投放中鍵盤獨占（`PhysicalKeyboardGrab`）仍是離開前景就放開；要不要投放時繼續獨占，未定。

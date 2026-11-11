@@ -1,6 +1,6 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-10。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
+更新：2026-11-11。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
 Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
@@ -8,6 +8,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-11** VM 操作介面重構完成（app db2c8da、e26c6af、945b748、180532a、0b35661、766e4a6 本地）：native 與 VNC 都能從操作頁投到外部顯示器（前景服務持有的 Presentation，app 內留深色色塊，記住顯示器），鍵盤上／下與左右鍵按鈕列（選單長按），USB 直通彈窗（everyone／hid／裝置；規則新增類別層）取代 VNC 投放頁與 USB HID 直通，兩個 console 共用輸入控制器與選單 → [細節](todo/console-ui.md)
 - ✅ **11-11** iPadOS 27 的序列埠與 virtio-console（device 77bb46b、DarwinBoot c3ff6e4（前一個 a348165 是先前未提交的 intid＋cluster-type）、crosvm 83b3a15e6、app 7ab8caf 本地；fork 的 DarwinBoot pin 未更新）：SBSA UART（xnu-12377 的 PL011_UART）與新寫的 16550 驅動當 kernel serial console，`serial=3` 內建，/dev/console 可讀寫（5567 雙向實測）；16550 用 `serial-device-name=comN` 指定（實測 kernel 輸出到 serial1）；virtio-console 驅動 `package/DroidVMVirtioConsole.c`（multiport＋中斷，每個 port 一個 BSD tty `/dev/cu.<名字>`，兩個 port 雙向實測）；DarwinBoot 從 FDT 產生 `uart0`／`com1-4`／`virtio-console-N` 與 `/defaults droidvm,serial-device`；crosvm `--virtio-mmio-console`、virtio-mmio 上限 16→32。陷阱：fileset matcher 把 `PAGE_SHIFT_CONST` 配成 `cons_ops_index`，APFS pagein 每次開機 panic，已寫進 `fileset-reviewed.json`
 - ✅ **11-10** 震動馬達 host＋Linux guest 完成（crosvm f82707d2c、app 902fa32 本地、guest additions ed96a62）：virtio-input `vibrator`（FF_RUMBLE），guest 的 rumble 由 daemon 以 PHYSICAL_EMULATION 播在手機馬達上；5566 實測振幅與時長正確 → [細節](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
 - ✅ **11-10** 磁力計 host＋Linux guest 完成（crosvm cee8d210a、app 4ed9a06 本地、guest additions b21673b）：motion 裝置 `magnetometer=true` 加磁場（HAT0X/HAT0Y/HAT1X）與傾斜補償航向（HAT1Y）；Ubuntu 的 droidvm-compass 模組發佈成 IIO 指南針，`monitor-sensor --compass` 有航向 → [細節](todo/input-sensors.md#11-10-磁力計hostlinux-guest)
@@ -689,9 +690,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
    或 display conformance。
 4. **GPU 恢復與文字破圖：**尚無自動 GPU 恢復；若文字破圖重現，立即截圖並記錄 backboardd 的 IOSurface 資訊。
 5. ~~3D 改走 drm2kgsl~~：已完成（2026-10-25 起預設）；venus／gfxstream 之後再評估。
-6. **VM 操作介面重構（11-11 規劃；第 0、1 階段完成，app db2c8da、e26c6af：native display 可投到外部顯示器）：**輸出（本機／外部顯示器，沿用 Presentation、改由前景服務持有、記住狀態）與輸入
-   （鍵盤區上／下、其餘是指標區）解耦；VNC 投放頁與 USB HID 直通拿掉，改成 USB 直通彈窗（含 everyone／hid）；長按鍵盤換位置、
-   長按滑鼠叫出左右鍵。服務持有的 Presentation 實測可行（不需懸浮窗權限、背景與關螢幕都撐住；手機鎖定時被系統鎖定畫面蓋住）。→ [細節](todo/console-ui.md)
+6. ~~VM 操作介面重構~~：11-11 完成（見已完成）；限制：手機鎖定時外接螢幕被系統鎖定畫面蓋住；未定：投放中要不要繼續鍵盤獨占。
 
 使用者允許 Luna（max）承接明確、機械性的工作；Sol承接大範圍程式碼／文檔粗篩，由主agent細讀。
 
