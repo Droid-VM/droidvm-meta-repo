@@ -485,3 +485,35 @@ KIND_NONE（MT 位置但沒有 INPUT_PROP_DIRECT），所以還沒有作用；�
 **還沒做。**
 - 游標的合成（見上）；手勢（雙指捲動、三指上滑、捏合）要多指輸入（adb 只能單指，考慮手機端 uinput 觸控裝置）；
   @1x 的 MG scale；接觸大小目前固定（VoodooInput 的值），手機有接觸大小時之後再接上。
+
+## 11-11 觸控板觸覺回饋通道（給 Windows／macOS guest）
+
+使用者 11-11：trackpad 加一條 guest 回報觸覺回饋、接到 host 振動器的通道，給 Windows 與 macOS guest 用。之前沒有：crosvm 的
+trackpad 不宣告 EV_FF，daemon 只讀鍵盤和振動器的回傳，iPadOS 的 Magic Trackpad 2 模擬只發佈 trackpad 那個功能、沒有 actuator。
+
+**規格（guest → host，trackpad 的 virtio-input status queue）**
+- crosvm `trackpad[...,haptics=true]`（crosvm 98ed82e55）宣告 EV_FF，碼是 HID Haptics 用法頁（0x0e）波形用法的低位元組：
+  2 停止（0x1002）、3 點擊、4 buzz（持續）、5 rumble（持續）、6 按下、7 放開。
+- 值：bit 0–7 強度百分比（0＝host 自己的預設，全強）、bit 8–15 再播幾次、bit 16–31 每次開始的間隔 ms（0＝100 ms）。
+- 持續的波形播到「停止」為止，host 最多播 5 秒（跟振動器同一個上限）。
+- Windows PTP 的觸覺 collection（manual trigger 的波形、強度、重複、間隔）可以一對一對過來；macOS 驅動要把 Magic Trackpad
+  的 actuator 指令換成點擊／按下／放開＋強度。
+- 現有 guest 驅動都不讀 trackpad 的 EV_FF（Linux 的 virtio_input 只取 KEY/REL/ABS/MSC/SW/LED/SND；iPadOS 的
+  `DroidVMVirtioInput.c` 和 Windows 的 vioinput 看位置與按鍵位元），開了也不影響它們。
+
+**host（app f4a9f30，本地）**
+- `buildTrackpadCommand` 一律帶 `haptics=true`：**APK 一定要配 crosvm 98ed82e55 以後的版本**，舊 crosvm 不認得這個 key，VM 開不起來。
+- `NativeDisplayInputBridge` 也讀 TRACKPAD 的回傳；`HostVibrator.onTrackpadStatus` 播：點擊、按下用 PRIMITIVE_CLICK，放開用
+  PRIMITIVE_TICK（馬達支援 primitive 時；不支援就是 12 ms 的單發，強度乘上去）；buzz／rumble 併進振動器的強度表，取最強。
+  有 rumble 在播時的點擊直接丟掉（換掉會把 rumble 切斷）。
+
+**驗證（5566 Ubuntu，11-11）**：guest 用測試模組（scratchpad `hapticprobe/`：input handler 找到「DroidVM Trackpad」，直接呼叫裝置的
+event callback 送 EV_FF，`echo CODE,VALUE > /sys/module/hapticprobe/parameters/play`）。六種波形都到了手機馬達
+（`dumpsys vibrator_manager`：usage PHYSICAL_EMULATION、uid 0）：點擊／按下／放開 41–45 ms；點擊再 3 次、間隔 150 ms 共 492 ms；
+buzz 在 0.84 s 被停止切掉；沒停止的 rumble 5.03 s 自己結束。PLK110 的馬達沒有 primitive（`supportedPrimitives = []`），走的是單發，
+OPLUS 再轉成自己的觸控震感（effect 68），強度跟著變（100% 2400、60% 903）。Linux 看到的 trackpad 事件型別沒變（`EV=1b`）。
+- 陷阱：Linux 7.0 的 input handler 用「只填 `driver_info`」的萬用 id 表（evbug 那種）不會被 connect，要用 flags 比對。
+- 還沒驗：iPadOS 開著 haptics 的 trackpad（5566 的 kernel 沒有 trackpad 模擬，5567 開不了機，見 phones-rigs）。
+
+**還沒做**：Windows PTP 驅動（連觸覺 collection）；macOS guest（還沒有）；Linux 若要用，需要一個像 droidvm-vibrator 的
+轉接模組（新的 haptic touchpad 支援走 HID，不走 virtio-input）。
