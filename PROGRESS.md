@@ -8,6 +8,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
+- ✅ **11-11** iPadOS 27 的序列埠與 virtio-console（本地未 commit）：SBSA UART（xnu-12377 的 PL011_UART）與新寫的 16550 驅動當 kernel serial console，`serial=3` 內建，/dev/console 可讀寫（5567 雙向實測）；16550 用 `serial-device-name=comN` 指定（實測 kernel 輸出到 serial1）；virtio-console 驅動 `package/DroidVMVirtioConsole.c`（multiport＋中斷，每個 port 一個 BSD tty `/dev/cu.<名字>`，兩個 port 雙向實測）；DarwinBoot 從 FDT 產生 `uart0`／`com1-4`／`virtio-console-N` 與 `/defaults droidvm,serial-device`；crosvm `--virtio-mmio-console`、virtio-mmio 上限 16→32。陷阱：fileset matcher 把 `PAGE_SHIFT_CONST` 配成 `cons_ops_index`，APFS pagein 每次開機 panic，已寫進 `fileset-reviewed.json`
 - ✅ **11-10** 震動馬達 host＋Linux guest 完成（crosvm f82707d2c、app 902fa32 本地、guest additions ed96a62）：virtio-input `vibrator`（FF_RUMBLE），guest 的 rumble 由 daemon 以 PHYSICAL_EMULATION 播在手機馬達上；5566 實測振幅與時長正確 → [細節](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
 - ✅ **11-10** 磁力計 host＋Linux guest 完成（crosvm cee8d210a、app 4ed9a06 本地、guest additions b21673b）：motion 裝置 `magnetometer=true` 加磁場（HAT0X/HAT0Y/HAT1X）與傾斜補償航向（HAT1Y）；Ubuntu 的 droidvm-compass 模組發佈成 IIO 指南針，`monitor-sensor --compass` 有航向 → [細節](todo/input-sensors.md#11-10-磁力計hostlinux-guest)
 - ✅ **11-10** GNSS 卡片的「自動」＝接收器＋手機位置：接收器沒有 fix（室內、OPLUS 省電關掉 GNSS）時改送 fused 位置，標成推算（app 6f28b91 本地，順手修了來源選單的閃退）→ [細節](todo/input-sensors.md#11-10-晚-自動接收器位置app-6f28b91)
@@ -310,7 +311,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - ⬜ **10-29** hostsim 的 deferred-pressure 檢查失敗（上游 Turnip patch 與測試不一致），記在 `release.json` 的 `checks`，不擋 build
 - ⬜ **10-29** iPadOS 17 新 Data 的桌布是黑的（Poster 問題；27 已有桌布）
 - ⬜ **10-29** 兩格小工具首次打開空白
-- ⬜ **10-29** ownervisor 的 serial-shell 有定義但不啟動：本板 `/dev/console` 還沒接到 UART
+- ⬜ **10-29** ownervisor 的 serial-shell 有定義但不啟動：11-11 起 /dev/console 已接到 SBSA UART（VM 要有 SBSA port），服務可以打開了，還沒做
+- ⬜ **11-11** 序列埠收尾：app 的 `--virtio-mmio-console`（有 virtio-console port 或 GNSS 時加）還沒建 APK 驗證；各 repo 未 commit；5567 測試中 hugepage pool 從 2560 縮到約 2370 補不回（手機記憶體碎片），VM 暫以 4608 MB 開機
 - ⬜ **10-28** 陀螺儀待補：單位、動態轉動的實機驗證
 - ⬜ **10-28** 錄音還沒在 app 裡驗到：host 的 capture stream 開著，guest 沒收到 input 的 StartIO；Voice Memos 按錄音沒反應（tccd 處理
   `voicememod` 時 LaunchServices 回 -10814）
@@ -686,6 +688,9 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
    或 display conformance。
 4. **GPU 恢復與文字破圖：**尚無自動 GPU 恢復；若文字破圖重現，立即截圖並記錄 backboardd 的 IOSurface 資訊。
 5. ~~3D 改走 drm2kgsl~~：已完成（2026-10-25 起預設）；venus／gfxstream 之後再評估。
+6. **VM 操作介面重構（11-11 規劃，未動工）：**輸出（本機／外部顯示器，沿用 Presentation、改由前景服務持有、記住狀態）與輸入
+   （鍵盤區上／下、其餘是指標區）解耦；VNC 投放頁與 USB HID 直通拿掉，改成 USB 直通彈窗（含 everyone／hid）；長按鍵盤換位置、
+   長按滑鼠叫出左右鍵。先在「模擬次要螢幕」上實測服務持有的 Presentation。→ [細節](todo/console-ui.md)
 
 使用者允許 Luna（max）承接明確、機械性的工作；Sol承接大範圍程式碼／文檔粗篩，由主agent細讀。
 
@@ -699,4 +704,4 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 裝置 repo `tools/rig/README.md`：rig 工具與變數
 - 裝置 repo `board.toml`：開機參數；每一項都有註解說明為什麼要加
 - 各 repo 的 commit message：每個修正的根因都寫在 commit 裡，這是最完整的歷史
-- `todo/`：未解／待辦項目的完整細節，依主題分檔（`metal2vulkan.md`、`webgpu-webgl.md`、`audio-media.md`、`input-sensors.md`、`apps-system.md`、`phones-rigs.md`）
+- `todo/`：未解／待辦項目的完整細節，依主題分檔（`metal2vulkan.md`、`webgpu-webgl.md`、`audio-media.md`、`input-sensors.md`、`apps-system.md`、`phones-rigs.md`、`console-ui.md`）
