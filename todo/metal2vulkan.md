@@ -113,7 +113,7 @@ guest 的 Metal 由 NativeMetal plugin 交給 metal2vulkan，經 Turnip（virtio
 - CPU profile：spindump 加新 plugin 的 dSYM（`atos`／`llvm-symbolizer --inlining`）。
 - 回歸：`metalcheck-run.py`、`gfx-suite.sh`、webgpu-samples 的 `wgsweep.py`、three.js WebGL 2 範例。
 
-## 11-12 畫面局部閃爍：合成器的 GMEM pass 寫壞 framebuffer（止血：合成器改 sysmem，NativeMetal e84d02f）
+## 11-12 畫面局部閃爍：合成器的 GMEM pass 寫壞 framebuffer（根因：guest 合成器和 Android UI 同一個 KGSL ringbuffer，見「深夜」一節；修正 virglrenderer 5faa56fa）
 
 **現象**：畫面某一小塊（或一大片黑）每隔一幀閃一次。11-11 是狀態列黑塊，11-12 是左邊 32×8 的時鐘碎片和 1536×2400 的全零矩形。
 使用者發現「app 端退出再進入 native display 有機率觸發；滑動有時清掉、有時只是變樣」。
@@ -234,6 +234,38 @@ virglrenderer 的兩個診斷（預設關閉）已提交（d21d37be）。
 **上游與社群**：上游 main 的 tile store 流程和我們相同，也不寫上述 gen8 暫存器（freedreno 註解 "gen8 TODO"）；
 社群的 Android Turnip 版本說 A830 的 GMEM 會花、建議 sysmem。所以這很可能是上游在多 slice gen8＋KGSL 上的未解問題，
 我們的止血（合成器 sysmem）和社群做法一致。
+
+### 11-12 深夜：根因找到（drm2kgsl 的優先級對應，virglrenderer 5faa56fa）
+
+**原因**：這個 VM 在 vms.json 設了 `DRM2KGSL_PRIORITIES=3`（只有 5566 有），drm2kgsl 把 guest 較高優先級的佇列（合成器）
+對到 KGSL 優先級 4／5，也就是第二個 ringbuffer（KGSL 16 個優先級、每 4 個一個 ringbuffer）。Android 自己的 UI——launcher、
+SystemUI，用原廠驅動——在同一個 ringbuffer 的優先級 4。同一個 ringbuffer 內、優先級不同的 context 之間，原廠 context 的工作會
+插進 guest 一個 pass 的 bin 之間，tile memory 沒有被保存（不同 ringbuffer 之間是正規搶佔，有存檔／還原）。原廠驅動會把圖層
+整張留在 tile memory（launcher 捲動頁面時 1536 寬；1536x2400 正是 1536 寬、每像素 4 bytes 能放進它快取區下方 0xE58000 的
+最大 tile 對齊高度），所以 guest 的 framebuffer 出現固定的 (0,0)–(1536,2400) 零矩形，以及以 1536 列距讀出的位移區塊。
+KGSL 的 preemption 開關不影響（不是那個搶佔）。
+
+**怎麼找到的**
+- 觸發條件其實是 host launcher 的動畫，不是重進 console：console 留在背景、launcher 左右滑 24 次，guest framebuffer 就壞。
+  通知欄開關（SystemUI）觸發不了；自己寫的探針 context（`kgslpoke`，送原廠式的標記與暫存器）也觸發不了。
+- `/sys/kernel/debug/kgsl/kgsl-3d0/ctx/*` 列出每個 context 的優先級：launcher／SystemUI VK 4、SurfaceFlinger GL 1、
+  一般 app 8；crosvm 裡 guest 合成器是 5。
+- 對照實驗（都在強制 GMEM 下）：拿掉 `DRM2KGSL_PRIORITIES`（guest 全部在 8）→ 重進 24/24 乾淨、launcher 滑 64 次零壞點；
+  設回 3 並換上新對應（合成器 8、guest app 12）→ 16/16 乾淨、滑 40 次零壞點；Android 設定頁（VK 8，和合成器同優先級同
+  ringbuffer）捲 30 次也零壞點。所以條件是「同 ringbuffer 且優先級不同」。
+
+**修正**：`kgsl_priority_flags`——guest 只有一個優先級時全部用預設（不變，Linux guest 的情況）；有多個時較高的留在預設 8、
+最低的（Turnip 的 medium／low，一般 guest app）用 12（第四個 ringbuffer，被預設的搶佔）。guest 佇列不再進第二個 ringbuffer。
+效能（perfab.py，新對應）：sysmem 81.7 fps、autotune 78.7、gmem 80.5，GPU p50 7.4–8.6 ms，和舊對應同量級。
+
+**還留著的**
+- crosvm 行程裡 host 端的顯示 blit（app 的 Turnip，KGSL 優先級 5）仍在第二個 ringbuffer。它不寫 guest 記憶體，壞了只會是
+  當下那一幀；要不要移出來還沒決定。
+- 合成器的 sysmem 止血（NativeMetal e84d02f）還在；5566 上的 Turnip 帶著今天的實驗補丁（都是預設關閉的開關，外加上游
+  78fd465c 與「GMEM 快取區配置對齊原廠」——後者預設開啟、未證實有益）。要做一次乾淨的重編再決定止血去留。
+- 5567／5568 沒設 `DRM2KGSL_PRIORITIES`，不受影響；它們的 virglrenderer 還沒更新。
+- 今天為了追這個做過、最後證明無關的：見上面三節。對上游有價值的副產品：原廠驅動 gen8 指令流的抓法、Mesa 的 gen8 GMEM
+  快取區比原廠少保留頂端 0x78000（原廠 BV 位置緩衝固定在 0x1158000）。
 
 **還可以試的方向**
 - c1／c2 的 CLEAR 事件是否打到 c0 的 GMEM：讓 memoryless 的 DontCare 載入不發 CLEAR（改 metal2vulkan 或 Turnip），看大矩形是否消失。
