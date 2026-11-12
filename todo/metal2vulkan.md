@@ -112,3 +112,40 @@ guest 的 Metal 由 NativeMetal plugin 交給 metal2vulkan，經 Turnip（virtio
 - 手機上的 GPU 時間：Turnip u_trace；KGSL `gpu_busy_percentage`（要 root）。
 - CPU profile：spindump 加新 plugin 的 dSYM（`atos`／`llvm-symbolizer --inlining`）。
 - 回歸：`metalcheck-run.py`、`gfx-suite.sh`、webgpu-samples 的 `wgsweep.py`、three.js WebGL 2 範例。
+
+## 11-12 畫面局部閃爍：合成器的 GMEM pass 寫壞 framebuffer（止血：合成器改 sysmem，NativeMetal e84d02f）
+
+**現象**：畫面某一小塊（或一大片黑）每隔一幀閃一次。11-11 是狀態列黑塊，11-12 是左邊 32×8 的時鐘碎片和 1536×2400 的全零矩形。
+使用者發現「app 端退出再進入 native display 有機率觸發；滑動有時清掉、有時只是變樣」。
+
+**機制**：CoreAnimation 只重畫有變動的區域。合成器某個 pass 被 Turnip 的 autotuner 送去 GMEM 時，會在它畫的那張 framebuffer 留下
+16×4 對齊的錯誤區塊（全零或別的 pass 的殘留），之後沒人重畫，兩張 framebuffer 輪流送出就閃。錯誤內容在 guest 記憶體裡
+（用 dmabufgrab 從 crosvm 的 udmabuf 讀出確認），host 只讀不寫。退出/進入會打亂 framebuffer 輪替，補畫範圍變大，才進 GMEM。
+
+**重現與 A/B**（5566，scratchpad `reentry.py`：HOME → `am start --activity-clear-task` 操作頁 → 錄 2 秒找交替區塊；每輪 8 次）：
+
+| 條件 | 結果 |
+|---|---|
+| 原設定（autotune） | 3/8 觸發 |
+| `TU_DEBUG=gmem,nocb` | 幾乎每次 |
+| `TU_DEBUG=sysmem,nocb` | 16/16 乾淨 |
+| 修正後（合成器 sysmem，其餘 autotune） | 24/24 乾淨 |
+
+排除（都照樣觸發）：host Vulkan 複製 vs CPU 複製、BKForceMirroredOrientation=portrait、操作頁的感測器轉發、host KGSL preemption 關閉、
+`nobin`、`nobinmerging`、DontCare 寫回強制 STORE（`debug/dont-care-store`）、`tu_dont_care_as_load=true`。framebuffer 2048×2732 符合
+gmem_align 16×4，走的是標準 blit load/store，不是 unpadded 路徑。**GMEM 真正錯在哪還不知道。**
+
+**修正**：外掛在 backboardd 預設 `TU_DEBUG=sysmem,nocb`，其他 process 維持 `nocb`（MSAA pass 在 sysmem 貴 4 倍，所以不全面改）。
+效能（所有 process 都 sysmem 的最壞情況，翻頁＋開關設定，ABAB）：72.7／80.8 fps 對 77.3／74.3，GPU 每幀中位數 9.4／8.3 ms 對 7.9／8.2，
+在雜訊內（當時手機 CPU 上限 1.2～1.6 GHz）。
+
+**同一版外掛新增**：`/private/var/ngpu/debug/env`，每行 NAME=VALUE 在外掛預設值之前 setenv，Turnip driconf、TU_DEBUG、m2v 開關都不用重編就能試。
+
+**還沒做**
+- 找 GMEM 的真正原因：env 檔讓合成器回 `gmem,nocb`，開 u_trace（MESA_GPU_TRACES）和 `NATIVE_METAL_DUMP_CB` 重現一次，用 dmabufgrab 定位
+  錯誤區塊，對出是哪個 pass 的 load／store；不夠再用 `TU_DEBUG=rd` 存指令流離線解碼。
+- 5567、5568 部署這版外掛。5566 這次同時套了 BKForceMirroredOrientation=portrait（原本只有 5567 有）。
+- 其他 process（app 自己的 drawable）在 GMEM 下有沒有同樣問題，沒測。
+- 螢幕關著時 guest 仍以約 13 fps 畫時鐘（一晚 27 萬幀在 host 端顯示失敗），耗電，另案。
+- 測試中 guest 兩次異常：強制 sysmem 後自己重開一次；強制 GMEM 測到一半卡住空轉、手機 load 到 70，停 VM 後恢復。原因沒查。
+
