@@ -149,3 +149,40 @@ gmem_align 16×4，走的是標準 blit load/store，不是 unpadded 路徑。**
 - 螢幕關著時 guest 仍以約 13 fps 畫時鐘（一晚 27 萬幀在 host 端顯示失敗），耗電，另案。
 - 測試中 guest 兩次異常：強制 sysmem 後自己重開一次；強制 GMEM 測到一半卡住空轉、手機 load 到 70，停 VM 後恢復。原因沒查。
 
+### 11-12 下午：追 GMEM 根因的結果（還沒找到，但範圍縮到 GPU 執行層）
+
+**最硬的證據**（`debug/dump-cb-now` 的 pass 傾印，每個 command buffer 後讀回 framebuffer）：兩個連續送到同一張 framebuffer 的
+command buffer 內容完全相同（同附件、同 scissor、同貼圖、同 draw 數），前一個之後 framebuffer 正常，後一個之後多出一大片
+(0,0,0,0)。指令相同、結果不同 → 不是 CoreAnimation 或 metal2vulkan 送錯，是 Turnip 的 GMEM 指令在 A840 上執行的結果不穩定。
+
+**pass 的實際樣子**（`FD_RD_DUMP=trigger` 存指令流，上游 cffdump 解碼；工具在 scratchpad `mesa-up-build2`）：
+- 一個 pass、三個顏色附件：c0 framebuffer（BGRA8，LOAD／STORE，GMEM base 0）、c1（RGBA16F，memoryless）、c2（R32F，memoryless）；
+  c1／c2 每個 bin 先用 BLIT_EVENT_CLEAR 清成 0（GMEM base 0x3f0000、0xbd6000）。
+- bin 1056×928，2×3 共 6 個，有 binning pass。三個附件用到 0xF93000，GMEM 18 MB 頂端 0xfcc000 起是深度／顏色／VPC 快取，餘裕約 230 KB。
+- 平常的時鐘更新就是這個 pass（scissor 約 192×96），出錯時也是它，沒有特別的大範圍重畫。
+
+**兩種錯誤形狀**
+- 條紋：192×8（寬度＝scissor 寬度），隔 8 列一條，內容是同一幀時鐘區域的像素，出現在別的位置（位移是 96 的倍數）。
+- 大矩形：固定 1536×2400（螢幕座標，不是 bin 的整數倍），全 (0,0,0,0)。指令流裡找不到這個尺寸。`debug/no-inline-memoryless`
+  開著時幾乎每次退出/進入都出現。兩張 framebuffer 都變黑後就不再「閃」，交替偵測（reentry.py）看不到，要看讀回的 black 計數。
+
+**這一輪新排除的**（強制 GMEM 下都照樣出錯）：host preemption（這次確認開關生效）、`flushall`＋`syncdraw`、
+`noconcurrentresolves,noconcurrentunresolves`（那輪 guest 中途卡住，只算大致排除）、bin 前後加 WAIT_FOR_IDLE／SUBPASS_SLICE_FENCE
+（實驗開關 `TU_DARWIN_BIN_SYNC`）、`nobin` 對大矩形也無效、2-slice A840 設定（見下）。
+
+**走錯的一步**：一度以為 5566 是 2-slice A840（上游 07ea97900，`0x44050A21`）被當成 3-slice。用 `/data/local/tmp/kgslid` 直接問 KGSL：
+5566 `0x44050a31`（3-slice，設定本來就對）、5568 `0x44050001`、5567 `0x43051401`。強套 2-slice 設定讓 host GPU hang（gpufaults 15→159），已撤。
+
+**順手修的**：drm2kgsl 不再把 chip id 最低位元組清掉（virglrenderer 5469ef02，5566 已換 `libvirglrenderer.so`，舊檔 `.bak-7054aca7`）；
+guest 現在看到 `0x44050a31`。Linux guest 的 Mesa 還沒重新確認。
+
+**5566 上現在跑的 Turnip 比原始碼多三個未提交的補丁**（Mac `fresh27` 的 mesa-work 與 pins）：上游 2-slice A840 項目（可留）、
+`turnip-darwin-virtgpu-raw-chip-id`（遮罩拿掉後已不需要，`TU_DARWIN_CHIP_ID` 覆寫會讓 GPU hang，別用）、
+`turnip-darwin-bin-sync-experiment`（無效）。下次正式重編前把後兩個從 mesa-work 和 pins 拿掉。
+
+**還可以試的方向**
+- c1／c2 的 CLEAR 事件是否打到 c0 的 GMEM：讓 memoryless 的 DontCare 載入不發 CLEAR（改 metal2vulkan 或 Turnip），看大矩形是否消失。
+- 把 pass 拆小：限制 bin 大小或 GMEM 用量（darwin KMD 沒有 `TU_GMEM`，要加），看是否和「三附件幾乎用滿 GMEM」有關。
+- 拿高通原廠驅動在同一顆 GPU 上跑類似 pass 的指令流對照（Android 端可抓）。
+- 回報上游 Mesa（a8xx GMEM、多附件、局部 scissor）。
+
