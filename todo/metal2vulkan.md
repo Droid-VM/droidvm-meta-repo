@@ -292,7 +292,10 @@ KGSL 跳過那筆、guest 停 1–2 秒後繼續，backboardd 不會死。重現
 | 只在 cmdbuf 開頭不派工作給 BV | 1/21（中止） |
 | 同上＋事件與等待封包只給 BR 執行 | 6/52（中止） |
 | 完全不設 CBD | 開機 1 分鐘內 100 多次（BR 的 binning 沒有 visibility stream） |
-| **`nocb` 下完全不碰 BV（turnip-nocb-leave-bv-alone.patch）** | **0/80** |
+| `nocb` 下完全不碰 BV（turnip-nocb-leave-bv-alone.patch） | 0/80，之後 1/20、開機 1/8 |
+| 同上＋上限 8、任意位置切（實驗） | 55 次／6 次重啟 |
+| 同上＋上限 8、只在 command buffer 開頭切（實驗） | 0/12 |
+| **只在 command buffer 開頭切（fb9fb47），不含上一列的補丁** | **0/80** |
 
 已排除（各自仍會 hang）：GMEM／sysmem、撤掉止血、只在 backboardd 開 `IR3_SHADER_DEBUG=noearlypreamble`、m2v pipeline 快取
 冷熱（prime.log：熱 0.4–1 秒、冷 38–40 秒）、drm2kgsl 的每幀功耗限制、優先級 12／第四個 ringbuffer、優先級對應本身。
@@ -309,66 +312,58 @@ KGSL 跳過那筆、guest 停 1–2 秒後繼續，backboardd 不會死。重現
   SP_PS_CNTL_0；78fd465c 說沒鎖存的階段會去舊的 SP_xS_BASE 抓。我們所有 guest 行程共用 crosvm 一個 KGSL 位址空間（VBO，
   沒綁的範圍是零頁），舊位址不會 fault。但把重置擴到 VS/HS/DS/GS/CS 沒有用（6/80）。
 
-**後半夜：成因與修正**（再 30 多份即時抓下的 snapshot＋微碼反組譯；上一版這一段的推論有錯，已改寫）
+**成因與修正**（11-13 早上定案。這一段先前寫過兩版，推論都只對一半，以下是改寫後的）
 
-先訂正兩件事：
-- BV 在「略過模式」只執行 7 種封包（IB 進出、`THREAD_CONTROL`、`ME_INIT`、`SET_SECURE_MODE` 等；微碼裡的表在 BV 0x183、
-  BR 0x347），BR 區段的事件與等待它一概跳過。把 Turnip 的事件／等待包進 `CP_COND_REG_EXEC(THREAD_MODE, BR)` 所以沒有意義
-  （實測 6/52）。先前看到 BV 停在 cache clean，是**核心**在每筆提交結尾下給 BV 的時間戳事件
-  （`THREAD_CONTROL BV; EVENT_WRITE7 CACHE_CLEAN+ts`，接著 BR `WAIT_TIMESTAMP`），不是 Turnip 的。
-- 「完全不設 CONCURRENT_BIN_DISABLE（CBD）、只切到 BR」走不通：BR 在 CB 啟用的模式下做 binning 不會寫出 visibility stream
-  的大小，`CP_SET_BIN_DATA5_OFFSET` 讀到 0 就進微碼裡一個故意的無窮迴圈（BR 0x8ca），每個 binned pass 都 hang（開機一分鐘
-  一百多次）。BR 自己做 binning 一定要 CBD。
+根因在 guest 端 Turnip 的 Darwin 驅動層（`tu_knl_darwin.cc` 的 `darwin_queue_submit`）：
+- 一筆核心提交最多帶 128 個指令流 buffer（`NativeAdrenoAbiMaxBuffers`），更長的清單**每 128 個切一刀，不管切在哪**。一個
+  command buffer 的指令流超過一個 BO 就是好幾個 buffer，所以會切在同一個 command buffer 的兩個區塊中間。
+- 兩筆核心提交之間，ringbuffer 裡是核心自己的指令：重新指定執行緒（`THREAD_CONTROL BOTH`、不帶 CONCURRENT_BIN_DISABLE，
+  也就是 concurrent binning 啟用），別的 context 也可能插進來跑。後半段開頭沒有自己的 thread control，BV 就跟 BR 一起執行
+  它。BV 什麼都沒設定，遇到第一個 cache 事件或 `CP_BLIT` 就永遠停住（BV 的 HLSQ busy）；BR 停在那一段的下一個 thread
+  control，在握手裡等 BV。
+- 合成器啟動的頭幾幀一次提交幾百個 buffer，所以只在 backboardd 啟動時發生。
+- 證據：13 份 snapshot 無一例外，卡住那筆的**前一筆剛好 128 個 IB**、最後一個是寫滿的區塊（0xffc–0x1000 字）；BV 的讀取
+  指標在下一筆第一個 buffer 裡的事件或 `CP_BLIT` 上，BR 在它後面的 thread control 上（`snapsubs.py DUMP…`）。
+- 對照實驗（同一個執行檔，用旗標檔把上限降到 8 並切換規則）：任意位置切，6 次重啟 **55 次** hang；只在 command buffer
+  開頭切，12 次重啟 **0 次**。
 
-CBD 在微碼裡的樣子：
-- 狀態在控制暫存器 0x278 的 bit 31（CB 啟用），硬體暫存器 0xdf1 跟著它。`THREAD_CONTROL` 的 CBD 位元和目前狀態不同時，
-  BR 和 BV 做一次握手：BR 寫請求到 0x25e、BV 回到 0x25f，先 0x117 再 0x8217；兩邊各自先等自己的管線排空，BV 最後翻轉
-  bit 31。BV 在 ringbuffer 層等 BR 時會自己打開搶佔（PREEMPT_TRIGGER），在 IB 裡等則不會。
-- 這些控制暫存器在 snapshot 的暫存器段看得到，位址＝0x780＋編號：0x9de／0x9df 握手、0x9f8＝0x278、0x9fc／0x9fd 是搶佔
-  流程裡 BR 與 BV 對步驟用的（BR 寫 0x20 等 BV 也到 0x20）。
-- 核心的 ringbuffer 指令從不設 CBD（IB 之前 BOTH，之後 BR、BV、BOTH）。原廠驅動也從不設。
-
-Turnip 在 `nocb`（上游現在的預設）下卻讓旗標在 **IB 裡**一直變：cmdbuf 開頭 BR｜CBD；每個有 binning 的 pass 在 BR 做完
-binning 後切到 **BV（不帶 CBD）** 送 `DUMMY_EVENT|INC_BV_COUNT` 和 `RM7_BIN_VISIBILITY_END`，切回 BR 等
-`PIPE_BR_WAIT_FOR_BV`，下一個 pass 開頭再 BR｜CBD；A840 有 `has_gmem_vpc_attr_buf`，每次 GMEM↔sysmem 切換又是 BOTH 再
-BR｜CBD。也就是每個 pass 握手兩次以上，而且 BV 的管線裡有 Turnip 給的事件。
-
-現場歸類（`RBBM_GFX_BV_STATUS` 永遠 0x00fc1006：BV 的 HLSQ busy）：
-- BR 在握手裡等 BV（BR fxn904，PC 0x38e–0x390），BV 在握手裡等自己的管線排空（BV fxn1419，WFI_PEND_CTR 不歸零）。
-- BR 在搶佔流程第 0x20 步等 BV（BR fxn7120，PC 0x1bd4–0x1bd7；0x9fc＝0x20、0x9fd 是別的值），BV 在自己的搶佔流程裡等
-  管線閒置（BV fxn7208，控制暫存器 0x1a4 bit 0）。
-- 同上，但 BV 正在**執行** BR 區段裡的 `CP_BLIT`：它已經越過下一筆提交第一個 IB 開頭的 thread control，卻不在略過模式。
-- 每一幀都來搶佔合成器（第三個 ringbuffer）的是 crosvm 的顯示 blit（優先級 5，第二個 ringbuffer）。合成器和 blit 同在一個
-  ringbuffer 的舊對應 0/20、分開的都會 hang，對得上。
-
-各自仍會 hang 的嘗試：只在 init 不派工作給 BV（1/21）、backboardd 不帶 `nocb`（1/58）、guest context 改
-`PREEMPT_STYLE_RINGBUFFER`（1/24）、只加「閒置後提交前讀 gpufaults」（2/24）、事件與等待只給 BR（6/52）。
-
-**修正**（fork `patches/mesa/turnip-nocb-leave-bv-alone.patch`）：concurrent binning 對整個 instance 關閉時，Turnip 完全不碰 BV。
-- 每個 thread control 都帶 CBD（`tu7_thread_control`），旗標在一筆提交裡只在第一個封包變一次；BR 在旗標設著時什麼區段都
-  執行，BV 什麼都不執行。
-- cmdbuf 開頭只有一個 thread control，沒有給 BV 的靜態暫存器、cache 事件和 bin preamble。
-- binned pass 不切到 BV、不送 BV 計數、BR 不等它也不加 BR 計數；停用 LRZ 與 simultaneous-use 不和 BV 同步。
-- 等於回到上游加入 concurrent binning（ea24dce5e37）之前的指令流；每筆提交剩下開頭那一次握手（核心結尾那次在 ringbuffer
-  層，可被搶佔）。
-
-結果（5566，每 27 秒殺一次 guest 的 backboardd）：**80 次重啟 0 hang**，期間 host 的 `preempt_info` 多了約 7.8 萬次 ringbuffer
-搶佔、4.4 萬筆提交、fence 逾時 0；先前各版本是 3/32、1/40、6/80、3/55、6/52。fork b9d9df6。5566 的 plugin 已換成由已提交原始碼編出的 f05506eb。
-
-**沒有歸零**：換 plugin 後的一次開機裡又記到 1 次（合成器的新 context 第 3 筆提交，GPU 閒置 200 ms 喚醒後）。現場和以前
-同類，但前後 100 多毫秒沒有任何別的 ringbuffer 送工作（不是搶佔）：BR 在一個 0xab 字的小 IB 結尾的 thread control 上發現
-CB 狀態（0x278 bit 31）又是啟用、發出握手請求；BV 的微碼卻還在**前一筆提交**最後一個 IB 的尾巴，以正常模式執行那裡的
-`CACHE_CLEAN` 事件（等 0x136 bit 20）。BV 能落後一整筆，是因為核心給 BV 的時間戳值在同一個 context 的連續提交裡不變
-（這次是 1），BR 的 `WAIT_TIMESTAMP` 等於不等。BV 為什麼離開略過模式、狀態位元為什麼翻回去，還沒看出來；微碼裡整個覆寫
-0x278 的只有 BR 的搶佔還原（從 record +0x124 讀回）和上電初始化（0x32，照硬體暫存器設 bit 31）。
+修正（fork fb9fb47，`patches/mesa/turnip-darwin-submit-split-at-command-buffers.patch`）：一筆核心提交只在「下一個 buffer 的第一個
+封包是 `CP_THREAD_CONTROL`」的地方結束——a7xx 起每個 command buffer 都這樣開頭（`tu_init_hw`），trace／autotune 的小指令流
+跟著前一個 command buffer。連續 128 個 buffer 裡找不到這種開頭時照舊切，並警告一次。
+結果（5566，每 27 秒殺一次 guest 的 backboardd，plugin 6c5f36ff）：**80 次重啟 0 hang**，4.2 萬筆提交，期間 host 記了約 7.3 萬次
+ringbuffer 搶佔；修正前是 3/32、1/40、6/80、3/55、6/52。
 
 還沒做／要留意：
-- 每筆提交開頭那一次握手還在 IB 裡（核心每筆提交都把旗標清掉，BR 做 binning 又一定要它），理論上的窗口沒有歸零，只是從
-  每個 pass 兩次以上降到每筆提交一次，而且 BV 的管線裡不再有 Turnip 的事件。要長時間觀察 gpufaults。
-- Linux guest 的 Mesa（26.3 與 27.0 都是 concurrent binning 預設關）走同一條指令流，同一個補丁可直接套用，待驗證後一起推。
-- host 端 app 的 Turnip（顯示 blit 那個 context）是 10-27 的版本，也有同樣的指令流；它只會被第一個 ringbuffer 搶佔，還沒看過
-  它 hang，暫時不動。
-- PROGRESS「16 MiB block 會讓 render server hang」很可能是同一件事（提交與 pass 變多），修正後還沒重測。
+- 單一 command buffer 自己就超過 128 個 buffer（指令流 2 MiB 以上）時仍會切在中間；要根治得把 ABI 的上限加大（guest 核心的
+  NativeAdreno 也要跟著改）。目前只有警告。
+- Linux guest 不受影響：它的 virtio 驅動層一次送出整份清單（`nr_cmds` 沒有上限）。host 端 app 的 Turnip（KGSL 後端）也是。
+- PROGRESS「16 MiB block 會讓 render server hang」可能同因（block 小、buffer 多），修正後還沒重測。
+
+走過的彎路（各自仍會 hang，或只是變少）：
+- 「`nocb` 下完全不碰 BV」（fork b9d9df6，`turnip-nocb-leave-bv-alone.patch`）：每個 thread control 都帶 CBD、binned pass 不切 BV、
+  cmdbuf 開頭不給 BV 東西。80 次重啟 0 hang，之後 20 次重啟 1 次、一次開機 1 次——它只是讓被切開的後半段更早遇到一個
+  thread control（BV 停在那裡等 BR，握手之後回到略過模式），不是成因。它的 commit 訊息把成因寫成「每個 pass 的握手」是錯的。
+  已移除（fork 5143df6）：它讓 Turnip 產生指令流的五個檔案偏離上游，卻不是必要的。留下的一個數字：沒有它時 host 記到的
+  小搶佔（握手引起的 L1A）約 1.8 倍（80 次重啟 2729 對 1501），之後看合成器 pass 的效率時也許用得上。
+- 只在 cmdbuf 開頭不派工作給 BV（1/21）、backboardd 不帶 `nocb`（1/58）、guest context 改 `PREEMPT_STYLE_RINGBUFFER`（1/24）、
+  只加「閒置後提交前讀 gpufaults」（2/24）、事件與等待封包只給 BR（6/52）。
+- 「完全不設 CBD、只切到 BR」：BR 在 CB 啟用的模式下做 binning 不會寫出 visibility stream 的大小，
+  `CP_SET_BIN_DATA5_OFFSET` 讀到 0 就進微碼裡一個故意的無窮迴圈（BR 0x8ca），每個 binned pass 都 hang。BR 自己做 binning
+  一定要 CBD。
+- drm2kgsl 的 stream check 開著時 188 次重啟都不 hang：原因沒有驗證，推測是提交變慢後一次累積的 buffer 不到 128 個。
+
+過程中弄清楚的微碼行為（之後查 BR／BV 問題用得上）：
+- BV 在「略過模式」只執行 7 種封包（IB 進出、`THREAD_CONTROL`、`ME_INIT`、`SET_SECURE_MODE` 等；表在 BV 0x183、BR 0x347），
+  BR 區段的事件與等待一概跳過。略過模式不跟進比「開始略過的那一層」更深的 IB。
+- CBD 是狀態：控制暫存器 0x278 的 bit 31（CB 啟用），硬體暫存器 0xdf1 跟著它。`THREAD_CONTROL` 的 CBD 和目前狀態不同時
+  BR 和 BV 握手（BR 寫 0x25e、BV 回 0x25f，先 0x117 再 0x8217），兩邊各自先排空自己的管線，BV 最後翻轉 bit 31。BV 在
+  ringbuffer 層等 BR 時會觸發一次 skipsaverestore 搶佔（PREEMPT_TRIGGER，原因碼寫在 0x44c），在 IB 裡等則不會。
+- 核心在每筆提交結尾：`THREAD_CONTROL BV; EVENT_WRITE7 CACHE_CLEAN+ts`（BV 的 fence），再 `THREAD_CONTROL BR;
+  WAIT_TIMESTAMP`。fence 的值是每個 context 自己的計數，寫在每個 ringbuffer 共用的一格記憶體；新 context 從 1 數起，
+  所以它的前幾百筆提交 BR 根本不等 BV（那格還留著舊 context 的大數字）。
+- snapshot 裡看得到微碼的控制暫存器，位址＝0x780＋編號：0x9de／0x9df 握手、0x9f8＝0x278、0x9fc／0x9fd 是搶佔流程裡
+  BR／BV 對步驟用的；0x900–0x903 是各 pipe 預取中的 IB1 位址／剩餘／大小，0x920–0x925 是預取佇列的讀寫指標（單位 4 字）。
+  kgsl 在 dmesg 印的 `BR: … ib1 X/N` 也是預取位置，不是執行位置。
 
 **工具**（本次 session 的 scratchpad，之後要搬進 rig）
 - `snaplog.py DUMP [N]`：snapshot 的事件記錄（0x1a01：每筆 submit／retire 的 ctx、優先級、執行時間）、各 ringbuffer 指標、
@@ -379,6 +374,7 @@ CB 狀態（0x278 bit 31）又是啟用、發出握手請求；BV 的微碼卻�
 - drm2kgsl 診斷（flag `/data/local/tmp/nctx-stream-check`）：gpufaults 變動時把各 context 留存的提交寫到
   `/data/local/tmp/nctx-hang-*.bin`，`hangdecode.py` 轉 .rd 給 cffdump。問題是開了它就不 hang。
 - `hangwatch.sh`：每 2 秒看 gpufaults，一變就把 snapshot 和 dmesg 拉到 `hangs/<時間>-fault-N/`，印出 BR／BV 的 PC。
+  `snapsubs.py DUMP…`：讀取指標附近每筆提交的 IB 數與大小（找到 128 那個規律的工具）。
   `snaproq.py DUMP PIPE LO HI`：預取佇列解成封包（0x000 起是 ringbuffer 層、0x100 起是 IB1）。`snapcp.py DUMP LO HI`：
   各 pipe 的 CP 暫存器並排（0x900 起是 IB1 位址／剩餘／大小，0x9xx 是微碼的控制暫存器 0x2xx）。
   微碼的略過表與握手：BV `CP_THREAD_CONTROL` 在 0x110、握手 fxn448（0x1c0）；BR 在 0x2d0、fxn904（0x388）。

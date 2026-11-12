@@ -8,7 +8,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
-- ✅ **11-13** backboardd 啟動時的 host GPU hang（5–10% 的啟動；BR／BV 兩個微碼互等，guest 卡 1–2 秒）找到成因並修正（fork b9d9df6，5566 已部署）：Turnip 在 concurrent binning 關閉時仍讓每個 pass 的 CONCURRENT_BIN_DISABLE 旗標來回切換、還派事件給 BV，每次切換是一次 BR↔BV 同步，被別的 ringbuffer 搶佔時會卡死；改成完全不碰 BV 後 80 次重啟 0 hang（原 3–9 次）；開機時仍見過 1 次同類的，未歸零 → [細節](todo/metal2vulkan.md)
+- ✅ **11-13** backboardd 啟動時的 host GPU hang（5–10% 的啟動，guest 卡 1–2 秒）找到成因並修正（fork fb9fb47，5566 已部署）：Turnip 的 Darwin 驅動層把超過 128 個 buffer 的提交每 128 個硬切，切在同一個 command buffer 中間時，後半段在核心的 BOTH 模式下被 BV 當成自己的指令執行而卡死；改成只在 command buffer 開頭切，80 次重啟 0 hang（原 3–9 次；上限降到 8 的對照實驗 55 次對 0 次）→ [細節](todo/metal2vulkan.md)
 - ✅ **11-13** 合成器的 sysmem 止血撤掉（NativeMetal 312cde5）：閃爍根因修正後回到 autotuner，20 次重進＋40 次滑動零壞點，強制 GMEM 8 次也乾淨
 - ✅ **11-12** 畫面局部閃爍的根因找到並修正（virglrenderer 5faa56fa，5566 已部署）：VM 設了多個 GPU 優先級時，guest 合成器的 KGSL context 落在 Android UI（launcher、SystemUI，原廠驅動）用的第二個 ringbuffer 且優先級不同，Android 一有動畫，合成器正在跑的 tile memory pass 就被打壞；改成 guest 的佇列永不進那個 ringbuffer（合成器留在預設 8、guest app 降到 12）。強制 GMEM 驗證：修正前 16 次重進 9–16 次壞，修正後 0/16。細節 todo/metal2vulkan.md
 - ✅ **11-12** 畫面局部閃爍先止血（NativeMetal e84d02f，5566 已部署）：合成器一律 sysmem，24 次退出/進入全乾淨，效能差在雜訊內；順手拿掉 drm2kgsl 的 chip id 遮罩（virglrenderer 5469ef02），Linux guest 的 Mesa 待確認 → [細節](todo/metal2vulkan.md)
@@ -270,7 +270,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   footprint，jetsam 看不到真正的大戶
 - ⬜ **11-02** metal2vulkan keep_room 的空 pooled block（render server 547–616 MiB，`emptied=None`，trim 不釋放）；下一步：壓力
   ≥ Warning 時暫停 keep_room，或限制空 block 總量
-- ⬜ **11-02** 16 MiB block 會讓 render server 的 GPU context hang（3/5 vs 64 MiB 0/5，不是 UBWC），根因未查（11-13：很可能就是已修的 BR／BV 同步 hang，未重測）；fork feefe53、
+- ⬜ **11-02** 16 MiB block 會讓 render server 的 GPU context hang（3/5 vs 64 MiB 0/5，不是 UBWC），根因未查（11-13：可能和已修的「提交被切在 command buffer 中間」同因，未重測）；fork feefe53、
   AdrenoMetal 8f735a2 未推，手機 plugin 1a47826 沒有除錯檔時預設 16（guest 已寫 64）
 - ⬜ **11-02** kgsl-sync、vrend-sync、Binder:crosvm 被 VM 的 GPU cgroup 放進 `/dev/cpuset/gpuworker`（cpu 7），與 vCPU5
   共用 core 7（VM 設定問題，未改）
@@ -451,7 +451,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - **owner 工具：** 可以 ssh 進 guest；有 ownervisor 服務管理、toybox、zsh、lsdiag、gfxprobe。
 
 **已知問題（目前開著的）：**
-1. **render server 的 DeviceLost（偶發）：** host KGSL hang → backboardd client 0 EDEADLK → 畫面閃爍到重開機，沒有自動恢復（人工重啟 backboardd 可重開 context）。11-13 找到 hang 的一個成因並修正（見「已完成」），是否還有別的來源要再觀察 host 的 gpufaults。Maps 因此刻意不放進 GPU client 名單。
+1. **render server 的 DeviceLost（偶發）：** host KGSL hang → backboardd client 0 EDEADLK → 畫面閃爍到重開機，沒有自動恢復（人工重啟 backboardd 可重開 context）。11-13 找到 backboardd 啟動時那種 hang 的成因並修正（見「已完成」）；其他時機是否還有，要再觀察 host 的 gpufaults。Maps 因此刻意不放進 GPU client 名單。
 2. **偶發文字破圖：** 少數情況仍會出現錯位條紋，等重繪才恢復，無法照指令重現（常見那種已修，見 memory [[droidvm-garbled-text]]）。
 3. **一次性系統卷讀取失敗（原因未明）：** 陀螺儀那版某次開機約 4 分後 `/dev/disk3s1` 讀取全 EIO、backboardd 崩潰循環；重開後 6+ 分鐘正常。
    11-08 5567 疑似再一次：開機約 50 秒時幾十個 daemon 同時 SIGBUS，launchd reboot，卸載時 `vnode_rele_ext` panic（見「未解／待查」10-30）。
