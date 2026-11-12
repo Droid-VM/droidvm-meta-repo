@@ -180,6 +180,29 @@ guest 現在看到 `0x44050a31`。Linux guest 的 Mesa 還沒重新確認。
 `turnip-darwin-virtgpu-raw-chip-id`（遮罩拿掉後已不需要，`TU_DARWIN_CHIP_ID` 覆寫會讓 GPU hang，別用）、
 `turnip-darwin-bin-sync-experiment`（無效）。下次正式重編前把後兩個從 mesa-work 和 pins 拿掉。
 
+### 11-12 傍晚：再排除一批（仍未找到）
+
+強制 GMEM（`TU_DEBUG=gmem,nocb`）下每組 16 次退出/進入，括號內是仍出錯的次數。
+
+- **指令流在執行中被改寫：排除。** drm2kgsl 加了診斷（`/data/local/tmp/nctx-stream-check` 存在時啟用）：送出時保存每段指令與第一層
+  CP_INDIRECT_BUFFER 目標的副本，之後比對。3001 次提交、約 6 萬段，沒有一次在 KGSL 尚未 retire 時被改動（retire 之後才變的 2202 次，是正常重用）。
+- **guest 太早重用記憶體／host 太早回報完成：排除。** `/data/local/tmp/nctx-retire-delay-ms` 寫 8，host 把完成通知延後 8 ms
+  （log 有 `RETIRE-DELAY 8 ms`），照樣出錯（14/16）。host fence 等待統計正常（1932 次全成功，平均 6.6 ms）。
+- **bin 可見性讀回讀到舊值：排除。** 上游 1c87c6018 說 A8XX 的暫存器讀取封包不等閒置；我們的 pass 在 binning 後用 CP_REG_TO_MEM 讀
+  VSC_CHANNEL_VISIBILITY 來決定各 bin 的 load／store。實驗開關 `TU_DARWIN_COND_LS`：1＝讀回前 WFI（13/16）、2＝load／store 不看可見性（12/16）。
+- **load／store 的 blit 路徑：排除。** `3d_load`（11/16）、`unaligned_store`（9/16）。
+- **LRZ：排除。** `nolrz`（4/8）。
+- **framebuffer fetch 缺 slice fence：排除。** 這個 pass 會讀 tile memory（每個 bin 載入 6 個指向 GMEM 的紋理單元）；上游 MR 44348
+  （10b1ef466、cc1cf17c2、99200197c，`SUBPASS_SLICE_FENCE`）我們的基底沒有。`TU_DARWIN_COND_LS=4`＝每次繪製前發 SUBPASS_SLICE_FENCE（10/16）。
+- 上游 78fd465ce（gen8 未用的 shader stage 會留著別的 process 的狀態，要寫 BASE 才會 latch）說明 gen8 上跨 context 的殘留狀態是真的會發生的；
+  還沒 backport 測試。
+
+**測試注意**：連跑多組會把手機記憶體吃光（每次重進 console crosvm 多佔約 25 MB；kswapd 滿載、負載 60），guest 出現 waitq lock timeout panic
+一次。每組之間要重開 VM，並看 `uptime`／MemAvailable。`rast_order`、`forcecb` 那兩組因此作廢，沒有重測。
+
+**5566 上的 Turnip 又多一個未提交的實驗補丁** `turnip-darwin-cond-ls-experiment`（`TU_DARWIN_COND_LS` 位元 1／2／4／8），下次正式重編前一併拿掉。
+virglrenderer 的兩個診斷（預設關閉）已提交（d21d37be）。
+
 **還可以試的方向**
 - c1／c2 的 CLEAR 事件是否打到 c0 的 GMEM：讓 memoryless 的 DontCare 載入不發 CLEAR（改 metal2vulkan 或 Turnip），看大矩形是否消失。
 - 把 pass 拆小：限制 bin 大小或 GMEM 用量（darwin KMD 沒有 `TU_GMEM`，要加），看是否和「三附件幾乎用滿 GMEM」有關。
