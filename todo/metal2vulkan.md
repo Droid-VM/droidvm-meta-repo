@@ -203,6 +203,38 @@ guest 現在看到 `0x44050a31`。Linux guest 的 Mesa 還沒重新確認。
 **5566 上的 Turnip 又多一個未提交的實驗補丁** `turnip-darwin-cond-ls-experiment`（`TU_DARWIN_COND_LS` 位元 1／2／4／8），下次正式重編前一併拿掉。
 virglrenderer 的兩個診斷（預設關閉）已提交（d21d37be）。
 
+### 11-12 晚：現場鑑識、和原廠驅動對照（仍未找到）
+
+**直接讀 framebuffer 得到的幾何**（`fbgrab.py`：crosvm 每個 22380544-byte udmabuf inode 取一個 fd 讀全幅）
+- 黑色矩形精確是 (0,0)–(1536,2400)，矩形外永遠正確；矩形內原有內容全部變 0，只剩該 pass 自己畫的。是 c0 的 LOAD 讀到零，
+  而那個 pass 和前後正常的 pass 指令完全相同（使用者：滑動畫面矩形會變）。
+- 條紋是 dirty rect 內的 32x8 區塊被搬走。把每塊和真正來源配對：來源單元 h（16 列的「場」：一個 32 列 tile 的偶數或奇數 8 列帶）
+  6、8、9、11 依序落在目標單元 4、5、6、7（凡 h%3≠1 的都被搬、緊密排列），x 每單元多 96 px。即「按 3 個 slice 寫入的資料
+  被當成只有 slice 0 與 2 兩個來讀」。tile 對齊 96x32 = 3 slice × 32。
+
+**排除**（強制 GMEM，每組 16 次重進，括號內仍出錯次數）
+- 別的 KGSL context 殘留暫存器：`kgslreg`（自己的 context 用 CP_REG_TO_MEM 讀）顯示每次提交開始時 context 暫存器都是 0，
+  連同一個 context 自己上一次寫的值也不留。從另一個 context 反覆寫 RB_RESOLVE_GMEM_DIMENSION 也不影響 guest。
+- `noubwc`（14）、IFPC／hwcg 關（14）、pass 拆開後重載 memoryless 附件（u_trace 顯示出錯時只有普通 pass：c12 l4 s4）。
+- 原廠驅動有寫而 Turnip 不寫的：`RM8_PGMEM_ON`（16）、`RM8_PGMEM_OFF`（15）、`RB_RESOLVE_CR_CNTL=1`（11）、
+  binning 前 `VSC_UNKNOWN_0D08=1`（10）。第一次送 PGMEM_ON 時切回 BR 漏了 CONCURRENT_BIN_DISABLE，host 多了 30 幾次 GPU fault
+  （那是我的錯，不是標記造成的；修正後每輪 0–1 次）。
+
+**原廠驅動的指令流怎麼抓**（5566 host，root）
+- `mount -t debugfs debugfs /sys/kernel/debug`（原本沒掛）；`kgslcap TID N OUT`：ptrace 目標執行緒（launcher 的 RenderThread），
+  在它的 IOCTL_KGSL_GPU_COMMAND 進入點讀出 IB 清單；IB 物件沒有可查的 useraddr（debugfs 位址被雜湊），所以在該執行緒內
+  注入 IOCTL_KGSL_GPUMEM_GET_INFO（位址→物件 id）與 mmap(id<<12)（唯讀）來讀內容，遞迴抓 IB、draw state、amble。
+  `cap2rd.py` 轉成 .rd，上游 cffdump 可解。launcher 不受影響、0 fault。
+- 原廠的多 bin GMEM pass：韌體 bin 迴圈（CP_START_BIN／CP_END_BIN＋CP_SET_UNK_BIN_DATA，Turnip 是手動逐 bin），
+  GMEM pass 前 RM8_PGMEM_ON、非 GMEM pass 前與指令流結尾 RM8_PGMEM_OFF，每個狀態區塊寫 RB_RESOLVE_CR_CNTL=1，
+  clear／store 前寫 RB_RESOLVE_GMEM_DIMENSION／GMEM_BUFFER_CNTL／PARTITION／CNTL_4（多 bin 時皆 0；單 bin 整張在 GMEM 時
+  DIMENSION=bin 尺寸、FULL_IN_GMEM），pass 之間 SUBPASS_FENCE＋WFI。GMEM 快取區排列順序和 Turnip 不同但大小一致。
+- 兩邊寫的暫存器全表比對：原廠寫、Turnip 從不寫的 96 個；和 tile memory 有關且非零的只有 CR_CNTL 與 VSC_0D08。
+
+**上游與社群**：上游 main 的 tile store 流程和我們相同，也不寫上述 gen8 暫存器（freedreno 註解 "gen8 TODO"）；
+社群的 Android Turnip 版本說 A830 的 GMEM 會花、建議 sysmem。所以這很可能是上游在多 slice gen8＋KGSL 上的未解問題，
+我們的止血（合成器 sysmem）和社群做法一致。
+
 **還可以試的方向**
 - c1／c2 的 CLEAR 事件是否打到 c0 的 GMEM：讓 memoryless 的 DontCare 載入不發 CLEAR（改 metal2vulkan 或 Turnip），看大矩形是否消失。
 - 把 pass 拆小：限制 bin 大小或 GMEM 用量（darwin KMD 沒有 `TU_GMEM`，要加），看是否和「三附件幾乎用滿 GMEM」有關。
