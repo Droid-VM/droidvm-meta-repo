@@ -8,13 +8,13 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 已完成
 
-- ✅ **11-11** VM 操作介面重構完成（app db2c8da、e26c6af、945b748、180532a、0b35661、766e4a6、72b662a 本地）：native 與 VNC 都能從操作頁投到外部顯示器（前景服務持有的 Presentation，app 內留深色色塊，記住顯示器），鍵盤上／下與左右鍵按鈕列（選單長按），USB 直通彈窗（everyone／hid 寫規則，規則新增類別層；插著的裝置只移到拔掉為止、不寫規則）取代 VNC 投放頁與 USB HID 直通，兩個 console 共用輸入控制器與選單 → [細節](todo/console-ui.md)
-- ✅ **11-11** iPadOS 27 的序列埠與 virtio-console（device 77bb46b、DarwinBoot c3ff6e4（前一個 a348165 是先前未提交的 intid＋cluster-type）、crosvm 83b3a15e6、app 7ab8caf 本地；fork 的 DarwinBoot pin 未更新）：SBSA UART（xnu-12377 的 PL011_UART）與新寫的 16550 驅動當 kernel serial console，`serial=3` 內建，/dev/console 可讀寫（5567 雙向實測）；16550 用 `serial-device-name=comN` 指定（實測 kernel 輸出到 serial1）；virtio-console 驅動 `package/DroidVMVirtioConsole.c`（multiport＋中斷，每個 port 一個 BSD tty `/dev/cu.<名字>`，兩個 port 雙向實測）；DarwinBoot 從 FDT 產生 `uart0`／`com1-4`／`virtio-console-N` 與 `/defaults droidvm,serial-device`；crosvm `--virtio-mmio-console`、virtio-mmio 上限 16→32。陷阱：fileset matcher 把 `PAGE_SHIFT_CONST` 配成 `cons_ops_index`，APFS pagein 每次開機 panic，已寫進 `fileset-reviewed.json`
-- ✅ **11-10** 震動馬達 host＋Linux guest 完成（crosvm f82707d2c、app 902fa32 本地、guest additions ed96a62）：virtio-input `vibrator`（FF_RUMBLE），guest 的 rumble 由 daemon 以 PHYSICAL_EMULATION 播在手機馬達上；5566 實測振幅與時長正確 → [細節](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
-- ✅ **11-10** 磁力計 host＋Linux guest 完成（crosvm cee8d210a、app 4ed9a06 本地、guest additions b21673b）：motion 裝置 `magnetometer=true` 加磁場（HAT0X/HAT0Y/HAT1X）與傾斜補償航向（HAT1Y）；Ubuntu 的 droidvm-compass 模組發佈成 IIO 指南針，`monitor-sensor --compass` 有航向 → [細節](todo/input-sensors.md#11-10-磁力計hostlinux-guest)
-- ✅ **11-11** 觸控板觸覺回饋通道（給之後的 Windows PTP／macOS 驅動）：trackpad 宣告 HID Haptics 波形為 EV_FF，guest 回報的點擊／按下／放開／持續震動由手機馬達播（crosvm 98ed82e55、app f4a9f30 本地；APK 要配這版以後的 crosvm）→ [細節](todo/input-sensors.md#11-11-觸控板觸覺回饋通道給-windowsmacos-guest)
-- ✅ **11-10** GNSS 卡片的「自動」＝接收器＋手機位置：接收器沒有 fix（室內、OPLUS 省電關掉 GNSS）時改送 fused 位置，標成推算（app 6f28b91 本地，順手修了來源選單的閃退）→ [細節](todo/input-sensors.md#11-10-晚-自動接收器位置app-6f28b91)
-- ✅ **11-10** GNSS 接收器 host＋Linux guest 完成（crosvm 91724fac2、app 6e38a07 本地、guest additions 5c5f270）：具名 virtio-console port `org.droidvm.gnss.0` 送 NMEA 4.11（所有星系一條串流），來源可選手機 GNSS 晶片或僅位置（合成衛星）；Ubuntu 的 gpsd 開機自動接上 → [細節](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)
+- ✅ **11-11** VM 操作介面重構完成（app db2c8da、e26c6af、945b748、180532a、0b35661、766e4a6、72b662a）：native 與 VNC 都能從操作頁投到外部顯示器（前景服務持有的 Presentation，app 內留深色色塊，記住顯示器），鍵盤上／下與左右鍵按鈕列（選單長按），USB 直通彈窗（everyone／hid 寫規則，規則新增類別層；插著的裝置只移到拔掉為止、不寫規則）取代 VNC 投放頁與 USB HID 直通，兩個 console 共用輸入控制器與選單 → [細節](todo/console-ui.md)
+- ✅ **11-11** iPadOS 27 的序列埠與 virtio-console（device 77bb46b、DarwinBoot c3ff6e4（前一個 a348165 是先前未提交的 intid＋cluster-type）、crosvm 83b3a15e6、app 7ab8caf；fork 的 DarwinBoot pin 未更新）：SBSA UART（xnu-12377 的 PL011_UART）與新寫的 16550 驅動當 kernel serial console，`serial=3` 內建，/dev/console 可讀寫（5567 雙向實測）；16550 用 `serial-device-name=comN` 指定（實測 kernel 輸出到 serial1）；virtio-console 驅動 `package/DroidVMVirtioConsole.c`（multiport＋中斷，每個 port 一個 BSD tty `/dev/cu.<名字>`，兩個 port 雙向實測）；DarwinBoot 從 FDT 產生 `uart0`／`com1-4`／`virtio-console-N` 與 `/defaults droidvm,serial-device`；crosvm `--virtio-mmio-console`、virtio-mmio 上限 16→32。陷阱：fileset matcher 把 `PAGE_SHIFT_CONST` 配成 `cons_ops_index`，APFS pagein 每次開機 panic，已寫進 `fileset-reviewed.json`
+- ✅ **11-10** 震動馬達 host＋Linux guest 完成（crosvm f82707d2c、app 902fa32、guest additions ed96a62）：virtio-input `vibrator`（FF_RUMBLE），guest 的 rumble 由 daemon 以 PHYSICAL_EMULATION 播在手機馬達上；5566 實測振幅與時長正確 → [細節](todo/input-sensors.md#11-10-震動馬達hostlinux-guest)
+- ✅ **11-10** 磁力計 host＋Linux guest 完成（crosvm cee8d210a、app 4ed9a06、guest additions b21673b）：motion 裝置 `magnetometer=true` 加磁場（HAT0X/HAT0Y/HAT1X）與傾斜補償航向（HAT1Y）；Ubuntu 的 droidvm-compass 模組發佈成 IIO 指南針，`monitor-sensor --compass` 有航向 → [細節](todo/input-sensors.md#11-10-磁力計hostlinux-guest)
+- ✅ **11-11** 觸控板觸覺回饋通道（給之後的 Windows PTP／macOS 驅動）：trackpad 宣告 HID Haptics 波形為 EV_FF，guest 回報的點擊／按下／放開／持續震動由手機馬達播（crosvm 98ed82e55、app f4a9f30；APK 要配這版以後的 crosvm）→ [細節](todo/input-sensors.md#11-11-觸控板觸覺回饋通道給-windowsmacos-guest)
+- ✅ **11-10** GNSS 卡片的「自動」＝接收器＋手機位置：接收器沒有 fix（室內、OPLUS 省電關掉 GNSS）時改送 fused 位置，標成推算（app 6f28b91，順手修了來源選單的閃退）→ [細節](todo/input-sensors.md#11-10-晚-自動接收器位置app-6f28b91)
+- ✅ **11-10** GNSS 接收器 host＋Linux guest 完成（crosvm 91724fac2、app 6e38a07、guest additions 5c5f270）：具名 virtio-console port `org.droidvm.gnss.0` 送 NMEA 4.11（所有星系一條串流），來源可選手機 GNSS 晶片或僅位置（合成衛星）；Ubuntu 的 gpsd 開機自動接上 → [細節](todo/input-sensors.md#11-10-gnss-接收器hostlinux-guest)
 - ✅ **11-08** Notes 的觸控筆壓感修好（device de1061a）：壓力改成 0..500、`AccurateMaxDigitizerPressureValue` 500（UIKit force＝壓力÷120，PencilKit 用 force 絕對值），5567 實測 0.1 畫 12 px、1.0 畫 38 px（[細節](todo/input-sensors.md#11-08-觸控筆壓感與橡皮擦端)）
 - ✅ **11-08** GPU 正確性＋穩定性收尾，效能先告一段落：5567（Adreno 750）回歸 MetalCheck 41/41、GFXBench 三項跑完、UI 與毛玻璃正常；metal2vulkan 現況與瓶頸見 [todo](todo/metal2vulkan.md)
 - ✅ **11-08** 10-29 那次 5567 backboardd 在 `ShadowTarget::Rotated` 的 NULL deref 沒再出現：5567 的 render server 每幀都走 rotated 路徑，11-04 起多次開機與今天的回歸都正常
@@ -216,7 +216,7 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
   64–85 MiB
 - ⬜ **11-04** Safari 網址列快速輸入時會掉字（例如一次送 "http://..." 只剩 "http"）：guest kernel
   的鍵盤報告一個不少（droidvm_input_key_reports 對得上），字是在 iOS 那端掉的；一個字一個字送就正常，可能跟網址列的自動完成或按鍵間隔有關
-- ⬜ **11-04** 觸控板：host 端完成（crosvm 23ed5ac72、app 33d0a76 本地）；XNU 發佈成 Magic Trackpad 2（device 0c3fa5d），5567 上
+- ⬜ **11-04** 觸控板：host 端完成（crosvm 23ed5ac72、app 33d0a76）；XNU 發佈成 Magic Trackpad 2（device 0c3fa5d），5567 上
   Apple 的 AppleMultitouchTrackpadHIDEventDriver／HSTouch 接上、設定出現 Trackpad 頁、游標位置和 hover 正確；雙指捲動、三指上滑回
   主畫面、點一下來按一下實測可用（手機端多指注入）；橫向的箭頭游標 11-10 修好（CA 的 GPU 旋轉路徑算錯曲線 mask → backboardd
   BKForceMirroredOrientation=portrait，device 8d8f023）；App 切換器（三指上滑停住）、捏合、兩指次要按鍵也可以。還沒做：
