@@ -186,3 +186,44 @@ UniXNU-droidvm     patches/xnu-12377/series      板級共用：vCPU park、time
 4. 上游 macOS 寫法帶來的小差異：compressor pool 用嵌入式的大小、`pid_hibernate` 回 ENOSYS 而非 ENOTSUP。
 5. board 的 archives／components 沒有被 macOS 覆寫，macOS 建置也會帶它們（內建驅動）；這是第 12 步「編進 kernel 還是
   kext」的同一個問題。
+
+## 10. 11-14：單一 APFS 容器、kext 化的評估（使用者問）
+
+### 單一容器兩個 OS 都能開嗎
+
+能。真的 iPad 與 Mac 都從一個 APFS 容器開機（System、Data、Preboot 在同一容器），macOS 線也已經這樣跑。對 macOS 這是
+必要條件：firmlink（`/Users` 等接到 Data）只在同一容器、同一 volume group 裡成立。iPadOS 沒有這個需求，我們才能拆開放。
+
+- kernel 端改動小：擁有者鏈按 volume UUID 找 SystemOS 與 Data（`XNU_OWNER_CACHE_VOLUME_UUID`、`XNU_OWNER_DATA_VOLUME_UUID`），
+  根的開機清單也帶 UUID；換成同一容器裡的 volume 也找得到。
+- 要重做的是兩件與 OS 無關的事：
+  1. **驗證**：VerifiedRoot 是對「整個唯讀映像的區塊裝置」逐塊驗證（`native_verified_block_root_authorized(device)`）。
+     同一個可寫容器裡 System volume 的區塊散在各處、容器本身一直在變，這套用不上。換成 Apple 的封印系統 volume（APFS
+     封印快照，根雜湊在開機清單）或另一套方案；macOS 線現在是關掉驗證（每個裝置都放行，rootauth=0）。
+  2. **VM 之間共用**：現在同一支手機的 VM 共用唯讀的 os.img／systemos.img，Data 是共用種子上的 copy-on-write。單一容器
+     就是每台 VM 一整份；要保留共用得把 Data store 的區塊層 COW 擴大到整個容器（種子容器＋每台 VM 的覆寫層）。
+- iPadOS 的 SystemOS cryptex 在真機放 Preboot、開機時 graft；我們是另一個 volume union-mount 到 `/`。放進同一容器時
+  可以繼續 union-mount 那個 volume。
+
+### 我們的驅動能不能全部做成 kext
+
+現況：所有驅動都編進 kernel，再把 kernel 放進 Apple 的 fileset；沒有一個在 iPadOS 上以 kext 跑過。macOS 線的 kext 是
+同一份原始碼加 `-DDROIDVM_NATIVE_KEXT=1`、一個小 starter（比對到 IOResources 就呼叫驅動的啟動函式），由它自己的 KC
+連結器（`k27/kc-build27.py`、`scripts/kc_native.py`）當成獨立 kext 連進 kernel collection；未定義符號照名字對 kernel
+與 collection 裡的 kext 解析（macOS 的 kernelcache 留著符號），所以不限公開 KPI，也能直接繼承 Apple kext 的類別。
+
+| 類別 | 驅動 |
+|---|---|
+| 已有 kext 版（macOS 線在用） | 音訊、VideoToolbox（兩者的 kext 區塊已收進 `main`）、virtio-gpu 顯示（補丁未收）、GPU 3D（`DroidVMGpuKext`）、AES、區塊（`NativeVirtioBlock`）；網路與輸入是它另寫的一份 |
+| 只差包裝（同音訊的 starter 即可） | 電池、動作感測器（Motion、SensorProcessor）、cpufreq、virtio-console（含 GNSS）、virtio-media 傳輸、keystore |
+| kernel 直接呼叫它，要先改成「kext 啟動時註冊 hook」 | 啟動策略（`native_board_launch_policy`）、儲存與 Data store（`native_source_storage_start`、`sheng_boot_watchdog_policy`，且根掛載前就要在）、板級 late probe（`native_legacy_display_probe`／`_late_probe`，依序啟動各裝置）、GPU 授權與 IOSurface 等待（`droidvm_user_client_trap_hook` 等）、排程追蹤、頁面資訊、timebase；約十來個入口。macOS 線 0018 的 `virt_set_external_method_hook` 就是註冊式 hook 的寫法 |
+| 留在 kernel | ArmCpu（中斷控制器、IPI、計時器）、ArmDTPlatform（platform expert）、開機參數、24 MHz timebase、VerifiedRoot 與擁有者鏈。macOS 線也是把 ArmCpu／ArmDTPlatform 連進 kernel |
+
+iPadOS 端最大的障礙在打包，不在驅動：
+
+- 我們的打包工具（XnuPrelink `emit_prelink.py`）只能把我們的 kernel 放進 Apple 的 fileset、選要留哪些 Apple kext，
+  不能加自己的 kext；要先有 iPadOS 版的 KC 連結器（macOS 線的 `kc_native.py` 是起點）。
+- iPadOS 的 kernelcache 沒有符號：kext 不能照名字連到 Apple kext 裡的類別（IOAudio2Device、IOHIDDevice、IOGPU、
+  IOMobileFramebuffer…），仍要用現在執行期認養父類別的做法（12 個檔案在用）；這在 kext 形式下照樣可行，只是「直接
+  繼承」的好處在 iPadOS 拿不到。
+- HID 輸入、legacy display 對原始類別 vtable 槽位的核對，兩個 OS 各一張表，kext 化不會消掉這件事。
