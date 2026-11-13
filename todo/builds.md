@@ -1,7 +1,8 @@
 # 構建線：iPadOS 17／27 與機型（iPad／iPhone）
 
-2026-11-13 盤點。使用者問：目前成果怎麼整理、17 和 27 的構建怎麼管、具體要建哪一個（iPad 還是 iPhone）。
-第 1–4 節是查到的事實，第 5 節是建議，第 6 節是要使用者決定的事。
+2026-11-13 盤點。使用者問：目前成果怎麼整理、17 和 27 的構建怎麼管、具體要建哪一個（iPad 還是 iPhone）；
+答覆後使用者說「先能重現」，同一天做完：**27 現在從 git 一條指令建出 release，5566 上跑的就是那一版**（第 3 節）。
+第 1–2 節是現況，第 3 節是 27 現在怎麼建、怎麼部署，第 4 節是重現過程查到的事，第 5 節是還沒做的，第 6 節是要使用者決定的事。
 
 ## 1. 兩條 OS 線
 
@@ -12,76 +13,122 @@
 | XNU | xnu-10063，傳統 prelink | xnu-12377 加 Darwin 26 的 syscall 補丁（Darwin 26 原始碼未公開），`MH_FILESET` |
 | 裝置 repo 裡的位置 | 根目錄的 `board.toml`、`scripts/`、`configs/` | `ipados27/`（schema 2，自己的 `board.toml`、`scripts/`、`patches/`） |
 | 共用 | `package/`（`ipados27/package` 是指回去的連結）、fork 的 GPU userland（plugin 與 Turnip 用 `--target ios27` 分） | 同左 |
-| 最後一次建置 | 10-29（kernel） | kernel 11-11，plugin／開機碟 11-13 |
-| 從零建置 | `scripts/build-droidvm-all.py` 一條指令到 `release/`，rig `fresh-deploy.sh` 部署；10-29 驗過 | 沒有；手動流程（第 3 節） |
+| 最後一次建置 | 10-29（kernel） | 11-13（從 git 完整建置） |
+| 從零建置 | `scripts/build-droidvm-all.py` 一條指令到 `release/`，rig `fresh-deploy.sh` 部署；10-29 驗過 | `ipados27/scripts/build-droidvm-all.py` 到 `release/`，rig `deploy27.sh` 部署；11-13 在 5566 驗過（第 3 節） |
 | 在跑的手機 | 沒有。5566 上留著 10-29 的 VM 目錄；5568 搬到一半 | 5566（8 Elite Gen 5）、5567（8 Gen 3） |
 | 10-30 之後的開發 | 沒有 | 全部（VPU 編解碼、WebGPU／WebGL 2、第三方 App 的 3D、Apple Pencil、觸控板、序列埠、IOSurface 同步、GPU 優先權、這週的閃爍與 hang） |
 
 10-29 的計畫（`plans/IPADOS27_BUMP.md`）寫「17 在移植期間保持可建置」。實際上 10-29 之後 17 沒有再建過；
 同一段時間共用的 `package/` 有 55 個 commit、38 個檔案、約 9000 行新增。**17 現在還能不能建、能不能開機，沒有驗過。**
 
-## 2. 哪裡才是真的來源
+## 2. 來源在哪裡
 
 ### git（本機 clone → 推送處）
 
-| 元件 | 本機 clone（分支） | 推送到 | head | 備註 |
+| 元件 | 本機 clone（分支） | 推送到 | head（11-13） | 備註 |
 |---|---|---|---|---|
-| UniXNU fork | `UniXNU/orgrepos/UniXNU-m1101`（`merge-up-1101`） | Droid-VM/UniXNU `wip/droidvm` | 5143df6 | 上次合併上游是 11-01（407db1a）；上游 main 之後又多了 282 個 commit |
-| 裝置 repo | `UniXNU/UniXNU-droidvm-main`（`main`） | `wip/hackintosh` | 77bb46b | 兩個 board 都在這裡 |
-| AdrenoMetal（Droid-VM/NativeMetal） | `orgrepos/NativeMetal-rebase` | `wip/hackintosh` | 312cde5 | **fork 的 pin 還是 b0d6a07，落後 8 個 commit** |
-| DarwinBoot | `orgrepos/DarwinBoot-rebase` | `wip/droidvm-virtio-gpu` | c3ff6e4 | **fork 的 pin 還是 c936dc6，落後 2 個** |
+| UniXNU fork | `UniXNU/orgrepos/UniXNU-m1101`（`merge-up-1101`） | Droid-VM/UniXNU `wip/droidvm` | 0f7b62a | 上次合併上游是 11-01（407db1a）；上游 main 之後又多了 282 個 commit |
+| 裝置 repo | `UniXNU/UniXNU-droidvm-main`（`main`） | `wip/hackintosh` | 見 git | 兩個 board 都在這裡 |
+| AdrenoMetal（Droid-VM/NativeMetal） | `orgrepos/NativeMetal-rebase` | `wip/hackintosh` | 312cde5 | fork 的 pin 相同（11-13 跟上） |
+| DarwinBoot | `orgrepos/DarwinBoot-rebase` | `wip/droidvm-virtio-gpu` | eb4a095 | fork 的 pin 相同（11-13 跟上，並修了一個問題，見第 4 節） |
 | Adreno740（NativeAdreno） | — | — | pin 627836d | 刻意不跟上游（改寫過的驅動會打壞裝置 repo 的 text patch） |
 | ArmCpu、GopFramebuffer | — | — | 5265ef1、ed08bd4 | pin 與 head 相同 |
+| ownervisor、applebox（除錯 shell） | — | Droid-VM/ownervisor、applebox `main` | c6c8b2a、6e3b471 | 27 的 pin 在 `ipados27/feeds.toml`（11-13 加） |
 
-其他本機 clone 是別的工作階段或舊流程留下的，**不是現在的來源**：`UniXNU-droidvm`（`wip/toybox-fold`，比 main 多 1、少 15 個
-commit）、`UniXNU-droidvm-audio`（`wip/audio`，有未提交的檔案）、`UniXNU-droidvm-land`（`wip/peripherals`）、`orgrepos/UniXNU`、
-`orgrepos/UniXNU-rebase`。27 兩個 rig 的 `rig.env` 裡 `REPO`／`FORK` 還指著其中兩個舊 clone。
+其他本機 clone 是別的工作階段或舊流程留下的，**不是現在的來源**：`UniXNU-droidvm`（`wip/toybox-fold`）、
+`UniXNU-droidvm-audio`（`wip/audio`，有未提交的檔案）、`UniXNU-droidvm-land`（`wip/peripherals`）、`orgrepos/UniXNU`、
+`orgrepos/UniXNU-rebase`。
 
 ### build Mac 上的樹（`/Volumes/DATA/UniXNU/`）
 
-| 目錄 | 用途 | git 狀態 | 大小 |
-|---|---|---|---|
-| `fresh27/` | **27 唯一的建置樹** | fork 停在 b4fca4d（11-01）加 53 個未提交的檔案；裝置 repo 停在 b1fe948（10-29）加 78 個。內容是用 scp 和 bundle 搬過去的，**Mac 的 git HEAD 不代表樹裡的內容** | 50 GB |
-| `fresh/` | 17 最後一次建置（10-29，合併後的 fork；分支 `ipados27` 上一個 bisect 用的 commit） | 有未提交 | 31 GB |
-| `orgrepos/` | 17 原本的主樹（kernel 10-28）＋ 21H461 的 IPSW 快取 | 接近乾淨 | 59 GB |
-| `audio/` | 17 音訊工作的隔離樹（10-29） | 7 個未提交 | 9 GB |
-| `fresh2/`、`fresh3/`、`fresh4/` | 10-29 驗證「從零建置」腳本的三次試跑 | 乾淨，內容都已推送 | 86 GB |
-
-磁碟還有 1.3 TB，空間不急。
+| 目錄 | 用途 | 規則 |
+|---|---|---|
+| `ipados27/` | **27 的正式樹**（11-13 從 GitHub clone）。`UniXNU/` 加 `UniXNU-droidvm/`，release 在 `UniXNU/out/droidvm/ipados-27.0.1-24A446/droidvm_ipados27/release/` | 內容只靠 `git pull`／`git submodule update` 改變。建置腳本遇到有本機修改的 checkout 會拒絕 |
+| `ipados27-dev/` | 實驗用的樹（同樣的 clone） | 可以 scp、改檔，建置加 `--allow-dirty`；它的 release 會標成不乾淨，部署腳本預設不收 |
+| `generations/24A446-2EE158B3/` | 現有 27 VM 用的那份 Data seed（volume UUID 2EE158B3…）、它的紀錄、Data 裡現有程式的信任紀錄（`trust/*.json`） | 現有 VM 的每次建置都讀它。在 guest 裡另外裝了 App，要把它的信任紀錄放進 `trust/` |
+| `fresh27/` | 11-13 以前的 27 手動建置樹（50 GB） | 退役：不再建置。已核對內容與 git 一致（第 4 節）。刪除要使用者同意 |
+| `fresh/`、`orgrepos/`、`audio/` | 17 的樹（最後建置 10-29）、21H461 的 IPSW 快取 | 不動 |
+| `fresh2/`、`fresh3/`、`fresh4/` | 10-29 驗證 17「從零建置」的三次試跑（86 GB，乾淨、已推送） | 刪除要使用者同意 |
 
 ### rig 與手機
 
-- 在用：`UniXNU/droidvm-5566-27`、`droidvm-5567-27`（27）。
+- 在用：`UniXNU/droidvm-5566-27`、`droidvm-5567-27`（27）。5566 的 `rig.env` 已指向正式樹與現在的 clone；5567 的還沒改
+  （它上面的部署還等使用者決定）。
 - 17 留下的：`droidvm-5566`、`droidvm-5568`、`droidvm-fresh`、`droidvm`（最後這個指向已刪除的 VM）。
-- 5566 手機上：17 的 VM 目錄 11 GB（10-29 的開機碟）；27 的目錄 34 GB，裡面有 11-02 的舊 Data 備份和兩個舊開機碟。
+- 手機上 VM 目錄裡的 `release.json` 就是「這支手機跑的是哪一版」：fork、裝置 repo、每個 submodule 的 commit，Mesa 與
+  metal2vulkan 的 pin，seed，plugin 與各檔案的雜湊。
+- 5566 上 27 的 VM 用的韌體檔在 **17 的 VM 目錄**裡（`DroidVM/UniXNU/edk2-virtio-gpu.fd`）：那個目錄不能整個刪。
 
-## 3. 27 現在實際怎麼建
+## 3. 27 現在怎麼建、怎麼部署
 
-全部手動，在 Mac 的 `fresh27` 樹裡（`D`＝裝置 repo 的 `ipados27`）：
+在 Mac 的正式樹：
 
-1. **同步**：把本機改過的檔案 scp 過去，或用 git bundle 搬 commit；沒有「Mac 等於某個 commit」的檢查。
-2. **kernel**：`./unixnu build kernel -D $D` → `apply-fileset-reviewed.py`（`ipados27/fileset-reviewed.json`）→ `./unixnu build prelink -D $D`。
-3. **plugin**：`link-droidvm-gpu-sources.py` → `build-turnip-darwin.py --target ios27` → `build-adreno-metal-plugin.py --target ios27`。
-   AdrenoMetal 的做法是 Mac 上 checkout 舊的 3f8d44a，再把本機 5 個檔案蓋上去（內容等於 312cde5，但不是 checkout 出來的）。
-4. **trust＋payload＋開機碟**：`build-droidvm-trust.py` → `./unixnu build payload -D $D … --data-ramdisk data-12g-27-gpu.dbr
-   --trust-cache owner.bundle` → `make-droidvm-disk.sh`。這支會放進舊的 DarwinBoot，要再手動換成新的。
-5. **部署**：rig 的 `deploy27.sh`／`deploy-boot.sh`、`fileset-syms.py`；plugin 的檔案經 ssh 推進 guest 的 Data。
+```
+cd /Volumes/DATA/UniXNU/ipados27
+git -C UniXNU pull && git -C UniXNU submodule update --init --recursive && git -C UniXNU-droidvm pull
+cd UniXNU-droidvm
+python3 ipados27/scripts/build-droidvm-all.py --unique-chip-id <rig 的 chip id> \
+    --generation /Volumes/DATA/UniXNU/generations/24A446-2EE158B3
+```
 
-這些步驟的腳本原本只在工作階段的暫存區。11-13 原樣複製到 rig 的 `droidvm-5566-27/build27/`（22 支，路徑寫死，只當參考）。
+或者在 rig 裡一條指令（建置加部署）：`./deploy27.sh --build`。
 
-## 4. 問題
+- **步驟**：setup（defconfig、fetch、IPSW 成員、解密）→ policies（owner 金鑰、OS／SystemOS 原始磁碟與簽過的 root policy）
+  → package（UniXNU.efi、DarwinBoot.efi）→ tools（arm64e 的除錯 shell 與工具）→ plugin（Turnip、metal2vulkan、AdrenoMetal）
+  → data（seed）→ kernel（含 fileset 的人工配對，再 prelink）→ trust → payload（開機碟）→ release。
+  從空的 clone 到 release 約 15 分鐘（IPSW 用 `--ipsw-cache` 從舊樹複製時）。
+- **每一步記下它是用什麼建的**（各 checkout 的 commit、本機修改的摘要、seed、chip id）；`git pull` 之後跑同一條指令，
+  只有輸入變了的步驟會重跑。setup、policies、新的 Data seed 只跑一次。
+- **兩種建置**：kernel 用 seed 的 volume UUID 掛 Data，手機上的 Data store 存的是相對於 seed 的變更。所以
+  - 現有的 VM：`--generation DIR`，沿用它當初的 seed；
+  - 全新的 VM：不加，腳本會做一份新的 seed（新的 UUID），要配新的 Data store。這條路 Mac 端有了，
+    rig 端「建一個新 VM」的腳本還沒寫（17 的 `fresh-deploy.sh` 是範本），也還沒上機驗過。
+- **部署**（`tools/rig/deploy27.sh`）：先拿 `release.json`，不乾淨、chip id 不對、seed 不對就拒絕；每個檔案對雜湊；
+  把 release 的 plugin 推進執行中 guest 的 Data（先留下被換掉的檔案）；檢查 hugepage 池再停機；把手機上原本的開機碟
+  留在 `out/previous27`；推新的開機碟和 `release.json`；更新符號；開機、印健康狀態。`--rollback` 把上一張開機碟和
+  plugin 放回去。
+- **11-13 的驗證**（5566）：正式樹建的 release（fork 0f7b62a、裝置 repo 634d2e2）用 `deploy27.sh` 部署，開機正常、
+  網路與 ssh 正常、guest 裡的 plugin 雜湊等於 release 的、Metal Check 通過（0 failures）、合成器重啟 30 次 0 次 host GPU hang。
 
-1. **27 不能從 git 重現。** 手機上跑的東西來自一棵 git HEAD 是兩週前、上面疊了一百多個未提交檔案的樹；
-   fork 的 AdrenoMetal 和 DarwinBoot pin 也落後。照 git 上的 commit 從頭建，得不到手機上那一版。
-2. **流程不在 repo 裡。** 27 的建置與部署步驟是暫存腳本加記憶筆記；17 有的 `build-droidvm-all.py` 沒有 27 的版本
-   （計畫的 P6 最後一項）。
-3. **17 的狀態不明。** 兩週沒建，共用程式碼大改，文件卻還把它寫成目標。
-4. **跟機型／build 綁定的資料散在多處。** `fileset-reviewed.json`、`legacy-display-24A446.json`、`hid-device-24A446.json`、
-   profile 的 `original-classes.json`、QuartzCore 的 text fixup、trust、root policy 的 UUID 與 digest、Data seed
-   都對著「24A446 的 iPad17,3」。換 OS 版本或換機型，每一樣都要重做。
-5. **實驗和正式建置共用一棵樹。** 這週 Mesa 的 A/B 補丁直接改 `fresh27` 的 `mesa-work`，漏記一個就建置失敗，
-   也曾把實驗版留在手機上。
-6. **PROGRESS 的開頭和第 1、3、4 節還是 17 時代的內容**（目標、本機路徑、建置表）。
+舊的手動流程（scp 進 `fresh27`、暫存腳本）不再使用；那 22 支暫存腳本的副本還在 rig 的 `droidvm-5566-27/build27/`，只當參考。
+
+## 4. 重現過程查到的事
+
+**舊樹的原始碼等於 git。** 逐項比對 `fresh27` 的內容與已推送的 commit：
+
+- fork 的工作樹等於 5143df6（當時的 head）；裝置 repo 的 `package/` 與 `ipados27/` 等於 77bb46b
+  （只有 Data seed 腳本少一個偏好設定、信任腳本的註解不同、rig 工具較舊）。
+- ArmCpu 是 Mac 上一個本機目錄（`local.toml` 覆寫），內容等於 pin 5265ef1；DarwinBoot 的建置目錄等於 c3ff6e4；
+  打過補丁的 Mesa 原始碼兩棵樹完全相同。
+- 新舊 kernel：`__TEXT_EXEC`、`__DATA`、`__DATA_CONST` 大小相同，符號數相同（91017），fileset 配對數相同
+  （16847 個函式、1371 個資料、18 個 stub）；只有字串段差 1230 bytes（路徑長度）。
+- 新舊 Turnip：565 個編譯指令相同，只有一個目的檔不同——Mesa 產生的 ir3 編碼器，敘述順序跟著 Python 的雜湊種子變。
+  建置腳本現在固定種子。
+
+**但「照 git 建」有四個地方本來走不通，舊樹因為留著舊產物所以沒發現：**
+
+1. **host 版 Turnip 建不起來**（11-06 加的 Mach-O 後處理也套到 host 版，而 host 版沒有那個結構）。已修（fork 299058d）。
+2. **host 模擬編不過**：fork 把 Adreno740 刻意停在舊 commit，SMMU kit 的 pin 卻往前走了，兩邊介面對不上。
+   plugin 建置原本一定要 host 模擬錄一段「重播」資料，舊樹一直在用 10 月的舊目的檔。那段重播測的是 NativeAdreno
+   自己的 GPU 核心，DroidVM 的 guest（virtio GPU）用不到，27 的 plugin 現在不帶它（fork 299058d，預設行為沒變）。
+3. **除錯 shell 的來源沒有 pin**：ownervisor、applebox 在 Mac 上是沒有 git 的目錄。現在 pin 在 `ipados27/feeds.toml`。
+4. **git 上的 DarwinBoot 在 5566 開不了機。** c3ff6e4 的 CPU 叢集規則（「由高到低標成 P，直到超過一半」）只在 5567
+   （8 Gen 3）跑過；5566（8 Elite Gen 5）一直用 11-03 的舊二進位檔，部署腳本每次都把它「放回去」。照 git 建出來的
+   開機碟在 5566 上把六顆 vCPU 全標成 P，kernel 在 launchd 啟動時停 20 秒，然後 launchd 死掉。換回舊規則就正常，
+   確認是這一條。已修：最低一級 capacity 永遠留作 E（DarwinBoot eb4a095，5566 驗過；8 Gen 3 的分法不變）。
+   **還沒查的**：vCPU 的 capacity 全部相同時 DarwinBoot 仍然全標 P，這個 kernel 很可能一樣開不了；沒試。
+
+另外兩個小發現：27 開機碟裡的 UniXNU.efi 一直是 17 那棵樹 10-29 建的（現在每次從 fork 建）；
+Data seed 的紀錄把 OS 映像檔名寫成 `lsdiag`（變數被迴圈蓋掉，已修）。
+
+**還沒解決的（原第 4 節的其餘各點）：**
+
+- **17 的狀態不明。** 10-29 之後沒建過，共用的 `package/` 多了 55 個 commit。見 5.1。
+- **跟機型／build 綁定的資料散在多處**：`fileset-reviewed.json`、`legacy-display-24A446.json`、`hid-device-24A446.json`、
+  profile 的 `original-classes.json`、QuartzCore 的 text fixup、trust、root policy、Data seed 都對著「24A446 的 iPad17,3」。
+  換 OS 版本或換機型，每一樣都要重做。
+- **二進位不是逐位元可重現**：路徑會寫進去（兩棵樹建出的 plugin 雜湊不同）。驗證靠 `release.json` 的 commit 與上機測試。
+- **PROGRESS 的第 1、3、4 節還是 17 時代的內容**（本機路徑、建置表）。
 
 ## 5. 建議
 
@@ -97,16 +144,14 @@ commit）、`UniXNU-droidvm-audio`（`wip/audio`，有未提交的檔案）、`U
 - 如果想保留回到 17 的可能，折衷是「只檢查能不能建」：獨立一棵 Mac 樹，每次推送階段編 17 的 kernel 和 plugin，
   不上機。先要花一次工把現在的 HEAD 修到能建（工作量未知，見第 1 節）。
 
-### 5.2 讓 27 能從 git 重現（建議的順序）
+### 5.2 讓 27 能從 git 重現——11-13 做完
 
-1. fork 的 pin 跟上：AdrenoMetal → 312cde5、DarwinBoot → c3ff6e4。
-2. Mac 開一棵**只用 git 取得內容**的新樹（推送的分支＋submodule 照 pin），建 kernel、plugin、開機碟，
-   跟手機上那版比對（plugin 的雜湊、kernel）。對得上，`fresh27` 才退役。
-3. 把第 3 節的流程收進裝置 repo：`build-droidvm-all.py` 加 27 的 board（或 `ipados27/` 自己一支），
-   部署腳本進 `tools/rig`，路徑走 `rig.env`；順手解掉 DarwinBoot 要手動換的那一步。
-4. 規則：正式的 Mac 樹只接受 `git fetch`；每次部署在開機碟旁留一份紀錄（fork、裝置 repo、各 submodule 的 commit、
-   plugin 雜湊），手機上跑的是哪一版隨時查得到。17 的流程已經有 `release.json`，沿用。
-5. 實驗在第二棵樹做（APFS 的 `cp -c` 複製不佔空間），正式樹保持乾淨。
+fork 的 pin 跟上、Mac 開了只用 git 的正式樹、流程收進裝置 repo、部署留紀錄、實驗另開一棵樹：都做了，見第 2、3 節。
+剩下的：
+
+1. 「全新 VM」那條路的 rig 腳本與上機驗證（新 seed、新 Data store、新的 VM 設定）。
+2. 5567 的 `rig.env` 與部署（等使用者決定要不要把這幾天的修正裝上 5567／5568）。
+3. `fresh27` 退役後刪除（5.4）。
 
 ### 5.3 機型：留在 iPad
 
@@ -148,14 +193,15 @@ iPad 之內的兩個小選項，都還沒驗：
 
 ### 5.4 清理（刪東西，要使用者點頭）
 
-- Mac：`fresh2/`、`fresh3/`、`fresh4/`（86 GB，乾淨、已推送）。`audio/` 有未提交的檔案，先確認。
-- 手機 5566：17 的 VM 目錄（決定凍結後留或刪）、27 目錄裡 11-02 的舊 Data 備份與兩個舊開機碟。
+- Mac：`fresh27/`（50 GB，已退役，內容與 git 核對過）、`fresh2/`、`fresh3/`、`fresh4/`（86 GB，乾淨、已推送）。
+  `audio/` 有未提交的檔案，先確認。
+- 手機 5566：17 的 VM 目錄（27 的韌體檔在裡面，不能整個刪）、27 目錄裡 11-02 的舊 Data 備份與兩個舊開機碟。
 - 本機：舊 rig 與舊 clone 先不動（`UniXNU-droidvm-audio` 有未提交、未追蹤的檔案，不是這個工作階段的）。
+  rig `droidvm-5566-27/out/` 裡這次留下的測試用開機碟（`droidvm-disk.*.img`）可以刪。
 
 ## 6. 要使用者決定
 
 1. 17：凍結（建議）／只檢查能不能建／繼續完整維護。
-2. iPhone：現在不做（建議）／5.2 做完後限時試作／現在就開一條線。
+2. iPhone：現在不做（建議）／限時試作／現在就開一條線。
 3. 5.4 的清理做不做。
-
-5.2 不論上面怎麼選都要做，可以直接開始。
+4. 5567／5568 要不要裝這一版（release 的部署腳本已經有了；5567 目前是 11-11 的開機碟加較舊的 plugin）。

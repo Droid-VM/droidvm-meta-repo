@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-13** iPadOS 27 能從 git 重現：Mac 上只靠 git 的正式樹一條指令建出 release（`ipados27/scripts/build-droidvm-all.py`，從空的 clone 約 15 分鐘），rig 的 `deploy27.sh` 部署並在手機上留 `release.json`（每個 commit 與雜湊）；5566 跑的就是這一版（開機、ssh、Metal Check 通過，30 次合成器重啟 0 次 GPU hang）。過程修了四個「照 git 建不起來或開不了機」的地方，包括 git 上的 DarwinBoot 在 8 Elite Gen 5 把 vCPU 全標成 P 而開不了機（eb4a095）。→ [細節](todo/builds.md)
 - ✅ **11-13** Linux guest 的 Mesa 升到上游 27.0.0-devel（Droid-VM/mesa `wip/hackintosh` 5eeb98a2b74，線性版 `wip/rebase-27.0`），5566 的 Ubuntu VM 驗證通過：drm2kgsl 現在給未遮罩的 chip id（0x44050a31），新舊 Mesa 都認得 Adreno 840；vkmark 2122 對舊版 2161、zink GL 4.6／ES 3.2、X 上 direct rendering、sddm 正常。gfxstream guest 仍留在舊樹（上游改寫了 codegen）；5567／5568 還沒裝
 - ✅ **11-13** Ubuntu VM 的磁碟佔用：trim 有效，guest 跑一次 `fstrim -av` 釋放 14.4 GiB，手機上的 qcow2 實佔 32.8 → 18.6 GiB。平常沒縮是因為 `fstrim.timer` 每週一次再加最多 100 分鐘隨機延遲，VM 開機時間短就永遠輪不到（上次是 9-15）；要不要在 guest additions 放一個「開機幾分鐘後就 trim」的 drop-in 待決定
 - ✅ **11-13** backboardd 啟動時的 host GPU hang（5–10% 的啟動，guest 卡 1–2 秒）找到成因並修正（fork fb9fb47，5566 已部署）：Turnip 的 Darwin 驅動層把超過 128 個 buffer 的提交每 128 個硬切，切在同一個 command buffer 中間時，後半段在核心的 BOTH 模式下被 BV 當成自己的指令執行而卡死；改成只在 command buffer 開頭切，80 次重啟 0 hang（原 3–9 次；上限降到 8 的對照實驗 55 次對 0 次）→ [細節](todo/metal2vulkan.md)
@@ -209,10 +210,9 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 未解／待查
 
-- ⬜ **11-13** 構建線要整理（盤點完成，做法待使用者決定）：27 手機上跑的版本不能從 git 重現（Mac 的建置樹 git HEAD 停在
-  兩週前、疊了一百多個未提交的檔案；fork 的 AdrenoMetal、DarwinBoot pin 落後；建置步驟是暫存腳本），17 自 10-29 沒建過、
-  共用的 `package/` 之後大改，能不能建不明。建議：27（iPad17,3）當唯一主線並做到能從 git 重現，17 打 tag 凍結，
-  iPhone 先不開線。→ [細節](todo/builds.md)
+- ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是「全新 VM」那條路的 rig 腳本與上機驗證、
+  5567／5568 的部署、舊建置樹的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
+  全部相同時仍把每顆都標成 P，這個 kernel 很可能開不了機，還沒試。→ [細節](todo/builds.md)
 - ⬜ **11-08** metal2vulkan 效能瓶頸（GPU 告一段落後的起點）：每個 draw 的 CPU（手機約 56 µs，profile 平）、ICB 每幀重錄
   （renderBundles 2.6 fps）、產生的 shader 比原生肥（GFXBench GPU cycle 1.7–3×、迴圈讀陣列慢）、排程不扣批次、pool 碎片。
   → [細節](todo/metal2vulkan.md)
@@ -545,7 +545,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 4. 建置與部署
 
-（本節是 iPadOS 17 的流程。27 目前的手動流程見 [todo/builds.md](todo/builds.md) 第 3 節。）
+（本節是 iPadOS 17 的流程。27 的流程——Mac 正式樹的 `ipados27/scripts/build-droidvm-all.py` 與 rig 的 `deploy27.sh`——見 [todo/builds.md](todo/builds.md) 第 3 節。）
 
 建置在 build Mac 上（`BUILD_HOST`，UniXNU checkout 的 `out/droidvm` 就是 `BUILD_OUT`），部署和測試在這台 Linux 上用 rig 做：
 - 工具在裝置 repo 的 `tools/rig`。
