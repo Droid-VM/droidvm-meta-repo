@@ -1,7 +1,8 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-13。目標：讓 iPadOS 17.7.11（21H461，iPad7,1／iPad Pro 12.9"）在手機（Snapdragon 8 Gen 3、Adreno 750、
-Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
+更新：2026-11-13。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
+App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A446，iPad17,3／iPad Pro 13" M5，arm64e）**；
+原本的 iPadOS 17.7.11（21H461，iPad7,1）10-29 之後沒有再建置。兩條線、建置樹與機型的盤點見 [todo/builds.md](todo/builds.md)。
 
 續報已濃縮成下方三個清單；完整續報見 `git show 419232a:PROGRESS.md`。
 已完成改成一項一行、未解項目縮短之前的清單見 `git show 1063e2b:PROGRESS.md`；未解／待辦項目的完整細節在 `todo/`。
@@ -208,6 +209,10 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 未解／待查
 
+- ⬜ **11-13** 構建線要整理（盤點完成，做法待使用者決定）：27 手機上跑的版本不能從 git 重現（Mac 的建置樹 git HEAD 停在
+  兩週前、疊了一百多個未提交的檔案；fork 的 AdrenoMetal、DarwinBoot pin 落後；建置步驟是暫存腳本），17 自 10-29 沒建過、
+  共用的 `package/` 之後大改，能不能建不明。建議：27（iPad17,3）當唯一主線並做到能從 git 重現，17 打 tag 凍結，
+  iPhone 先不開線。→ [細節](todo/builds.md)
 - ⬜ **11-08** metal2vulkan 效能瓶頸（GPU 告一段落後的起點）：每個 draw 的 CPU（手機約 56 µs，profile 平）、ICB 每幀重錄
   （renderBundles 2.6 fps）、產生的 shader 比原生肥（GFXBench GPU cycle 1.7–3×、迴圈讀陣列慢）、排程不扣批次、pool 碎片。
   → [細節](todo/metal2vulkan.md)
@@ -509,6 +514,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 
 ## 3. Repo 與分支
 
+（本節的本機位置是 10-24 交接時的；現在用的 clone、分支與 head 見 [todo/builds.md](todo/builds.md) 第 2 節。推送規則不變。）
+
 **只推各 repo 的 XNU wip 分支，合併由使用者決定。** commit 作者用 `HuJK <gh@hujk.org>`。
 
 | Repo | 本機位置 | 分支 → 推送 |
@@ -537,6 +544,8 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - defconfig 要 `CONFIG_XNU_BUILD_ARCHIVES=y`。
 
 ## 4. 建置與部署
+
+（本節是 iPadOS 17 的流程。27 目前的手動流程見 [todo/builds.md](todo/builds.md) 第 3 節。）
 
 建置在 build Mac 上（`BUILD_HOST`，UniXNU checkout 的 `out/droidvm` 就是 `BUILD_OUT`），部署和測試在這台 Linux 上用 rig 做：
 - 工具在裝置 repo 的 `tools/rig`。
@@ -710,4 +719,4 @@ Gunyah）上的 DroidVM 裡能日常使用。App Store 不在範圍內。
 - 裝置 repo `tools/rig/README.md`：rig 工具與變數
 - 裝置 repo `board.toml`：開機參數；每一項都有註解說明為什麼要加
 - 各 repo 的 commit message：每個修正的根因都寫在 commit 裡，這是最完整的歷史
-- `todo/`：未解／待辦項目的完整細節，依主題分檔（`metal2vulkan.md`、`webgpu-webgl.md`、`audio-media.md`、`input-sensors.md`、`apps-system.md`、`phones-rigs.md`、`console-ui.md`）
+- `todo/`：未解／待辦項目的完整細節，依主題分檔（`metal2vulkan.md`、`webgpu-webgl.md`、`audio-media.md`、`input-sensors.md`、`apps-system.md`、`phones-rigs.md`、`console-ui.md`、`builds.md`）
