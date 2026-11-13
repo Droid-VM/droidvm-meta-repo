@@ -230,7 +230,7 @@ iPadOS 端最大的障礙在打包，不在驅動：
 
 ## 11. kext 化（11-14 開工，使用者同意的順序：連結器 → 註冊式 hook → 分批搬）
 
-### 第 1 步：iPadOS 的 kext 連結器（device repo，本地 b1c279e、1924879、599e3ed，未推）
+### 第 1 步：iPadOS 的 kext 連結器（device b1c279e、1924879、599e3ed，11-14 推送）
 
 - `ipados27/kexts/NAME.json` 宣告一個 kext：原始碼（`package/`）、attach 函式（可多個，依序）、取代的內建物件、
   OSBundleLibraries、需要時的編譯紀錄。內建建置（`build-droidvm-devices.py`、late probe）讀同一份清單，把它們排除。
@@ -244,7 +244,10 @@ iPadOS 端最大的障礙在打包，不在驅動：
 - release 帶 `kexts.json`（各 kext 的位置與符號），deploy27.sh 併進 rig 的 `kernel.nm`，peek／health 照名字讀。
 - 已在 Mac 上建出：電池、音訊、VideoToolbox（含 virtio-media）、cpufreq、virtio-console 五個 kext 都在 collection 裡；
   kernel 少了它們照樣連結（沒有別處直接呼叫）；每個指標都落在自己的 kext 或 kernel 內；kmod_info 正確。
-- **還沒開機。** 5566 的 hugepage 池卡在 1929／3072（11-13 msm_vidc 測試留下），要重開手機才能驗。
+- **11-14 在 5566 開機驗證**（手機用 adb 重開後池子回到 3072）：五個 kext 都由 OSKext 載入並跑完 attach——電池 stage 4
+  （電量 80%、持續輪詢）、音訊的 virtio-snd 走中斷且系統的音訊服務開了播放串流（0 丟幀）、VideoToolbox 解碼 H.264 294
+  fps／HEVC 403 fps／10-bit 正常、編碼 154 fps、cpufreq stage 4、virtio-console 加一個埠測試時出現
+  `/dev/cu.vport0p0`。Metal Check 通過、沒有 panic。同一次開機也驗了 fork 的 arch 層修正（mmap 16K 對齊等）。
 
 ### 接下來
 

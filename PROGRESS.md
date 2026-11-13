@@ -220,13 +220,13 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   全部相同時仍把每顆都標成 P，這個 kernel 很可能開不了機，還沒試。→ [細節](todo/builds.md)
 - ⬜ **11-13** iPadOS 27／macOS 27 的 kernel 融合成一套原始碼：fork 加了 OS 的 `target` 開關與 `macos-27.0.1-26A434`
   profile，板級補丁分成共用、iPadOS、macOS 三份，macOS 線 50 個補丁都有去處（重疊的一律用我們的實作），iPadOS 原始碼只多
-  arch 層 5 個通用修正與 6 個依編譯器判斷的區塊。還沒做：iPadOS 開機測試（5566 的 VM 目前開不了）、macOS kernel 編譯、
-  磁碟佈局（macOS 線是單一容器）的決定。fork 那部分尚未推送。→ [細節](todo/kernel-unify.md)（第 9 節）
-- ⬜ **11-14** 驅動改成 kext（使用者選的維護方式）：iPadOS 的 kext 連結器做好了（prelink 之後把我們的 kext 加進 Apple 的
-  fileset），電池、音訊、VideoToolbox、cpufreq、virtio-console 五個已在 Mac 上建成獨立 kext，結構檢查通過；**還沒開機**，
-  等 5566 重開。device repo 這部分先留本地。下一批是網路。→ [細節](todo/kernel-unify.md)（第 11 節）
+  arch 層 5 個通用修正與 6 個依編譯器判斷的區塊（11-14 開機驗證、已推送）。macOS kernel 在 Mac 上照同一條流程編得過
+  XNU 與裝置驅動；還沒做：最後的連結（等包裝方式定案）、磁碟佈局（macOS 線是單一容器）的決定。→ [細節](todo/kernel-unify.md)（第 9 節）
+- ⬜ **11-14** 驅動改成 kext（使用者選的維護方式）：iPadOS 的 kext 連結器完成（prelink 之後把我們的 kext 加進 Apple 的
+  fileset），電池、音訊、VideoToolbox、cpufreq、virtio-console 已是獨立 kext，5566 開機驗證通過（各自 attach 完成、
+  編解碼與音訊正常、Metal Check 通過）。下一批是網路（連同從原始碼編的 IONetworkingFamily）。→ [細節](todo/kernel-unify.md)（第 11 節）
 - ⬜ **11-13** msm_vidc 直通在 iPadOS 上還解不出畫面（crosvm 回報可見區域 0x0），而且失敗後停 VM 讓 5566 的 hugepage
-  池少了約 2000 頁、補不回來，**5566 要重開手機**（模組由你從 KernelSU 目錄載入）。已改成 session 結束前交還所有驅動
+  池少了約 2000 頁（11-14 用 adb 重開手機恢復，大頁模組由 KernelSU 自動載入）。已改成 session 結束前交還所有驅動
   緩衝區，待驗證。在此之前 `auto`／`msm-vidc` 不給一般 VM 用。→ [細節](todo/builds.md)
 - ⬜ **11-13** host 合併後還沒驗證的：Windows guest、macOS guest、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率
