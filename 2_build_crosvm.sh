@@ -5,6 +5,8 @@ cd "$(dirname "$0")"
 # through rustc's depfile, so a changed shim rebuilds crosvm on its own -- but only if something
 # has built it. Nothing else will.
 ./2-0_build_shim.sh
+# AOSP projects without a Droid-VM fork that the build needs changed (idempotent).
+./1-1_patch_aosp_tree.sh
 mkdir -p crosvm_out
 cd crosvm_build
 source build/envsetup.sh

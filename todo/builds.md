@@ -214,41 +214,63 @@ iPad 之內的兩個小選項，都還沒驗：
 3. 5.4 的清理做不做。
 4. 5567／5568 要不要裝這一版（release 的部署腳本已經有了；5567 目前是 11-11 的開機碟加較舊的 plugin）。
 
-## 7. `macOS` 分支併入 `wip/hackintosh`（11-13 盤點）
+## 7. `macOS` 分支併入 `wip/hackintosh`（11-13）
 
-使用者要把目前的工作都收進 `wip/hackintosh`；`macOS` 分支是另一位開發者平行做的 macOS 27 guest。
+使用者要把目前的工作都收進 `wip/hackintosh`；`macOS` 分支是另一位開發者平行做的 macOS 27 guest（host 端同時帶著他的 Windows
+線：KMS 接管面板、WDDM）。**host 端已合併、建置並在 8 Elite Gen 5 的手機上用 iPadOS 27 回歸過；guest 端的合併方式見
+[kernel-unify.md](kernel-unify.md)。**
 
 **分支名。** 11-13 起 UniXNU fork 與 DarwinBoot 也推 `wip/hackintosh`（舊名 `wip/droidvm`、`wip/droidvm-virtio-gpu` 停在當天的
 commit，沒刪）；Mac 兩棵建置樹的 fork 已改追這個分支。其餘 repo 本來就是。
 
 **macOS 27 與 iPadOS 27 的 kernel。** 同一份原始碼（xnu-12377.121.6，`ac9718f`，arm64e，同一個機型設定），不是同一個 kernel：
-macOS 編譯時加 `-DXNU_TARGET_OS_OSX`（macOS kext 的 vtable 排法）、補丁是另一套、連結的是 macOS 自己的 Apple kext
-（kernel collection）。二進位不共用；可共用的是大部分補丁與全部驅動原始碼。
+macOS 編譯時加 `-DXNU_TARGET_OS_OSX`、補丁是另一套、連結的是 macOS 自己的 Apple kext。二進位不共用。
 
-**各 repo 的 `macOS` 分支對 `wip/hackintosh`：**
+### host 端合併結果
 
-| repo | macOS 多 | hackintosh 多 | 內容與試合併結果 |
-|---|---|---|---|
-| crosvm | 27 | 6 | msm_vidc 直通解碼（`vidc=true`）、KMS 接管面板、WebRTC 顯示輸出（帶進 `third_party/libdatachannel`）、AAudio 改成 callback、PCI MSI（`--mbi-spis`）、`--virtio-mmio-edge-irq`、xHCI MSI-X、half-float scanout。1 處衝突（`cmdline.rs`，兩邊各加一個選項），已解；本機分支 `merge/macos-into-hackintosh`（266818b7c），**未建置、未推** |
-| virtio-media | 1 | 0 | 解碼器 buffer 走 dma-buf、display delay；crosvm 的 vidc 後端要它，兩個要一起動 |
-| virglrenderer | 10 | 5 | `drm2kgsl_renderer.c` 6 處衝突（兩邊都改了 timestamp、power constraint、fault count），未解 |
-| edk2-gunyah | 1 | 0 | MADT 的 GIC MSI Frame（只有 DT 帶 MBI 屬性時才有作用） |
-| NativeMetal | 5 | 4 | 雙平面 YCbCr surface 轉換等，只動 `NativeBridgeMetalFrontend.mm`，合併無衝突 |
-| UniXNU-droidvm | 2 | 255 | `DroidVMGpu.cpp` 的 macOS 版（削到只剩 NativeAdreno 的 publish），和我們的版本衝突，不能直接合 |
-| NativeAdreno | 6 | 50 | 6 個都已在 `wip/hackintosh`（patch 相同） |
-| UniXNU | 17 | 635 | 10-31 的舊分支；macOS 線的 GPU 用戶空間後來改釘我們 fork 的 `ef4486d` |
-| DarwinBoot、ArmCpu、NativeMobileDisplay、mesa | 0 | — | 分支上沒有東西，改動以 patch 檔放在 `macOS-DroidVM` |
+| repo | 做了什麼 | `wip/hackintosh` |
+|---|---|---|
+| crosvm | 合併 `macOS`（27 個 commit）：msm_vidc 直通解碼、KMS 接管面板、WebRTC 顯示輸出、AAudio callback 輸出、PCI MSI（`--mbi-spis`）、`--virtio-mmio-edge-irq`、xHCI MSI-X、half-float scanout。衝突 1 處（`cmdline.rs`）；virtio-mmio console 補上 edge 選項。另加 3 個 commit：libdatachannel 可進 `com.android.virt`、音訊緩衝環、解碼多後端 | edddd58cc |
+| virtio-media | 快轉 1 個 commit（解碼 buffer 走 dma-buf、display delay） | d509294 |
+| virglrenderer | 合併 `macOS`（10 個 commit，含 WDDM 資源佈局、EGL dma-buf、逐佇列 KGSL timestamp 與拆分送出、頻率下限）。`drm2kgsl_renderer.c` 衝突 6 處 | 2529a9f7 |
+| Virtualization | 補上 crosvm 需要、但那條線沒發布的三個編碼器函式（`android_video_enc_create`／`_set_bitrate`／`_get_name`） | 3b4e0cc1a |
+| edk2-gunyah | 快轉 1 個 commit（MADT 的 GIC MSI Frame），建置通過 | a7903f0 |
+| gunyah_host_mod | 快轉 2 個 commit（GKI 6.6 用的獨立模組 `gunyah_halt_poll`），**這邊沒建** | 6d8ef2f |
+| App | 解碼後端選項（見下） | dbe1b52 |
+| meta | `1-1_patch_aosp_tree.sh`：建置前替 AOSP 的 boringssl 開 `libcrypto_static` 的可見性與 APEX（WebRTC 要） | 見 git |
 
-**guest 的主體在 `Droid-VM/macOS-DroidVM`**（`macOS` 分支比 `main` 新 37 個 commit，已改走 PCIe virtio 加 MSI-X）。它不走 UniXNU
-流程（自己的 `k27/` 與 KC 連結器、`overlay/kext/` 自己的板級 kext、kernel 補丁 49 個），並且是「釘住我們某個 commit 再疊補丁」
-來用我們的原始碼：音訊（e29d087 + 3）、VideoToolbox（706338e + 11）、virtio-gpu 顯示（59ec0a8 + 1）、DroidVMGpu／NativeAdreno（+ 8）、
-ArmCpu 3、DarwinBoot 2、Mesa 2、metal2vulkan 1。併進 iPadOS 27 這邊 = 把這些補丁變成 `wip/hackintosh` 上的 commit，
-macOS 只留它專屬的部分（kernel 補丁、KC、seed）。
+沒合的：NativeMetal 的 `macOS`（5 個 commit，無衝突，屬 guest 端，等一起驗證）、UniXNU-droidvm 的 `macOS`（`DroidVMGpu.cpp`
+的 publish-only 版，和我們的衝突）、UniXNU 的 `macOS`（10-31 的舊分支）、DroidVM-Prebuilts 的 `macOS`（二進位）。
+NativeAdreno 的 6 個已經都在。
 
-**crosvm 合進來後不是 opt-in 的改動**（會影響現有的 iPadOS／Linux／Windows guest，推之前要回歸測試）：virtio-snd 的 AAudio 輸出、
-MediaCodec 解碼器的像素預算與單一 buffer 映射、virtio-pci 的 MSI-X 向量時機、xHCI、游標 surface 大小、half-float scanout。
+合併時解掉的語意衝突：
+- virglrenderer：我們讓 guest 拿到含 fuse byte 的 chip id，那條線假設已去掉；Adreno 830 的 IB 上限改成遮掉該 byte 再比。
+  guest 的 fault count 用那條線的 `kgsl_query_faults`；「guest 佇列不進第二個 KGSL ringbuffer」保留我們的；stream check 改用
+  拆分後最後一塊的 timestamp。
+- crosvm 音訊：那條線把輸出改成 data callback 加緩衝環（為低延遲設計）；建置樹裡另一個工作階段未提交的修改把預設改成省電
+  模式。省電模式下系統一次取 1922 個 frame，緩衝環只有 1920 個，iPadOS guest 開機 70 秒內丟了 341 次。改成緩衝環至少放得下
+  三次取用、等待時間跟著取用量走之後不再丟。**聲音是否正常只看了日誌，沒有用耳朵確認。**
 
-**卡住的地方：**
-1. crosvm 只有一棵建置樹，裡面有別的工作階段 11-04 留下的未提交音訊修改（2 檔 48 行），和 macOS 的 AAudio 改寫是同兩個檔。
-   三方合併套得上，但合起來沒有人測過；要不要把它帶過去由使用者決定。
-2. 這邊的手機上沒有 macOS VM，macOS 端的結果無法在這裡驗證，要 macOS 線的人重建。
+### 還沒驗證的
+
+- Linux、Windows guest 沒有回歸（合進來的音訊輸出、MediaCodec 解碼、virtio-pci 的 MSI-X 時機、xHCI、游標都不是開關式的）。
+- macOS guest（這邊沒有 macOS VM）；KMS 接管、WebRTC 輸出、`--mbi-spis` 沒有跑過，只確認建得起來。
+- virglrenderer 合進來的拆分送出：Adreno 830 上超過 82 個 IB 的 submission 會在任意 IB 邊界切開。我們 11-13 修的 GPU hang
+  就是 guest 在 command buffer 中間切 submission 造成的，所以 8 Elite（Adreno 830）上跑 iPadOS guest 之前要先確認這條路。
+- 建置樹裡那份未提交的音訊修改（另一個工作階段的）仍未提交；合併時拿掉了它與合併後基底重複的兩個宣告，原樣與調整後的
+  diff 都存在 rig 的 `out/` 裡。
+
+### VPU 多後端
+
+crosvm 的 `--virtio-media kind=decoder,backend=(mediacodec,auto,msm-vidc)`，App 的圖形頁「解碼後端」。
+
+- 結構：MediaCodec 永遠在；「直通驅動」是 SoC 自己的 V4L2 codec 驅動，一個驅動＝實作 `DirectDriver` 加 `DRIVERS` 表裡一行
+  （`android_codec_backend/direct.rs`），第一個是 Qualcomm 的 msm_vidc。聯發科、Pixel 之後照這個加，App 那邊加一個列舉值。
+- `mediacodec`（預設，不帶 key 也是它）；`msm-vidc`：驅動接受的 session 全走直通，不接受的退回 MediaCodec；`auto`：host 有
+  直通驅動時（節點要回報自己是那個驅動），只把「要求依解碼順序輸出」的 session 給它，其餘走 MediaCodec。舊的 `vidc=true`
+  等於 `backend=msm-vidc`。
+- 8 Elite Gen 5 加 iPadOS 27 guest 實測：`mediacodec` 與 `auto` 解 720p H.264／HEVC 157／150–175 fps；`msm-vidc` 能開驅動並
+  解析串流，但 guest 借出的 CAPTURE buffer 是 pool 的而不是 guest 自己的記憶體，第一個 buffer 就結束 session、解碼失敗。
+  **所以目前 iPadOS 與 Linux guest 不能選 `msm-vidc`**；要等 guest 驅動改成借出自己的記憶體（kernel-unify.md 第 6 節第 4 步），
+  或讓直通驅動也能寫 pool buffer。
+- App：選項與說明已在手機上看過；VM 設定鍵 `vpu_decoder_backend`，預設不改變既有 VM 的指令列。

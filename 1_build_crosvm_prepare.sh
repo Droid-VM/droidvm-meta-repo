@@ -48,3 +48,6 @@ for p in external/crosvm hardware/google/gfxstream external/virglrenderer packag
          external/rust/crates/v4l2r; do
     checkout_soong "crosvm_build/$p" "$(basename "$p")"
 done
+
+# AOSP projects without a Droid-VM fork that the build needs changed.
+./1-1_patch_aosp_tree.sh

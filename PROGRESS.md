@@ -9,6 +9,9 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-13** `macOS` 分支的 host 端併入 `wip/hackintosh`（crosvm、virtio-media、virglrenderer、edk2-gunyah、gunyah_host_mod），iPadOS 27 在 8 Elite Gen 5 上回歸通過；fork 與 DarwinBoot 也改推 `wip/hackintosh`
+- ✅ **11-13** VPU 解碼多後端：crosvm `backend=mediacodec|auto|msm-vidc`（直通驅動介面，msm_vidc 為第一個）加 App 的「解碼後端」選項
+- ✅ **11-13** ArmCpu 行內組譯：分號後的指令在 arm64 Darwin 被當註解，17 處只編出第一條（關中斷、SGI、讀計數器），已修
 - ✅ **11-13** iPadOS 27 能從 git 重現：Mac 上只靠 git 的正式樹一條指令建出 release（`ipados27/scripts/build-droidvm-all.py`，從空的 clone 約 15 分鐘），rig 的 `deploy27.sh` 部署並在手機上留 `release.json`（每個 commit 與雜湊）；5566 跑的就是這一版（開機、ssh、Metal Check 通過，30 次合成器重啟 0 次 GPU hang）；不沿用舊 Data seed 的全新 VM 也用同一套腳本開起來驗過。過程修了四個「照 git 建不起來或開不了機」的地方，包括 git 上的 DarwinBoot 在 8 Elite Gen 5 把 vCPU 全標成 P 而開不了機（eb4a095）。→ [細節](todo/builds.md)
 - ✅ **11-13** Linux guest 的 Mesa 升到上游 27.0.0-devel（Droid-VM/mesa `wip/hackintosh` 5eeb98a2b74，線性版 `wip/rebase-27.0`），5566 的 Ubuntu VM 驗證通過：drm2kgsl 現在給未遮罩的 chip id（0x44050a31），新舊 Mesa 都認得 Adreno 840；vkmark 2122 對舊版 2161、zink GL 4.6／ES 3.2、X 上 direct rendering、sddm 正常。gfxstream guest 仍留在舊樹（上游改寫了 codegen）；5567／5568 還沒裝
 - ✅ **11-13** Ubuntu VM 的磁碟佔用：trim 有效，guest 跑一次 `fstrim -av` 釋放 14.4 GiB，手機上的 qcow2 實佔 32.8 → 18.6 GiB。平常沒縮是因為 `fstrim.timer` 每週一次再加最多 100 分鐘隨機延遲，VM 開機時間短就永遠輪不到（上次是 9-15）；要不要在 guest additions 放一個「開機幾分鐘後就 trim」的 drop-in 待決定
@@ -213,10 +216,13 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
   全部相同時仍把每顆都標成 P，這個 kernel 很可能開不了機，還沒試。→ [細節](todo/builds.md)
-- ⬜ **11-13** `macOS` 分支併入 `wip/hackintosh`：fork 與 DarwinBoot 已改推 `wip/hackintosh`。12 個 repo 有 `macOS` 分支，
-  crosvm（27 個 commit，含 msm_vidc 直通解碼）已在本機試合併（未建置、未推），virglrenderer 有 6 處衝突未解；guest 主體在
-  `macOS-DroidVM`，以「釘 commit 加補丁」的方式用我們的驅動原始碼。卡在建置樹裡別的工作階段未提交的音訊修改，以及這邊
-  沒有 macOS VM 可驗證。→ [細節](todo/builds.md)（第 7 節）
+- ⬜ **11-13** iPadOS 27／macOS 27 的 kernel space 統一：兩條線是同一套程式碼分岔的（我們 97 個補丁有 38 個在 macOS 線
+  原樣存在，音訊與 VideoToolbox 驅動是同一份檔案加補丁），二進位不能共用但原始碼可以。12 步的計畫已寫好，第 1 步（ArmCpu
+  行內組譯）完成；第 2–4、6 步只靠 iPadOS 就能做，其中第 4 步做完 iPadOS guest 才能用 msm_vidc 直通解碼。第 10–12 步要兩位
+  開發者一起決定。→ [細節](todo/kernel-unify.md)
+- ⬜ **11-13** host 合併後還沒驗證的：Linux 與 Windows guest 的回歸、macOS guest、KMS 接管與 WebRTC 輸出；Adreno 830 上
+  virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併後的音訊只看了日誌沒用耳朵聽。
+  → [細節](todo/builds.md)（第 7 節）
 - ⬜ **11-08** metal2vulkan 效能瓶頸（GPU 告一段落後的起點）：每個 draw 的 CPU（手機約 56 µs，profile 平）、ICB 每幀重錄
   （renderBundles 2.6 fps）、產生的 shader 比原生肥（GFXBench GPU cycle 1.7–3×、迴圈讀陣列慢）、排程不扣批次、pool 碎片。
   → [細節](todo/metal2vulkan.md)
@@ -723,4 +729,4 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 - 裝置 repo `tools/rig/README.md`：rig 工具與變數
 - 裝置 repo `board.toml`：開機參數；每一項都有註解說明為什麼要加
 - 各 repo 的 commit message：每個修正的根因都寫在 commit 裡，這是最完整的歷史
-- `todo/`：未解／待辦項目的完整細節，依主題分檔（`metal2vulkan.md`、`webgpu-webgl.md`、`audio-media.md`、`input-sensors.md`、`apps-system.md`、`phones-rigs.md`、`console-ui.md`、`builds.md`）
+- `todo/`：未解／待辦項目的完整細節，依主題分檔（`metal2vulkan.md`、`webgpu-webgl.md`、`audio-media.md`、`input-sensors.md`、`apps-system.md`、`phones-rigs.md`、`console-ui.md`、`builds.md`、`kernel-unify.md`）
