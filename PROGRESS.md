@@ -9,6 +9,8 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-13** 音訊預設省電、App 音效卡「延遲模式」可改（省電／標準／低延遲）：crosvm 13abbc1da、a88e7c116，app b50270b；5566 低延遲實測 burst 192 frames、0 丟幀
+- ✅ **11-13** iPadOS 的 VideoToolbox host 收進 macOS 線的視訊／音訊驅動補丁並會自己適配 host 的解碼後端（要求解碼順序，被拒就照顯示順序）；音訊、視訊改中斷：MediaCodec 下 H.264 268 fps、HEVC 367 fps（之前約 150）→ [細節](todo/builds.md)
 - ✅ **11-13** `macOS` 分支的 host 端併入 `wip/hackintosh`（crosvm、virtio-media、virglrenderer、edk2-gunyah、gunyah_host_mod），iPadOS 27 在 8 Elite Gen 5 上回歸通過；fork 與 DarwinBoot 也改推 `wip/hackintosh`
 - ✅ **11-13** VPU 解碼多後端：crosvm `backend=mediacodec|auto|msm-vidc`（直通驅動介面，msm_vidc 為第一個）加 App 的「解碼後端」選項
 - ✅ **11-13** ArmCpu 行內組譯：分號後的指令在 arm64 Darwin 被當註解，17 處只編出第一條（關中斷、SGI、讀計數器），已修
@@ -216,10 +218,13 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
   全部相同時仍把每顆都標成 P，這個 kernel 很可能開不了機，還沒試。→ [細節](todo/builds.md)
-- ⬜ **11-13** iPadOS 27／macOS 27 的 kernel space 統一：兩條線是同一套程式碼分岔的（我們 97 個補丁有 38 個在 macOS 線
-  原樣存在，音訊與 VideoToolbox 驅動是同一份檔案加補丁），二進位不能共用但原始碼可以。12 步的計畫已寫好，第 1 步（ArmCpu
-  行內組譯）完成；第 2–4、6 步只靠 iPadOS 就能做，其中第 4 步做完 iPadOS guest 才能用 msm_vidc 直通解碼。第 10–12 步要兩位
-  開發者一起決定。→ [細節](todo/kernel-unify.md)
+- ⬜ **11-13** iPadOS 27／macOS 27 的 kernel 融合成一套原始碼：fork 加了 OS 的 `target` 開關與 `macos-27.0.1-26A434`
+  profile，板級補丁分成共用、iPadOS、macOS 三份，macOS 線 50 個補丁都有去處（重疊的一律用我們的實作），iPadOS 原始碼只多
+  arch 層 5 個通用修正與 6 個依編譯器判斷的區塊。還沒做：iPadOS 開機測試（5566 的 VM 目前開不了）、macOS kernel 編譯、
+  磁碟佈局（macOS 線是單一容器）的決定。fork 那部分尚未推送。→ [細節](todo/kernel-unify.md)（第 9 節）
+- ⬜ **11-13** msm_vidc 直通在 iPadOS 上還解不出畫面（crosvm 回報可見區域 0x0），而且失敗後停 VM 讓 5566 的 hugepage
+  池少了約 2000 頁、補不回來，**5566 要重開手機**（模組由你從 KernelSU 目錄載入）。已改成 session 結束前交還所有驅動
+  緩衝區，待驗證。在此之前 `auto`／`msm-vidc` 不給一般 VM 用。→ [細節](todo/builds.md)
 - ⬜ **11-13** host 合併後還沒驗證的：Windows guest、macOS guest、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率
   下限對所有 guest 生效，耗電沒量；合併後的音訊只看了日誌沒用耳朵聽。

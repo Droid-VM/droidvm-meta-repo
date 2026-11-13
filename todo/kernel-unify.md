@@ -93,15 +93,15 @@ UniXNU-droidvm     patches/xnu-12377/series      板級共用：vCPU park、time
 | # | 步驟 | 驗證 | 狀態 |
 |---|---|---|---|
 | 1 | ArmCpu 的行內組譯（見第 7 節） | I | ✅ 11-13 完成 |
-| 2 | fork 的 arch series 跟上上游：`native-at-par-sync`、較新的 `native-4k-shared-region-slide` 與 `native-pac-keys`；加 0017 與 0044 | I | |
-| 3 | kext 專用的區塊進 `package/`（音訊 0001、視訊 0001、顯示 0001）：沒定義 `DROIDVM_NATIVE_KEXT` 時無作用 | I= | |
-| 4 | 把 macOS 線的通用驅動補丁收進 `main`：音訊 0002、0003、0005；視訊 0002–0005、0007、0009–0013；pl030-rtc。兩種中斷屬性名都接受；視訊 0008 不收。**收完之後 iPadOS guest 才能用 msm_vidc 直通後端** | I | |
+| 2 | fork 的 arch series 跟上上游：`native-at-par-sync`、較新的 `native-4k-shared-region-slide` 與 `native-pac-keys`；加 0017 與 0044 | I | ✅ 11-13 原始碼（fork 365ff09：par-sync、shared-region-slide、0017、0044、0039；`native-pac-keys` 的上游版本沒收，見第 9 節）；iPadOS 開機測試待做 |
+| 3 | kext 專用的區塊進 `package/`（音訊 0001、視訊 0001、顯示 0001）：沒定義 `DROIDVM_NATIVE_KEXT` 時無作用 | I= | ✅ 音訊、視訊（device 0596720、2f75613）；顯示 0001 未收 |
+| 4 | 把 macOS 線的通用驅動補丁收進 `main`：音訊 0002、0003、0005；視訊 0002–0005、0007、0009–0013；pl030-rtc。兩種中斷屬性名都接受；視訊 0008 不收。**收完之後 iPadOS guest 才能用 msm_vidc 直通後端** | I | ✅ 11-13 音訊、視訊全收（0008 改成開機參數 `droidvm-vt-thin-us`，預設關），兩種中斷屬性名、沒有就輪詢（device 2cd4c8e、a229647）；5566 開機與 MediaCodec 編解碼通過；msm_vidc 直通還沒解出畫面（第 9 節）；pl030-rtc、顯示 0002–0004 未收 |
 | 5 | macOS 線把釘的 commit 推到 `main`：它的音訊、視訊補丁縮到只剩 0008，NativeAdreno、DroidVMGpu、DarwinBoot 的補丁消失 | M | |
-| 6 | 編譯器 workaround 移進共用層（由 `__has_builtin` 等 guard 保護，Xcode clang 下無作用） | I= | |
+| 6 | 編譯器 workaround 移進共用層（由 `__has_builtin` 等 guard 保護，Xcode clang 下無作用） | I= | ✅ 11-13 原始碼（fork a2b713f）；Xcode 下目標檔是否不變待 Mac 建置確認 |
 | 7 | 給 macOS kernel 我們的 host 安全組：16-bit ASID、vCPU park、啟動 flush、pmap sync flush 等 | M | |
-| 8 | macOS 的補丁系列改疊在共用層上：前兩個大補丁化進 arch series，16 個 macOS 專屬的改用 `XNU_TARGET_OS_OSX` guard 放進 macOS series，12 個診斷的進診斷 series | I=、M | |
-| 9 | fork 收上游的 `target` 開關，macOS kernel 用同一條流程建 | M | |
-| 10 | 第 3 節那九件事各留一份實作 | I 再 M | |
+| 8 | macOS 的補丁系列改疊在共用層上：前兩個大補丁化進 arch series，16 個 macOS 專屬的改用 `XNU_TARGET_OS_OSX` guard 放進 macOS series，12 個診斷的進診斷 series | I=、M | ✅ 11-13 原始碼（fork 0b98053、554c181、a6970da；device 782c974、f60ffc2），沒有編譯過 |
+| 9 | fork 收上游的 `target` 開關，macOS kernel 用同一條流程建 | M | ✅ 開關（fork c69fdf6，與上游同字）；macOS kernel 經我們的流程編譯待做 |
+| 10 | 第 3 節那九件事各留一份實作 | I 再 M | 11-13 macOS 層一律用我們的實作（第 9 節）；擁有者鏈／磁碟佈局未定 |
 | 11 | 從 8 個驅動檔抽出 virtio 傳輸層（mmio 或 PCI、中斷掛接），網路與輸入才能共用裝置程式碼 | I 再 M | |
 | 12 | macOS 的包裝（編進 kernel 或 kext）與根檔案系統佈局定案 | M | |
 
@@ -126,3 +126,56 @@ UniXNU-droidvm     patches/xnu-12377/series      板級共用：vCPU park、time
 - iPadOS 27.0.1 的 Sandbox 用不用 end-rename-swap hook（0041）；macOS userland 需不需要 `darwin26-syscalls`。
 - macOS 線為什麼不需要 `public-pmap-sart`，它的 collection 怎麼註冊 `native-security-init` 處理的安全政策。
 - macOS 的 keystore、電池、睡眠在那條線怎麼服務（`overlay/kext` 裡沒有）。
+
+## 9. 11-13 晚：一套原始碼的實作（使用者：「內核融合統一成一份 code」）
+
+### 結構
+
+| 層 | 位置 | 誰用 |
+|---|---|---|
+| arch | fork `profiles/arch/arm64e/patches/xnu/series` | 兩個 OS |
+| OS | fork `profiles/os/ipados-27.0.1-24A446`（target ios）、**新** `profiles/os/macos-27.0.1-26A434`（`target = "macosx"`，VirtualMac2,1 26A434） | 各自 |
+| 板級共用 | device `ipados27/patches/xnu-12377/series` | 兩個 OS |
+| 板級 OS 專屬 | 同目錄 `ipados.series`（5 個：GPU client 的 sandbox／kobject 授權、surface GPU wait、text fixup）、**新** `macos.series`（9 個） | 各自 |
+| 診斷 | fork `profiles/os/macos-27.0.1-26A434/patches/xnu/diag.series`（7 個，不在預設清單） | 選用 |
+
+- 同一個 board 服務兩個 OS：`ipados27/board.toml` 的 `[os_overrides."macos-27.0.1-26A434"]` 換掉 patch_series 與
+  config_fragments；`unixnu build -D ipados27 --os macos-27.0.1-26A434 kernel` 選 macOS。iPadOS 建置不讀那張表。
+- `target` 開關（fork c69fdf6）與上游 origin/main 同一段文字：iPadOS 預設 ios，不變。
+- 驅動（`package/`）本來就是一份；macOS 線的音訊、視訊補丁已收（第 6 節第 3、4 步）。
+
+### macOS 線 50 個 kernel 補丁的去處（逐檔分類：[macos-vs-treeB.md](kernel-unify/macos-vs-treeB.md)）
+
+- 已相同（S）：0001、0002 的共同部分、0004、0005、0012、0031、0040。
+- macOS 專屬（M）：改成 `XNU_TARGET_OS_OSX` guard。OS 層 9 個：其中 6 個用上游 macOS-27.3 的寫法（`macos-target-kernel`、
+  `macos-darwin26-kpi`、`macos-shared-region-size`、`macos-user-address-space`、`macos-kqworkloop-limits`、
+  `macos-end-rename-swap`），加 `macos-machine-config`（照 macOS 線的選項）、`macos-deny-exec`、`macos-block-descriptors`。
+  板級 `macos.series` 9 個：timebase 從 0 起算、external method hook、KC 版面、AMFI page shift、boot manifest 佔位、
+  外接碟可見、jetsam 下限、rootauth、未驗證根的 stub（只有 `-DXNU_OWNER_ROOT_UNVERIFIED=1` 才編）。
+- 上游 LLVM 的 workaround（T）：進 arch 層，全部用 `__has_builtin` 等條件，Xcode clang 走原本的程式碼。
+  macOS 線 Linux 建置主機的 Makefile 等不收（那是它的工具鏈，不是 macOS）。
+- 診斷（D）：7 個進 `diag.series`；0014、0019、0034 依賴 0002 的 exception.c 骨架，沒收。
+- 通用修正（G）：0017、0039、0044、0045 進 arch 層（fork 365ff09），iPadOS 也拿。
+- 寫了兩次的（I）：一律留我們的。0010 使用者位址空間 → 我們的 47-bit pmap，macOS 得到 128 TiB，0043 的 256 GiB GPU
+  carveout 與關 Gigacage 都不需要了；0021 AMP → 我們的 Edge＋`DroidVMCpufreq`（macOS 線沒有這個驅動時 Edge 用預設
+  偏好）；0029 AMFI v5 → 我們在註冊時重排；0009／0042 PAC → 我們的 native-pac-keys＋pac-user-jop／ib；0011 → 我們的
+  Darwin 26 spawnattr 轉換（macOS 線那版讀錯了版面）。
+
+### 驗證
+
+- iPadOS 原始碼：純重整（板級分兩層）後與之前位元組相同（tree 873c7a0f）；之後只多 arch 層的 5 個修正（5 個檔）與
+  6 個編譯器條件區塊（IOWorkLoop.cpp、IOServicePM.cpp、kalloc.c、kalloc.h、IOLib.h、base.h）。工具：
+  scratchpad `kunify/xnutree.py`，照管線的順序把各層補丁套到乾淨的 ac9718f。
+- macOS 原始碼：116 個補丁全部套得上，`diag.series` 也套得上；與 macOS 線的原樹差 165 個檔，每個都有分類，沒有說不出
+  原因的。
+- **沒有編譯過 macOS 的 kernel，也沒有 macOS VM 開機。**
+
+### 還沒定的
+
+1. **擁有者鏈與磁碟佈局（第 12 步）**：macOS 線是單一 APFS 容器、root-only 的開機清單（0002／0008），我們是兩個 volume
+   （OS＋SystemOS）。用 macOS 線的旗標建這套 kernel，會去找一個它的磁碟上沒有的 SystemOS volume。要決定 macOS 用哪種。
+2. macOS 的 AMFI／CoreEntitlements 是否需要 KDK 的真實 `CEKernelAPI_t` 版面（0003），我們只有 stub。
+3. macOS 線的 k27 建置若改吃這套原始碼：要加 `-DXNU_OWNER_ROOT_UNVERIFIED=1`、保留它自己的 DriverKit iig sed。
+4. 上游 macOS 寫法帶來的小差異：compressor pool 用嵌入式的大小、`pid_hibernate` 回 ENOSYS 而非 ENOTSUP。
+5. board 的 archives／components 沒有被 macOS 覆寫，macOS 建置也會帶它們（內建驅動）；這是第 12 步「編進 kernel 還是
+  kext」的同一個問題。

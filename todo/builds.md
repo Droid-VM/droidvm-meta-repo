@@ -265,15 +265,31 @@ NativeAdreno 的 6 個已經都在。
 
 ### VPU 多後端
 
-crosvm 的 `--virtio-media kind=decoder,backend=(mediacodec,auto,msm-vidc)`，App 的圖形頁「解碼後端」。
+host 選後端，guest 自己適配。crosvm 的 `--virtio-media kind=decoder,backend=(mediacodec,auto,msm-vidc)`，App 的圖形頁「解碼後端」。
 
 - 結構：MediaCodec 永遠在；「直通驅動」是 SoC 自己的 V4L2 codec 驅動，一個驅動＝實作 `DirectDriver` 加 `DRIVERS` 表裡一行
   （`android_codec_backend/direct.rs`），第一個是 Qualcomm 的 msm_vidc。聯發科、Pixel 之後照這個加，App 那邊加一個列舉值。
 - `mediacodec`（預設，不帶 key 也是它）；`msm-vidc`：驅動接受的 session 全走直通，不接受的退回 MediaCodec；`auto`：host 有
-  直通驅動時（節點要回報自己是那個驅動），只把「要求依解碼順序輸出」的 session 給它，其餘走 MediaCodec。舊的 `vidc=true`
-  等於 `backend=msm-vidc`。
-- 8 Elite Gen 5 加 iPadOS 27 guest 實測：`mediacodec` 與 `auto` 解 720p H.264／HEVC 157／150–175 fps；`msm-vidc` 能開驅動並
-  解析串流，但 guest 借出的 CAPTURE buffer 是 pool 的而不是 guest 自己的記憶體，第一個 buffer 就結束 session、解碼失敗。
-  **所以目前 iPadOS 與 Linux guest 不能選 `msm-vidc`**；要等 guest 驅動改成借出自己的記憶體（kernel-unify.md 第 6 節第 4 步），
-  或讓直通驅動也能寫 pool buffer。
+  直通驅動時，只把「要求依解碼順序輸出」的 session 給它，其餘走 MediaCodec。舊的 `vidc=true` 等於 `backend=msm-vidc`。
+- **guest 怎麼適配（11-13 晚）**：iPadOS 的 VideoToolbox host 收進 macOS 線的視訊補丁（device 0596720..96e8c1f，保留原作者），
+  每個 session 開頭用 display-delay 控制項要求「解碼順序」：MediaCodec 後端沒有這個控制項→照顯示順序；直通驅動接受→解碼
+  順序（Apple 的 VM host 也是這樣給幀）。host 只在直通驅動接得了這個編碼格式時才答應（crosvm `set_display_delay` 帶格式），
+  答應了卻開不起來時 guest 改用顯示順序重開一次（device a229647）。緩衝區一律是 guest 自己的記憶體（USERPTR），兩種後端都能用。
+- 直通要把 guest 的緩衝區做成 dma-buf：`/dev/udmabuf` 在 Android 上是 root 的 0600，media helper 以 App uid 執行打不開，
+  所以由還是 root 的 VMM 先開好再把 fd 交給 helper（`--udmabuf-fd`）。
+- macOS 線的削幀（0008）與時間層略過會把每條影片壓到約 30 fps，改成開機參數 `droidvm-vt-thin-us`（預設 0＝不削；
+  macOS 線設 31000 就是它原本的行為）。
+- 音訊與視訊的傳輸層改成中斷（macOS 線 0005／0013），ADT 的 `droidvm,intid` 與 `gic-spi` 兩種名字都認，沒有中斷屬性的
+  （iPadOS 17 的靜態 ADT）退回輪詢（device 2cd4c8e）。
 - App：選項與說明已在手機上看過；VM 設定鍵 `vpu_decoder_backend`，預設不改變既有 VM 的指令列。
+- 5566 實測（11-13 晚，新 guest＋新 crosvm）：
+  - `mediacodec`：H.264 720p 268 fps、HEVC 720p 367 fps（之前約 150），10-bit HEVC 正常，編碼 148 fps。快的原因是中斷取代
+    1 ms 輪詢、緩衝區改用 guest 自己的記憶體。
+  - `auto`：H.264、HEVC、10-bit 都進了 msm_vidc 直通（guest 有要求解碼順序、host 也答應），**但解出 0 幀**：crosvm 每個
+    session 都回報可見區域 0x0。改成依序問 COMPOSE、CROP、再退回串流尺寸之後仍是 0x0，原因未明；已加每次查詢的日誌，
+    還沒跑。
+  - **陷阱：直通失敗後停 VM，hugepage 池少了約 2000 頁**（1076／3072，acquire 之後 1929，再也補不回）。手機上留著 26 個
+    沒有行程持有、沒有 attachment 的 1.4 MB udmabuf：msm_vidc 在 session 關閉時沒放掉佇列裡的 CAPTURE 緩衝區。guest 的
+    USERPTR 緩衝區散在 guest RAM 各處，一個 1.4 MB 緩衝區就可能釘住幾十個 2 MB 大頁，大頁模組過了寬限就放棄它們。
+    已改成 msm_vidc 的 session 結束前先 STREAMOFF 兩個佇列並 REQBUFS(0)（還沒驗證）。**5566 的 VM 目前開不了，要重開手機。**
+  - 在這兩點解決前，`auto`／`msm-vidc` 不要給一般 VM 用；App 預設仍是 MediaCodec。

@@ -1,0 +1,174 @@
+# macOS tree (fork + device repo, `--os macos-27.0.1-26A434`) vs macOS-DroidVM 58359aa (treeB: its 50 patches on ac9718f)
+
+Categories: OURS = only our layers changed it (shared fix/feature B lacks, or our rendering); B-I = B's own rendering replaced by ours;
+B-DIAG = B diagnostics not in the default series; B-T = B's Linux/LLVM build host; G = general fix, since taken into the arch layer (native-4k-codelimit-nx, -mmap-16k-boundaries, native-rt-computation-clamp, native-at-par-sync);
+B-M = macOS-only change of B, net zero or dead; lines = differing lines.
+
+- only M:EXTERNAL_HEADERS/CoreEntitlements/V2: OURS stubs (public-entitlements-v2-header); B uses KDK headers (0003)
+- Makefile (16): B-T build host
+- SETUP/config/Makefile (9): B-T build host
+- SETUP/config/doconf (2): B-T build host
+- SETUP/decomment/Makefile (9): B-T build host
+- SETUP/installfile/Makefile (9): B-T build host
+- SETUP/kextsymboltool/Makefile (9): B-T build host
+- SETUP/replacecontents/Makefile (9): B-T build host
+- SETUP/setsegname/Makefile (9): B-T build host
+- bsd/conf/files (1): k27_compat.c (0024) absent: its KPIs are darwin26-kpi + macos-darwin26-kpi
+- bsd/dev/arm/kern_machdep.c (3): B-I arm64e-compat grading (0002) vs ours native PAC
+- bsd/dev/arm/systemcalls.c (59): B-DIAG syscall-err-log, sc-trace (0002, 0014)
+- bsd/kern/bsd_init.c (55): B-I owner chain (0002/0008) vs ours offline-owner-*; B-DIAG 0014; rootauth ported
+- bsd/kern/hvg_sysctl.c (23): OURS (zzyd-owner-hide-vmm)
+- only B:bsd/kern/k27_compat.c: B-I: KPIs in darwin26-kpi + macos-darwin26-kpi
+- bsd/kern/kern_aio.c (19): OURS (darwin26-syscalls)
+- bsd/kern/kern_codesigning.c (50): OURS (darwin26-kpi,macos-darwin26-kpi)
+- bsd/kern/kern_core.c (7): B-DIAG abort log (0002)
+- bsd/kern/kern_cs.c (13): OURS (darwin26-kpi)
+- bsd/kern/kern_descrip.c (37): OURS (darwin26-syscalls)
+- bsd/kern/kern_exec.c (1252): B-I owner chain single container (0002/0008) vs ours two-volume (offline-owner-*); + Darwin 26 spawnattr (ours) ; B-DIAG exec-log/exec-env (0002/0016/0022, partly diag.series); 0033 ported
+- bsd/kern/kern_exit.c (29): B-I/DIAG (0002) vs ours bringup
+- bsd/kern/kern_memorystatus.c (4): 0047 ported (OSX guard)
+- bsd/kern/kern_mman.c (15): G 0044 (since taken into the arch layer: native-4k-mmap-16k-boundaries)
+- bsd/kern/kern_newsysctl.c (8): OURS (ipados27-bringup)
+- bsd/kern/kern_proc.c (36): 0011 = macos-kqworkloop-limits (OSX guard)
+- bsd/kern/kern_trustcache.c (44): OURS (trustcache-runtime-layout,darwin26-kpi)
+- bsd/kern/kern_xxx.c (2): B-DIAG 0016, in diag.series
+- bsd/kern/lockdown_mode.c (18): B (0002) vs ours bringup (same need)
+- bsd/kern/mach_loader.c (2): B-I arm64e grading (0002/0009) vs ours native-4k-user-abi
+- bsd/kern/makesyscalls.sh (4): B-T build host
+- bsd/kern/subr_xxx.c (7): B-DIAG nosys-log (0002)
+- bsd/kern/sys_generic.c (40): B-DIAG stderr-log (0014, 0018)
+- bsd/kern/sys_pipe.c (49): OURS (darwin26-syscalls)
+- bsd/kern/sys_work_interval.c (14): B-I (0002) vs ours work-interval patches
+- bsd/kern/syscalls.master (19): OURS (darwin26-syscalls,macos-target-kernel)
+- bsd/kern/ubc_subr.c (394): G 0017 (since taken into the arch layer: native-4k-codelimit-nx) (+ our native-4k hash cache/text fixup vs B 0002 design, + B 0007 T mach_vm_protect)
+- bsd/miscfs/bindfs/bind_vfsops.c (78): OURS (zzy-native-gpu-addon-mount,ipados27-bringup)
+- bsd/miscfs/bindfs/bind_vnops.c (8): OURS (zzy-native-gpu-addon-mount)
+- bsd/miscfs/bindfs/bindfs.h (3): OURS (zzy-native-gpu-addon-mount)
+- bsd/net/kpi_interface.c (16): OURS (macos-darwin26-kpi)
+- bsd/security/audit/audit_syscalls.c (6): B 0002 change in the !CONFIG_AUDIT branch: dead in B's final tree (config_audit on)
+- bsd/sys/code_signing.h (34): OURS (darwin26-kpi,macos-darwin26-kpi)
+- bsd/sys/codesign.h (1): OURS (darwin26-kpi)
+- bsd/sys/mman.h (2): B 0003 vs macos-target-kernel (KERNEL && OSX form)
+- bsd/sys/mount.h (2): OURS (darwin26-kpi)
+- bsd/sys/proc_private.h (1): OURS (darwin26-kpi)
+- bsd/sys/trust_caches.h (17): OURS (darwin26-kpi)
+- bsd/sys/ubc.h (4): OURS (darwin26-kpi,macos-darwin26-kpi)
+- bsd/vfs/kpi_vfs.c (109): OURS (darwin26-kpi,macos-darwin26-kpi,ipados27-bringup)
+- bsd/vfs/vfs_attrlist.c (49): OURS (native-union-getattrlistbulk)
+- bsd/vfs/vfs_cluster.c (55): OURS (darwin26-kpi,macos-darwin26-kpi)
+- bsd/vfs/vfs_lookup.c (62): OURS (native-lookup-trace,native-union-lower-directory,native-union-getdirentries-eof)
+- bsd/vfs/vfs_subr.c (7): B-DIAG mount-log (0002)
+- bsd/vfs/vfs_syscalls.c (245): ours union/darwin26-syscalls; B-DIAG 0037 (diag.series); 0041 = macos-end-rename-swap
+- bsd/vm/vm_unix.c (111): B-I (0002) vs ours darwin26-shared-region/owner-cache-carrier/bringup
+- config/BSDKernel.exports (1): OURS (macos-darwin26-kpi)
+- config/Libkern.exports (7): OURS (darwin26-kpi,macos-darwin26-kpi)
+- config/MASTER.arm64.bcm2837 (17): macos-machine-config = B set; rest ours (sched_hygiene_debug, PARAVIRT) / comment
+- config/MASTER.arm64.iPhoneOS (2): B-T build host
+- config/Private.arm64.exports (1): OURS (darwin26-kpi)
+- config/Private.exports (16): OURS (darwin26-kpi,macos-darwin26-kpi)
+- only B:gunyah-linux.mk: B-T build host
+- iokit/DriverKit/IOService.iig (17): OURS (macos-darwin26-kpi)
+- iokit/DriverKit/Makefile (3): B-T iig sed (0007) not ported
+- iokit/DriverKit/OSObject.iig (1): OURS (macos-darwin26-kpi)
+- iokit/IOKit/IOLib.h (4): B-T (0002) = native-upstream-clang-kalloc
+- iokit/Kernel/IOService.cpp (12): B-DIAG 0034; ours null-root-media; owner-cache visibility ported
+- iokit/Kernel/IOStartIOKit.cpp (3): B-I old snapshot RTC (0001)
+- iokit/Kernel/IOUserClient.cpp (163): ours GPU/sandbox grants; B-DIAG 0014/0032 (0032 in diag.series); 0018 hook ported
+- iokit/Kernel/IOUserServer.cpp (16): OURS (macos-darwin26-kpi)
+- iokit/KernelConfigTables.cpp (43): B-I old personalities snapshot (0001/0002) vs ours
+- iokit/Makefile (6): B-T build host
+- iokit/bsddev/IOKitBSDInit.cpp (24): B-I single-volume boot manifest (0002/0008) vs ours two-volume; 0030 ported
+- libkern/amfi/amfi.c (17): OURS (darwin26-kpi)
+- libkern/c++/OSArray.cpp (5): OURS (ipados27-bringup)
+- libkern/c++/OSData.cpp (1): OURS (ipados27-bringup)
+- libkern/c++/OSDictionary.cpp (1): OURS (ipados27-bringup)
+- libkern/c++/OSKext.cpp (67): OURS (native-security-init)
+- libkern/c++/OSMetaClass.cpp (39): OURS (droidvm-osmetaclass-adopt-superclass)
+- libkern/c++/OSNumber.cpp (1): OURS (ipados27-bringup)
+- libkern/c++/OSString.cpp (4): OURS (ipados27-bringup)
+- libkern/c++/OSSymbol.cpp (7): OURS (ipados27-bringup)
+- libkern/conf/files (1): OURS (darwin26-kpi)
+- only M:libkern/image4/image4_v2.c: OURS (darwin26-kpi image4 v2)
+- libkern/libkern/Makefile (2): B-T build host
+- libkern/libkern/amfi/amfi.h (12): B-I 0029 header layout vs ours darwin26-kpi re-pack (amfi.c)
+- libkern/libkern/c++/OSMetaClass.h (6): OURS (droidvm-osmetaclass-adopt-superclass)
+- libkern/os/log.c (29): OURS (macos-darwin26-kpi)
+- makedefs/MakeInc.cmd (4): B-T build host
+- makedefs/MakeInc.def (18): B-T Linux host (0002) + old snapshot; KC segaddrs (0007) ported
+- makedefs/MakeInc.top (2): B-T build host
+- osfmk/arm/arm_init.c (29): B-DIAG port_crumb (0002/0006/0014) vs ours
+- osfmk/arm/arm_timer.c (26): B-DIAG pc-sample (0019)
+- osfmk/arm/commpage/commpage_asm.s (13): OURS (non-apple-vcpu-park)
+- osfmk/arm/cpu_common.c (32): OURS (ipados27-bringup,non-apple-sigp-recover)
+- osfmk/arm/locks.h (9): OURS (non-apple-vcpu-park)
+- osfmk/arm/machine_routines_apple.c (12): B-I 0009 jop pid 1 vs ours native-pac-keys
+- osfmk/arm/machine_routines_common.c (9): OURS (public-missing-definitions)
+- osfmk/arm/model_dep.c (33): OURS (non-apple-vcpu-park)
+- osfmk/arm/pmap/pmap.c (167): B-I 0010 L0 shim, 0012 (S), 0006 vs ours 47-bit pmap, pmap-sync-flush, SART, user-address-space
+- osfmk/arm/pmap/pmap.h (15): B-I 0010 vs ours
+- osfmk/arm/pmap/pmap_pt_geometry.h (6): OURS (ipados27-bringup)
+- osfmk/arm/rtclock.c (19): B-DIAG pc-sample/stall-panic (0019, 0028; 0028 in diag.series); ours: vcpu-park + B 0001 old snapshot
+- osfmk/arm64/arm_vm_init.c (41): 0007/0035 ported; B-DIAG 0006; ours cache-monitor/block-split
+- osfmk/arm64/corecrypto/arm64_isa_compatibility.h (2): B-T build host
+- osfmk/arm64/cpu.c (121): B-I idle WFI (0020) vs ours idle-wfi/vcpu-park/start-flush; 0018 timebase ported
+- osfmk/arm64/locore.s (92): B-I 0042 IA/DA off vs ours pac-user-jop+ib; B-DIAG 0014
+- osfmk/arm64/machine_routines.c (24): B-I 0020 idle, 0021 AMP, 0043 carveout (superseded) vs ours; 0040 = ours (S); 0007 CTRR ported
+- osfmk/arm64/machine_routines_asm.s (17): G 0045 (taken: native-at-par-sync) (+ our native-pac-keys, vcpu-park)
+- only B:osfmk/arm64/machine_routines_nos.c: B-I vs source-machine-layer
+- osfmk/arm64/pac_asm.h (53): OURS (native-pac-keys)
+- osfmk/arm64/proc_reg.h (61): B-I 0010 T0SZ vs ours T0SZ_USER
+- osfmk/arm64/sleh.c (224): B-I arm64e-compat rewriter + VA shim (0002, 0010) vs ours native PAC / 47-bit pmap; B-DIAG
+- osfmk/arm64/start.s (209): B-I T0SZ 17 from the first instruction (0010) / old snapshot (0001) vs ours ipados27-bringup + start flush
+- osfmk/conf/files (2): B-DIAG 0027 in diag.series (k27_stall.c)
+- osfmk/conf/files.arm64 (1): B-I machine_routines_nos.c (0001) vs ours source-machine-layer
+- osfmk/console/serial_console.c (7): B-DIAG (0002); ours: zzz-boot-progress
+- osfmk/device/iokit_rpc.c (19): OURS (ipados27-bringup)
+- osfmk/kern/debug.c (37): B-DIAG 0026 in diag.series; ours: fileset-unmapped-call, vcpu-park, early-panic
+- osfmk/kern/exception.c (801): B-DIAG 0002/0014/0019/0034 crash, abort, pc-sample, sample-name logs (+ B I-parts of 0009/0017/0018/0020 inside them); ours: ipados27-bringup sheng-exc-name
+- osfmk/kern/ipc_kobject.c (9): OURS (ipados27-bringup)
+- only B:osfmk/kern/k27_stall.c: B-DIAG 0027/0028 (diag.series)
+- osfmk/kern/kalloc.c (23): B-T 0006/0007 = native-upstream-clang-kalloc (+ B-DIAG kprintfs)
+- osfmk/kern/kalloc.h (8): B-T (0002) = native-upstream-clang-kalloc (compiler-tested form)
+- osfmk/kern/kern_stackshot.c (131): B-DIAG crash log (0002); ours: non-apple-vcpu-park
+- only B:osfmk/kern/link_compat.c: B-I: public-missing-definitions, macos-target-kernel, droidvm-macos-owner-root-unverified; port_crumb diag
+- osfmk/kern/lock_ticket.c (8): B-DIAG pc-sample (0019)
+- osfmk/kern/sched_amp.c (4): B-I 0021 sched_amp vs ours Edge (droidvm-amp)
+- osfmk/kern/sched_clutch.c (5): OURS (ipados27-bringup)
+- osfmk/kern/sched_prim.c (15): OURS (droidvm-sched-trace)
+- osfmk/kern/stack.c (15): OURS (ipados27-bringup)
+- osfmk/kern/startup.c (19): B-DIAG port_crumb (0001/0002/0006); ours: zzz-boot-progress
+- osfmk/kern/static_if_common.c (6): B-DIAG (0014)
+- osfmk/kern/task.c (7): OURS (macos-darwin26-kpi)
+- osfmk/kern/thread_policy.c (9): G 0039 (taken: native-rt-computation-clamp)
+- osfmk/kern/waitq.c (5): B-DIAG pc-sample (0019)
+- osfmk/mach/arm/vm_param.h (14): B-I 512 GiB (0002) vs macos-user-address-space 128 TiB
+- osfmk/mach/shared_region.h (9): B 0002 unconditional vs macos-shared-region-size (OSX guard)
+- osfmk/prng/prng_random.c (160): B-I older corecrypto bootstrap (0001) + diag (0006) vs ours source-corecrypto14-bootstrap
+- osfmk/vm/vm_compressor.c (8): B 0003 vs macos-target-kernel (+ pool sizing on small layout)
+- osfmk/vm/vm_compressor_backing_store.c (12): B 0003/0006 vs upstream macos-target-kernel (same limits, small-layout guard)
+- osfmk/vm/vm_dyld_pager.c (206): OURS (ipados27-bringup,droidvm-dyld-16k-peek-first,droidvm-native-pac-user-jop)
+- osfmk/vm/vm_fault.c (11): OURS (native-text-fixup)
+- osfmk/vm/vm_kern.c (16): B-DIAG (0006)
+- osfmk/vm/vm_pageout.c (42): OURS (droidvm-pressure-pageable,droidvm-free-target-bytes)
+- osfmk/vm/vm_protos.h (1): OURS (native-text-fixup)
+- osfmk/vm/vm_shared_region.c (117): B-I (0002) vs ours 4k slide/user-abi/pac-user-jop
+- osfmk/vm/vm_shared_region_internal.h (13): OURS (native-4k-shared-region-slide)
+- osfmk/vm/vm_shared_region_pager.c (317): B-I window-buffer 16K slide (0002) + 0013 vs ours native-4k-shared-region-slide (source-page release = main session step 2)
+- osfmk/vm/vm_user.c (21): B-DIAG vm-err-log (0002)
+- pexpert/arm/pe_init.c (15): B-I (0001/0002) vs ours native-dt-panic-region
+- pexpert/arm/pe_serial.c (139): B-I Pi 3 UART/DWC3 console (0001) vs ours droidvm-serial-uarts
+- pexpert/gen/bootargs.c (15): OURS (ipados27-bringup)
+- pexpert/pexpert/arm/protos.h (3): OURS (droidvm-serial-uarts)
+- pexpert/pexpert/arm64/BCM2837.h (88): B-I HAS_APPLE_PAC (0007) / Pi defines (0001) vs ours native-pac-keys, amp, serial
+- pexpert/pexpert/arm64/Makefile (2): B-T BCM2837.h installed for B's kext builds (0001/0002)
+- pexpert/pexpert/arm64/apple_arm64_cpu.h (10): B-I (0001/0002) vs ours apple-only-core-type
+- pexpert/pexpert/arm64/board_config.h (12): B-I 0021 two clusters vs ours amp
+- san/memory/kasan-denylist (2): B-T build host
+- security/mac_base.c (5): B-M housekeeping (0002/0023/0038)
+- security/mac_internal.h (5): B-M housekeeping (0002/0038)
+- security/mac_policy.h (23): 0041 = macos-end-rename-swap (wording); 0031 S
+- security/mac_process.c (53): B-M housekeeping 0002/0038 (Sandbox workarounds, net zero) vs ours owner patches
+- security/mac_vfs.c (55): 0041 = macos-end-rename-swap; 0031 (S, darwin26-kpi); 0038 housekeeping; ours owner debug
+
+
+Counts by leading category: {'OURS': 64, 'B-T': 23, 'PORTED/UPSTREAM-FORM': 12, 'B-I': 33, 'B-DIAG': 22, 'B-I/DIAG': 1, 'G': 4, 'B': 1, 'ours': 2, 'B-M': 3}
