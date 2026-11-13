@@ -337,6 +337,8 @@ ringbuffer 搶佔；修正前是 3/32、1/40、6/80、3/55、6/52。
 - 單一 command buffer 自己就超過 128 個 buffer（指令流 2 MiB 以上）時仍會切在中間；要根治得把 ABI 的上限加大（guest 核心的
   NativeAdreno 也要跟著改）。目前只有警告。
 - Linux guest 不受影響：它的 virtio 驅動層一次送出整份清單（`nr_cmds` 沒有上限）。host 端 app 的 Turnip（KGSL 後端）也是。
+- 5567／5568 的 plugin 還是舊的（同一段切分程式碼），還沒換。
+- 修正前這個 hang 在正常使用下很少見：host 的 dmesg 紀錄裡，11-06 到 11-11 六天共 4 次（之後兩天的 465 次都是測試打出來的）。
 - PROGRESS「16 MiB block 會讓 render server hang」可能同因（block 小、buffer 多），修正後還沒重測。
 
 走過的彎路（各自仍會 hang，或只是變少）：
@@ -365,7 +367,7 @@ ringbuffer 搶佔；修正前是 3/32、1/40、6/80、3/55、6/52。
   BR／BV 對步驟用的；0x900–0x903 是各 pipe 預取中的 IB1 位址／剩餘／大小，0x920–0x925 是預取佇列的讀寫指標（單位 4 字）。
   kgsl 在 dmesg 印的 `BR: … ib1 X/N` 也是預取位置，不是執行位置。
 
-**工具**（本次 session 的 scratchpad，之後要搬進 rig）
+**工具**（已搬進 rig：`droidvm-5566-27/hang/`，裡面有 README）
 - `snaplog.py DUMP [N]`：snapshot 的事件記錄（0x1a01：每筆 submit／retire 的 ctx、優先級、執行時間）、各 ringbuffer 指標、
   BR／BV 的 SQE_STAT（[0] 是微碼 PC）。`snapregs.py`：暫存器段（0x1503：`[0x80000000|first][last][值…]`）。
   ROQ（預取佇列）在 indexed regs 0x8f4（pipe 1＝BR、2＝BV）。snapshot 只留第一份沒讀走的：
