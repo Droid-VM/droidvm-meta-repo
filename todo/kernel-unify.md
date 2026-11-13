@@ -249,9 +249,33 @@ iPadOS 端最大的障礙在打包，不在驅動：
   fps／HEVC 403 fps／10-bit 正常、編碼 154 fps、cpufreq stage 4、virtio-console 加一個埠測試時出現
   `/dev/cu.vport0p0`。Metal Check 通過、沒有 panic。同一次開機也驗了 fork 的 arch 層修正（mmap 16K 對齊等）。
 
-### 接下來
+### 第 3 步：分批搬（11-14）
 
-- 第 2 步（kernel 直接呼叫驅動的入口改成註冊式）只對要搬的驅動做；目前五個都不需要。
-- 下一批：網路（連同從原始碼編的 IONetworkingFamily，`DroidVMVirtioNetIf.cpp` 要加 kext 守衛、kext 建置要支援 tree 內
-  原始碼與整組旗標）、動作感測器、AES、keystore；HID 輸入與 legacy display 會核對 iPadOS fileset 的 vtable，最後處理；
-  儲存（根掛載前就要在）、啟動策略、GPU 留到最後評估。
+| kext | 內容 | 5566 驗證 | device |
+|---|---|---|---|
+| DroidVMBattery | 電池 | stage 4，電量持續更新 | b1c279e |
+| DroidVMAudio | 音訊＋virtio-snd | 中斷模式，系統音訊服務播放、0 丟幀 | 1924879 |
+| DroidVMVideo | virtio-media＋VideoToolbox host＋paravirt | 解碼 294／403 fps、編碼 154 fps | 1924879 |
+| DroidVMCpufreq | vCPU 效能請求 | stage 4 | 1924879 |
+| DroidVMConsole | virtio-console tty | 加測試埠後出現 `/dev/cu.vport0p0` | 1924879 |
+| DroidVMNetwork | 從原始碼編的 IONetworkingFamily＋virtio-net＋Wi-Fi | stage 6，en0／en1，ssh 走它 | 1b8e68d |
+| DroidVMSoftwareAES | NativeAES（依賴 IOCryptoAcceleratorFamily） | stage 3，已知答案測試通過，開機正常 | b4ac3b1 |
+| DroidVMInput | 觸控、鍵盤、筆、觸控板、動作感測器、感測器通道（依賴 IOHIDFamily） | HID stage 3，6 個 virtio-input，點擊送達 guest | 409e3af |
+
+- 第 2 步（kernel 直接呼叫驅動）目前只遇到一處：共用的 `LegacyDisplayProbe.cpp` 直接呼叫 `native_hid_input_probe`，改成以
+  `DROIDVM_KEXT_INPUT` 編譯時交給 kext（未定義時行為不變，iPadOS 17 不受影響）。
+- 連結器（`kc_native.py`）為這幾批加了三件事：`__DATA_CONST,__assert` 區段、絕對符號（`.set`），以及「指向絕對符號的
+  64-bit 值直接寫入、不進 chain」（HID 樁的原始位址常數）。`__BOOTDATA,__static_if` 不帶（只有 kernel 自己的會被改寫，
+  kext 保留編譯時的預設，DEVELOPMENT kernel 上 assert 一樣是開的）。
+- kext 宣告可以依賴 Apple 的 kext（OSBundleLibraries），由 OSKext 保證載入順序：AES 依賴 IOCryptoAcceleratorFamily、輸入
+  依賴 IOHIDFamily；內建時這些順序要靠驅動自己延後註冊。
+
+### 還留在 kernel 裡的
+
+- 平台與診斷，照設計留著：ArmCpu、ArmDTPlatform、開機參數、24 MHz timebase、擁有者鏈與 VerifiedRoot、啟動策略、檔案信箱、
+  頁面資訊、排程追蹤、late probe 本身。
+- 還沒搬的驅動：
+  - keystore（keychain 與資料保護；board 另有 `component:AppleKeyStoreState`，關係要先釐清）
+  - 儲存（根掛載前就要在，`native_source_storage_start` 由 bsd_init 呼叫）
+  - GPU 與顯示：最大的一塊，kernel 直接呼叫它的入口最多（kobject／sandbox 授權、IOSurface GPU 等待、Adreno 探測），
+    第 2 步的工作主要在這裡。
