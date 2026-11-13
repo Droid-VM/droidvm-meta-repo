@@ -253,7 +253,10 @@ NativeAdreno 的 6 個已經都在。
 
 ### 還沒驗證的
 
-- Linux、Windows guest 沒有回歸（合進來的音訊輸出、MediaCodec 解碼、virtio-pci 的 MSI-X 時機、xHCI、游標都不是開關式的）。
+- Linux guest 只做了基本回歸（同一支手機的 Ubuntu VM：開機、桌面、xHCI 列舉、Vulkan 正常，dmesg 沒有錯誤）；那台 VM 沒有音訊與
+  視訊裝置，所以合進來的音訊輸出與 MediaCodec 解碼在 Linux guest 上沒測到。Windows guest 完全沒測（xHCI、游標、MSI-X 時機）。
+- virglrenderer 合進來的「頻率下限」（每 250 ms 視窗內送出夠多就把 GPU 鎖在最高頻，`NCTX_PWR_CONSTRAINT`）對所有 guest 生效：
+  Ubuntu 的 vkmark vertex 從約 2100 分變成 4517 分。耗電與溫度的影響沒量；iPadOS 合成器的 deadline 佇列不在這個視窗裡。
 - macOS guest（這邊沒有 macOS VM）；KMS 接管、WebRTC 輸出、`--mbi-spis` 沒有跑過，只確認建得起來。
 - virglrenderer 合進來的拆分送出：Adreno 830 上超過 82 個 IB 的 submission 會在任意 IB 邊界切開。我們 11-13 修的 GPU hang
   就是 guest 在 command buffer 中間切 submission 造成的，所以 8 Elite（Adreno 830）上跑 iPadOS guest 之前要先確認這條路。

@@ -220,8 +220,9 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   原樣存在，音訊與 VideoToolbox 驅動是同一份檔案加補丁），二進位不能共用但原始碼可以。12 步的計畫已寫好，第 1 步（ArmCpu
   行內組譯）完成；第 2–4、6 步只靠 iPadOS 就能做，其中第 4 步做完 iPadOS guest 才能用 msm_vidc 直通解碼。第 10–12 步要兩位
   開發者一起決定。→ [細節](todo/kernel-unify.md)
-- ⬜ **11-13** host 合併後還沒驗證的：Linux 與 Windows guest 的回歸、macOS guest、KMS 接管與 WebRTC 輸出；Adreno 830 上
-  virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併後的音訊只看了日誌沒用耳朵聽。
+- ⬜ **11-13** host 合併後還沒驗證的：Windows guest、macOS guest、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（基本回歸
+  已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率
+  下限對所有 guest 生效，耗電沒量；合併後的音訊只看了日誌沒用耳朵聽。
   → [細節](todo/builds.md)（第 7 節）
 - ⬜ **11-08** metal2vulkan 效能瓶頸（GPU 告一段落後的起點）：每個 draw 的 CPU（手機約 56 µs，profile 平）、ICB 每幀重錄
   （renderBundles 2.6 fps）、產生的 shader 比原生肥（GFXBench GPU cycle 1.7–3×、迴圈讀陣列慢）、排程不扣批次、pool 碎片。
