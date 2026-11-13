@@ -81,13 +81,19 @@ python3 ipados27/scripts/build-droidvm-all.py --unique-chip-id <rig 的 chip id>
   只有輸入變了的步驟會重跑。setup、policies、新的 Data seed 只跑一次。
 - **兩種建置**：kernel 用 seed 的 volume UUID 掛 Data，手機上的 Data store 存的是相對於 seed 的變更。所以
   - 現有的 VM：`--generation DIR`，沿用它當初的 seed；
-  - 全新的 VM：不加，腳本會做一份新的 seed（新的 UUID），要配新的 Data store。這條路 Mac 端有了，
-    rig 端「建一個新 VM」的腳本還沒寫（17 的 `fresh-deploy.sh` 是範本），也還沒上機驗過。
+  - 全新的 VM：不加，腳本會做一份新的 seed（新的 UUID，裡面是這次建的 plugin 與工具），要配新的 Data store。
+    rig 端是 `deploy27.sh --new-vm 來源rig 名稱`，在一個新的 rig 目錄裡跑：手機上開新目錄（開機碟、`release.json`、
+    空的 Data store），VM 透過 daemon 的 IPC 建立，設定抄自現有 27 VM 的 rig（新的 id、名稱、目錄、網卡）；
+    不動其他 VM，也不改 App 的 `vms.json`。唯讀的 OS／SystemOS 磁碟預設共用現有 VM 的（先在手機上對雜湊）。
 - **部署**（`tools/rig/deploy27.sh`）：先拿 `release.json`，不乾淨、chip id 不對、seed 不對就拒絕；每個檔案對雜湊；
   把 release 的 plugin 推進執行中 guest 的 Data（先留下被換掉的檔案）；檢查 hugepage 池再停機；把手機上原本的開機碟
   留在 `out/previous27`；推新的開機碟和 `release.json`；更新符號；開機、印健康狀態。`--rollback` 把上一張開機碟和
   plugin 放回去。
-- **11-13 的驗證**（5566）：正式樹建的 release（fork 0f7b62a、裝置 repo 634d2e2）用 `deploy27.sh` 部署，開機正常、
+- **11-13 的驗證，全新 VM**（5566）：實驗樹回到已推送的 head 後不加 `--generation` 完整建置（新 seed 53067C2A…、
+  新的 chip id），`deploy27.sh --new-vm` 開出新 VM：Data 掛上新的 store、SpringBoard 連同 widget 與桌布正常顯示
+  （Metal plugin 在運作）、網路正常、ssh 可用（seed 裡的 dropbear）、guest 裡 plugin 的雜湊等於 release 的。
+  測完已關機並從 daemon 移除，主要的 VM 開回來；它的目錄（3.4 GB）還在手機上。
+- **11-13 的驗證，現有 VM**（5566）：正式樹建的 release（fork 0f7b62a、裝置 repo 634d2e2）用 `deploy27.sh` 部署，開機正常、
   網路與 ssh 正常、guest 裡的 plugin 雜湊等於 release 的、Metal Check 通過（0 failures）、合成器重啟 30 次 0 次 host GPU hang。
 
 舊的手動流程（scp 進 `fresh27`、暫存腳本）不再使用；那 22 支暫存腳本的副本還在 rig 的 `droidvm-5566-27/build27/`，只當參考。
@@ -146,12 +152,12 @@ Data seed 的紀錄把 OS 映像檔名寫成 `lsdiag`（變數被迴圈蓋掉，
 
 ### 5.2 讓 27 能從 git 重現——11-13 做完
 
-fork 的 pin 跟上、Mac 開了只用 git 的正式樹、流程收進裝置 repo、部署留紀錄、實驗另開一棵樹：都做了，見第 2、3 節。
-剩下的：
+fork 的 pin 跟上、Mac 開了只用 git 的正式樹、流程收進裝置 repo、部署留紀錄、實驗另開一棵樹、全新 VM 的路：
+都做了也上機驗過，見第 2、3 節。剩下的：
 
-1. 「全新 VM」那條路的 rig 腳本與上機驗證（新 seed、新 Data store、新的 VM 設定）。
-2. 5567 的 `rig.env` 與部署（等使用者決定要不要把這幾天的修正裝上 5567／5568）。
-3. `fresh27` 退役後刪除（5.4）。
+1. 5567 的 `rig.env` 與部署（等使用者決定要不要把這幾天的修正裝上 5567／5568）。
+2. Metal Check 這類測試 App 不在 seed 裡（要另外推進 guest）；新 VM 上還沒跑過它。
+3. 舊樹與測試留下的東西的清理（5.4）。
 
 ### 5.3 機型：留在 iPad
 
@@ -195,9 +201,11 @@ iPad 之內的兩個小選項，都還沒驗：
 
 - Mac：`fresh27/`（50 GB，已退役，內容與 git 核對過）、`fresh2/`、`fresh3/`、`fresh4/`（86 GB，乾淨、已推送）。
   `audio/` 有未提交的檔案，先確認。
-- 手機 5566：17 的 VM 目錄（27 的韌體檔在裡面，不能整個刪）、27 目錄裡 11-02 的舊 Data 備份與兩個舊開機碟。
+- 手機 5566：17 的 VM 目錄（27 的韌體檔在裡面，不能整個刪）、27 目錄裡 11-02 的舊 Data 備份與兩個舊開機碟、
+  11-13 測試用新 VM 的目錄 `DroidVM/UniXNU27fresh`（3.4 GB；VM 已從 daemon 移除）。
 - 本機：舊 rig 與舊 clone 先不動（`UniXNU-droidvm-audio` 有未提交、未追蹤的檔案，不是這個工作階段的）。
-  rig `droidvm-5566-27/out/` 裡這次留下的測試用開機碟（`droidvm-disk.*.img`）可以刪。
+  rig `droidvm-5566-27/out/` 裡這次留下的測試用開機碟（`droidvm-disk.*.img`）、測試新 VM 用的 rig 目錄
+  `droidvm-5566-27f` 可以刪。
 
 ## 6. 要使用者決定
 
