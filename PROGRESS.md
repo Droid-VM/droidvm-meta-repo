@@ -213,6 +213,10 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
   全部相同時仍把每顆都標成 P，這個 kernel 很可能開不了機，還沒試。→ [細節](todo/builds.md)
+- ⬜ **11-13** `macOS` 分支併入 `wip/hackintosh`：fork 與 DarwinBoot 已改推 `wip/hackintosh`。12 個 repo 有 `macOS` 分支，
+  crosvm（27 個 commit，含 msm_vidc 直通解碼）已在本機試合併（未建置、未推），virglrenderer 有 6 處衝突未解；guest 主體在
+  `macOS-DroidVM`，以「釘 commit 加補丁」的方式用我們的驅動原始碼。卡在建置樹裡別的工作階段未提交的音訊修改，以及這邊
+  沒有 macOS VM 可驗證。→ [細節](todo/builds.md)（第 7 節）
 - ⬜ **11-08** metal2vulkan 效能瓶頸（GPU 告一段落後的起點）：每個 draw 的 CPU（手機約 56 µs，profile 平）、ICB 每幀重錄
   （renderBundles 2.6 fps）、產生的 shader 比原生肥（GFXBench GPU cycle 1.7–3×、迴圈讀陣列慢）、排程不扣批次、pool 碎片。
   → [細節](todo/metal2vulkan.md)
@@ -522,7 +526,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 |---|---|---|
 | DroidVM meta repo（本 repo） | `DroidVM_wip_gpu` | `wip/hackintosh` → `git push https://github.com/Droid-VM/droidvm-meta-repo.git wip/hackintosh:wip/hackintosh`（origin 是 SSH，不能用；**絕不推 `droidvm`**） |
 | UniXNU 裝置 repo | `UniXNU/UniXNU-droidvm` | `main` → `git push droidvm main:wip/hackintosh`；推之前先跑 rig 的 `scrub_rig.py` |
-| UniXNU fork | `UniXNU/orgrepos/UniXNU` | `droidvm` → `git push droidvm droidvm:wip/droidvm`（不推 origin） |
+| UniXNU fork | `UniXNU/orgrepos/UniXNU-m1101` | `merge-up-1101` → `git push droidvm HEAD:wip/hackintosh`（不推 origin；11-13 前叫 `wip/droidvm`） |
 | crosvm | 本 repo的 `crosvm/` | `wip/virtio-mmio` → Droid-VM/crosvm 的 `wip/virtio-mmio` **和** `wip/hackintosh`（後者是 build 腳本的分支鏈會拿的） |
 | Virtualization（display client，連結進 crosvm） | 本 repo 的 `Virtualization/` | `droidvm` → `git push droidvm HEAD:wip/hackintosh`；改完要重建 crosvm |
 | virglrenderer（drm2kgsl） | 本 repo 的 `virglrenderer/` | `droidvm` → `git push droidvm droidvm:wip/hackintosh` |

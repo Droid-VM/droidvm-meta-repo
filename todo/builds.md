@@ -27,10 +27,10 @@
 
 | 元件 | 本機 clone（分支） | 推送到 | head（11-13） | 備註 |
 |---|---|---|---|---|
-| UniXNU fork | `UniXNU/orgrepos/UniXNU-m1101`（`merge-up-1101`） | Droid-VM/UniXNU `wip/droidvm` | 0f7b62a | 上次合併上游是 11-01（407db1a）；上游 main 之後又多了 282 個 commit |
+| UniXNU fork | `UniXNU/orgrepos/UniXNU-m1101`（`merge-up-1101`） | Droid-VM/UniXNU `wip/hackintosh`（11-13 起；舊名 `wip/droidvm` 停在 0f7b62a） | 0f7b62a | 上次合併上游是 11-01（407db1a）；上游 main 之後又多了 282 個 commit |
 | 裝置 repo | `UniXNU/UniXNU-droidvm-main`（`main`） | `wip/hackintosh` | 見 git | 兩個 board 都在這裡 |
 | AdrenoMetal（Droid-VM/NativeMetal） | `orgrepos/NativeMetal-rebase` | `wip/hackintosh` | 312cde5 | fork 的 pin 相同（11-13 跟上） |
-| DarwinBoot | `orgrepos/DarwinBoot-rebase` | `wip/droidvm-virtio-gpu` | eb4a095 | fork 的 pin 相同（11-13 跟上，並修了一個問題，見第 4 節） |
+| DarwinBoot | `orgrepos/DarwinBoot-rebase` | `wip/hackintosh`（11-13 起；舊名 `wip/droidvm-virtio-gpu` 停在 eb4a095） | eb4a095 | fork 的 pin 相同（11-13 跟上，並修了一個問題，見第 4 節） |
 | Adreno740（NativeAdreno） | — | — | pin 627836d | 刻意不跟上游（改寫過的驅動會打壞裝置 repo 的 text patch） |
 | ArmCpu、GopFramebuffer | — | — | 5265ef1、ed08bd4 | pin 與 head 相同 |
 | ownervisor、applebox（除錯 shell） | — | Droid-VM/ownervisor、applebox `main` | c6c8b2a、6e3b471 | 27 的 pin 在 `ipados27/feeds.toml`（11-13 加） |
@@ -213,3 +213,42 @@ iPad 之內的兩個小選項，都還沒驗：
 2. iPhone：現在不做（建議）／限時試作／現在就開一條線。
 3. 5.4 的清理做不做。
 4. 5567／5568 要不要裝這一版（release 的部署腳本已經有了；5567 目前是 11-11 的開機碟加較舊的 plugin）。
+
+## 7. `macOS` 分支併入 `wip/hackintosh`（11-13 盤點）
+
+使用者要把目前的工作都收進 `wip/hackintosh`；`macOS` 分支是另一位開發者平行做的 macOS 27 guest。
+
+**分支名。** 11-13 起 UniXNU fork 與 DarwinBoot 也推 `wip/hackintosh`（舊名 `wip/droidvm`、`wip/droidvm-virtio-gpu` 停在當天的
+commit，沒刪）；Mac 兩棵建置樹的 fork 已改追這個分支。其餘 repo 本來就是。
+
+**macOS 27 與 iPadOS 27 的 kernel。** 同一份原始碼（xnu-12377.121.6，`ac9718f`，arm64e，同一個機型設定），不是同一個 kernel：
+macOS 編譯時加 `-DXNU_TARGET_OS_OSX`（macOS kext 的 vtable 排法）、補丁是另一套、連結的是 macOS 自己的 Apple kext
+（kernel collection）。二進位不共用；可共用的是大部分補丁與全部驅動原始碼。
+
+**各 repo 的 `macOS` 分支對 `wip/hackintosh`：**
+
+| repo | macOS 多 | hackintosh 多 | 內容與試合併結果 |
+|---|---|---|---|
+| crosvm | 27 | 6 | msm_vidc 直通解碼（`vidc=true`）、KMS 接管面板、WebRTC 顯示輸出（帶進 `third_party/libdatachannel`）、AAudio 改成 callback、PCI MSI（`--mbi-spis`）、`--virtio-mmio-edge-irq`、xHCI MSI-X、half-float scanout。1 處衝突（`cmdline.rs`，兩邊各加一個選項），已解；本機分支 `merge/macos-into-hackintosh`（266818b7c），**未建置、未推** |
+| virtio-media | 1 | 0 | 解碼器 buffer 走 dma-buf、display delay；crosvm 的 vidc 後端要它，兩個要一起動 |
+| virglrenderer | 10 | 5 | `drm2kgsl_renderer.c` 6 處衝突（兩邊都改了 timestamp、power constraint、fault count），未解 |
+| edk2-gunyah | 1 | 0 | MADT 的 GIC MSI Frame（只有 DT 帶 MBI 屬性時才有作用） |
+| NativeMetal | 5 | 4 | 雙平面 YCbCr surface 轉換等，只動 `NativeBridgeMetalFrontend.mm`，合併無衝突 |
+| UniXNU-droidvm | 2 | 255 | `DroidVMGpu.cpp` 的 macOS 版（削到只剩 NativeAdreno 的 publish），和我們的版本衝突，不能直接合 |
+| NativeAdreno | 6 | 50 | 6 個都已在 `wip/hackintosh`（patch 相同） |
+| UniXNU | 17 | 635 | 10-31 的舊分支；macOS 線的 GPU 用戶空間後來改釘我們 fork 的 `ef4486d` |
+| DarwinBoot、ArmCpu、NativeMobileDisplay、mesa | 0 | — | 分支上沒有東西，改動以 patch 檔放在 `macOS-DroidVM` |
+
+**guest 的主體在 `Droid-VM/macOS-DroidVM`**（`macOS` 分支比 `main` 新 37 個 commit，已改走 PCIe virtio 加 MSI-X）。它不走 UniXNU
+流程（自己的 `k27/` 與 KC 連結器、`overlay/kext/` 自己的板級 kext、kernel 補丁 49 個），並且是「釘住我們某個 commit 再疊補丁」
+來用我們的原始碼：音訊（e29d087 + 3）、VideoToolbox（706338e + 11）、virtio-gpu 顯示（59ec0a8 + 1）、DroidVMGpu／NativeAdreno（+ 8）、
+ArmCpu 3、DarwinBoot 2、Mesa 2、metal2vulkan 1。併進 iPadOS 27 這邊 = 把這些補丁變成 `wip/hackintosh` 上的 commit，
+macOS 只留它專屬的部分（kernel 補丁、KC、seed）。
+
+**crosvm 合進來後不是 opt-in 的改動**（會影響現有的 iPadOS／Linux／Windows guest，推之前要回歸測試）：virtio-snd 的 AAudio 輸出、
+MediaCodec 解碼器的像素預算與單一 buffer 映射、virtio-pci 的 MSI-X 向量時機、xHCI、游標 surface 大小、half-float scanout。
+
+**卡住的地方：**
+1. crosvm 只有一棵建置樹，裡面有別的工作階段 11-04 留下的未提交音訊修改（2 檔 48 行），和 macOS 的 AAudio 改寫是同兩個檔。
+   三方合併套得上，但合起來沒有人測過；要不要把它帶過去由使用者決定。
+2. 這邊的手機上沒有 macOS VM，macOS 端的結果無法在這裡驗證，要 macOS 線的人重建。
