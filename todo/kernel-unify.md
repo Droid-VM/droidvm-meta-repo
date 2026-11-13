@@ -168,7 +168,14 @@ UniXNU-droidvm     patches/xnu-12377/series      板級共用：vCPU park、time
   scratchpad `kunify/xnutree.py`，照管線的順序把各層補丁套到乾淨的 ac9718f。
 - macOS 原始碼：116 個補丁全部套得上，`diag.series` 也套得上；與 macOS 線的原樹差 165 個檔，每個都有分類，沒有說不出
   原因的。
-- **沒有編譯過 macOS 的 kernel，也沒有 macOS VM 開機。**
+- **macOS 目標的編譯（Mac，我們的流程，`unixnu build -D ipados27 --os macos-27.0.1-26A434 kernel`）**：116 個補丁在管線上
+  全部套上；XNU 本體以 `XNU_TARGET_OS_OSX` 編譯通過；板級 archive 中 corecrypto、ArmDTPlatform、ArmCpu、libpthread、
+  VirtioMmioBlock、RamBlock、DroidVM 儲存、KeyStoreState、GPU、SoftwareAES 與 `build-droidvm-devices`（音訊、視訊、網路、
+  輸入等驅動）都以 macOS 目標編過。沒過的兩個是 HID 輸入與 legacy display：它們拿 **iPadOS 的 fileset** 核對原始類別的
+  vtable 槽位，macOS 的 vtable 排法不同；而 kernel 腳本硬性要求 legacy display 的 archive，所以最後的連結沒有走到。
+  要嘛為 macOS 拿 macOS kernelcache 做這兩個的核對，要嘛 macOS 的 override 不帶它們（macOS 線本來就用自己的 kext）——
+  這是第 12 步的決定。編譯時用了佔位的根 volume UUID（macOS profile 還沒有 `[root]` 表），擁有者公鑰從 iPadOS 的建置複製。
+- **沒有 macOS VM 開機。**
 
 ### 還沒定的
 
