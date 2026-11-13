@@ -261,21 +261,41 @@ iPadOS 端最大的障礙在打包，不在驅動：
 | DroidVMNetwork | 從原始碼編的 IONetworkingFamily＋virtio-net＋Wi-Fi | stage 6，en0／en1，ssh 走它 | 1b8e68d |
 | DroidVMSoftwareAES | NativeAES（依賴 IOCryptoAcceleratorFamily） | stage 3，已知答案測試通過，開機正常 | b4ac3b1 |
 | DroidVMInput | 觸控、鍵盤、筆、觸控板、動作感測器、感測器通道（依賴 IOHIDFamily） | HID stage 3，6 個 virtio-input，點擊送達 guest | 409e3af |
+| DroidVMKeyStore | AppleKeyStore（狀態查詢＋金鑰包裝） | stage 3，securityd／keybagd 開啟 161 次、呼叫 2581 次、0 拒絕；bluetoothd 不重啟 | 2b231ea |
+| DroidVMStorage | 原始碼版 IOBlockStorageDevice、已驗證的 virtio 磁碟（VerifiedRoot＋擁有者金鑰）、Data seed 與 Data store（依賴 IOStorageFamily） | 根目錄由已驗證磁碟掛載、開機 manifest 狀態 0、2 個驗證裝置、0 完整性錯誤、Data store 寫入 | a50bd06 |
+| DroidVMGraphics | GOP 顯示後端＋virtio GPU＋NativeAdreno 的 Metal 介面＋AGXAccelerator（依賴 IOMobileGraphicsFamily、IOGPUFamily） | 顯示 stage 10、Metal 發布 stage 5、Metal Check 42/42、主畫面正常 | 8f3b25c |
 
-- 第 2 步（kernel 直接呼叫驅動）目前只遇到一處：共用的 `LegacyDisplayProbe.cpp` 直接呼叫 `native_hid_input_probe`，改成以
-  `DROIDVM_KEXT_INPUT` 編譯時交給 kext（未定義時行為不變，iPadOS 17 不受影響）。
-- 連結器（`kc_native.py`）為這幾批加了三件事：`__DATA_CONST,__assert` 區段、絕對符號（`.set`），以及「指向絕對符號的
-  64-bit 值直接寫入、不進 chain」（HID 樁的原始位址常數）。`__BOOTDATA,__static_if` 不帶（只有 kernel 自己的會被改寫，
-  kext 保留編譯時的預設，DEVELOPMENT kernel 上 assert 一樣是開的）。
-- kext 宣告可以依賴 Apple 的 kext（OSBundleLibraries），由 OSKext 保證載入順序：AES 依賴 IOCryptoAcceleratorFamily、輸入
-  依賴 IOHIDFamily；內建時這些順序要靠驅動自己延後註冊。
+11 個板級驅動全部是 kext 了（11-14）。
 
-### 還留在 kernel 裡的
+### 第 2 步：kernel 呼叫驅動的地方
 
-- 平台與診斷，照設計留著：ArmCpu、ArmDTPlatform、開機參數、24 MHz timebase、擁有者鏈與 VerifiedRoot、啟動策略、檔案信箱、
-  頁面資訊、排程追蹤、late probe 本身。
-- 還沒搬的驅動：
-  - keystore（keychain 與資料保護；board 另有 `component:AppleKeyStoreState`，關係要先釐清）
-  - 儲存（根掛載前就要在，`native_source_storage_start` 由 bsd_init 呼叫）
-  - GPU 與顯示：最大的一塊，kernel 直接呼叫它的入口最多（kobject／sandbox 授權、IOSurface GPU 等待、Adreno 探測），
-    第 2 步的工作主要在這裡。
+XNU 的 patch 一行都沒改。kernel 呼叫的名字留在 kernel 裡，改由很小的轉接層回答：
+
+- **儲存**（`package/DroidVMStorageHooks.c`）：bsd_init 的根掛載、kern_exec 的擁有者 cache／Data 掛載、vm_unix 的 shared
+  region 檢查、IOKitBSDInit 的開機 manifest、GPU add-on，共 7 個函式。kext 啟動時、加入磁碟驅動之前登記一次（只接受第一次）；
+  登記之前一律回答「未授權／找不到」，和內建驅動在磁碟起來之前的回答一樣。信任錨（擁有者金鑰、root policy）跟著 kext，
+  而 kext 在同一份簽章的 kernel collection 裡，信任範圍沒變。
+- **顯示與 GPU**（`package/DroidVMLateProbe.c`）：bsd_init 呼叫的兩個 probe。早段在 kext 模式下沒事可做；晚段保留 board
+  自己的部分（keystore／HID 若是內建、cpufreq hook、`native_touch_probe` 與 monitor），顯示與 GPU 交給 kext 的啟動器。
+- **輸入、keystore**：共用的 late probe 以 `DROIDVM_KEXT_INPUT`／`DROIDVM_KEXT_KEYSTORE` 編譯時跳過它們。
+- 這些開關都是「kexts/ 裡有這個驅動才打開」，沒有 kext 定義時建置結果和以前一樣（iPadOS 17 不受影響）。已驗證：把 kexts/ 移開後 iPadOS 27 的
+  kernel 全部內建照樣連結、prelink 成功（11-14）。
+
+### 連結器與建置
+
+- `kc_native.py` 為這幾批加了：`__DATA_CONST,__assert` 區段、絕對符號（`.set`）、「指向絕對符號的 64-bit 值直接寫入、
+  不進 chain」（HID 與顯示樁的原始位址常數）。`__BOOTDATA,__static_if` 不帶（kext 保留編譯時預設，DEVELOPMENT 上 assert 是開的）。
+- kext 可以依賴 Apple 的 kext（OSBundleLibraries），由 OSKext 保證先載入：AES→IOCryptoAcceleratorFamily、輸入→IOHIDFamily、
+  儲存→IOStorageFamily、圖形→IOMobileGraphicsFamily＋IOGPUFamily。內建時這些順序要靠驅動自己延後註冊。
+- 各驅動原本的 builder 照舊編譯並做 vtable／綁定稽核，另外輸出 `kext-objects.json`（帶靜態初始化的物件＋kext 版的入口），
+  `build-droidvm-kexts.py` 用 `object_lists` 收進來。
+- kext 自己定義的名字優先於 kernel 的同名符號，所以 kext 內部呼叫走自己的實作，kernel 的轉接層只給 kernel 用。
+
+### 還留在 kernel 裡的（照設計）
+
+ArmCpu、ArmDTPlatform、開機參數、24 MHz timebase 與 PL030 時鐘、擁有者鏈的 XNU 部分、啟動策略、檔案信箱、頁面資訊、排程追蹤、
+monitor 與 busy scan、late probe 本身、上面兩個轉接層。
+
+### 接下來
+
+- macOS 端照同樣方式做（kext 的 builder 要支援 macOS 的 kernel collection），再決定兩個 OS 共用的驅動原始碼怎麼排。
