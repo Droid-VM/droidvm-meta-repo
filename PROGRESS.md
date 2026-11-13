@@ -222,6 +222,9 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   profile，板級補丁分成共用、iPadOS、macOS 三份，macOS 線 50 個補丁都有去處（重疊的一律用我們的實作），iPadOS 原始碼只多
   arch 層 5 個通用修正與 6 個依編譯器判斷的區塊。還沒做：iPadOS 開機測試（5566 的 VM 目前開不了）、macOS kernel 編譯、
   磁碟佈局（macOS 線是單一容器）的決定。fork 那部分尚未推送。→ [細節](todo/kernel-unify.md)（第 9 節）
+- ⬜ **11-14** 驅動改成 kext（使用者選的維護方式）：iPadOS 的 kext 連結器做好了（prelink 之後把我們的 kext 加進 Apple 的
+  fileset），電池、音訊、VideoToolbox、cpufreq、virtio-console 五個已在 Mac 上建成獨立 kext，結構檢查通過；**還沒開機**，
+  等 5566 重開。device repo 這部分先留本地。下一批是網路。→ [細節](todo/kernel-unify.md)（第 11 節）
 - ⬜ **11-13** msm_vidc 直通在 iPadOS 上還解不出畫面（crosvm 回報可見區域 0x0），而且失敗後停 VM 讓 5566 的 hugepage
   池少了約 2000 頁、補不回來，**5566 要重開手機**（模組由你從 KernelSU 目錄載入）。已改成 session 結束前交還所有驅動
   緩衝區，待驗證。在此之前 `auto`／`msm-vidc` 不給一般 VM 用。→ [細節](todo/builds.md)

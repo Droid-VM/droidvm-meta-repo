@@ -227,3 +227,28 @@ iPadOS 端最大的障礙在打包，不在驅動：
   IOMobileFramebuffer…），仍要用現在執行期認養父類別的做法（12 個檔案在用）；這在 kext 形式下照樣可行，只是「直接
   繼承」的好處在 iPadOS 拿不到。
 - HID 輸入、legacy display 對原始類別 vtable 槽位的核對，兩個 OS 各一張表，kext 化不會消掉這件事。
+
+## 11. kext 化（11-14 開工，使用者同意的順序：連結器 → 註冊式 hook → 分批搬）
+
+### 第 1 步：iPadOS 的 kext 連結器（device repo，本地 b1c279e、1924879、599e3ed，未推）
+
+- `ipados27/kexts/NAME.json` 宣告一個 kext：原始碼（`package/`）、attach 函式（可多個，依序）、取代的內建物件、
+  OSBundleLibraries、需要時的編譯紀錄。內建建置（`build-droidvm-devices.py`、late probe）讀同一份清單，把它們排除。
+- `build-droidvm-kexts.py`：用 kernel 自己的編譯紀錄加 `DROIDVM_NATIVE_KEXT=1` 編，配上通用啟動器
+  `package/DroidVMKextStarter.cpp`（IOResources 在 IOBSD 之後比對到它，就在自己的執行緒呼叫 attach）。
+- `fileset-add-kexts.py`：prelink 之後把 kext 連進 24A446 的 collection，成為獨立的 fileset entry（MH_KEXT_BUNDLE 標頭、
+  `LC_FILESET_ENTRY`、root chained fixups、kmod_info、`_PrelinkInfoDictionary`）。位置照 arm_vm_init 的規則：`__TEXT`
+  在 `__PRELINK_TEXT`，程式碼在我們 kernel 的 `__TEXT_EXEC` 之前，常數在 `__LASTDATA_CONST` 之後，資料在
+  `__PRELINK_DATA` 之後，用被丟掉的 Apple kext 留下的空洞、整個 chain page。kmod_info start／stop 的簽章從 Apple kext
+  讀（IA、diversity 0xe4fe，和 macOS 線寫死的一致）。連結器是 macOS 線的 `kc_native.py`，原樣收進來。
+- release 帶 `kexts.json`（各 kext 的位置與符號），deploy27.sh 併進 rig 的 `kernel.nm`，peek／health 照名字讀。
+- 已在 Mac 上建出：電池、音訊、VideoToolbox（含 virtio-media）、cpufreq、virtio-console 五個 kext 都在 collection 裡；
+  kernel 少了它們照樣連結（沒有別處直接呼叫）；每個指標都落在自己的 kext 或 kernel 內；kmod_info 正確。
+- **還沒開機。** 5566 的 hugepage 池卡在 1929／3072（11-13 msm_vidc 測試留下），要重開手機才能驗。
+
+### 接下來
+
+- 第 2 步（kernel 直接呼叫驅動的入口改成註冊式）只對要搬的驅動做；目前五個都不需要。
+- 下一批：網路（連同從原始碼編的 IONetworkingFamily，`DroidVMVirtioNetIf.cpp` 要加 kext 守衛、kext 建置要支援 tree 內
+  原始碼與整組旗標）、動作感測器、AES、keystore；HID 輸入與 legacy display 會核對 iPadOS fileset 的 vtable，最後處理；
+  儲存（根掛載前就要在）、啟動策略、GPU 留到最後評估。
