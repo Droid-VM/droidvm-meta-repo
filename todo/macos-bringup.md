@@ -1,0 +1,44 @@
+# macOS 27 on DroidVM through our pipeline (11-14 起)
+
+使用者 11-14：「都做完」「OK繼續做完」，磁碟佈局照上游 UniXNU（OS 映像＋SystemOS 疊合根、Data 分開、保留驗證），
+不走 macOS-DroidVM 的單一容器。
+
+## 為什麼不照 macOS-DroidVM 的流程
+
+子代理通讀 macOS-DroidVM（58359aa）的結論：腳本齊全，但缺原作者本機的東西，無法重現——
+`../ios/tools/droidvm-app.py`（VM 註冊）、kernel 建置環境（KDK、Darling 工具鏈、`out/x12377/*`）、`UniXNU.efi`／
+`edk2-macos.fd`、27.2 kernelcache 的來源 IPSW（AMFI GOT 槽位與 KC 版面綁死它）；還要求 UniXNU-droidvm bf7fc44、
+DarwinBoot 85332b3。可借用的知識：
+
+- 開機必要：磁碟（RAM block＋Data store）、NativeAES（沒有它 AppleImage4 panic）。
+- 登入畫面必要：顯示、輸入、ARMPlatformStandIn（取代 AppleARMPlatform／AppleIISController／AppleAudioClockLibs／
+  IOUSBHostFamily）、Ethernet（WindowServer 等 en0）、GPU＋Data 上的 Metal 外掛（沒有 Metal，WindowServer 每 30 s 崩潰）。
+- AMFI 的 PAGE_SHIFT_CONST GOT 槽位改綁 kernel 的 `_k27_amfi_page_shift`（27.0.1 vma2：0xfffffe0007b439c8）。
+- 開機參數（731 B）、`MACOS_BOOT_MANIFEST_HASH=1`（否則 Image4 panic）、ADT 的 `/chosen/asmb`、5120 MiB／8 vCPU。
+
+## 輸入
+
+- IPSW：UniversalMac_27.0.1_26A434（VirtualMac2,1 = vma2macosap，0xFE00／0x20），Mac `out/ipsw/26A434`：
+  kernelcache（解壓 81 MB）、DeviceTree、三份 trust cache；OS（10.5 GB AEA）、SystemOS（2.3 GB AEA）、AppOS 下載解密中
+  （log：Mac `/Volumes/DATA/UniXNU/logs/macos-members-26A434.log`）。
+- fork profile `macos-27.0.1-26A434`（e4c8f28 補了身分與 trust cache）。
+
+## 階段
+
+| # | 內容 | 狀態 |
+|---|---|---|
+| 1 | 上游 macOS 的 kernel patch 挑選移植（疊合根佈局要的那些） | ✅ 11-14 fork 4672760：26 個上游 patch（firmlink、疊合根、唯讀系統、擁有者根已驗證開啟、Hardware／VM volume、App cryptex、GPU bundle、addon、apfs boot shim、文字主控台＋設定與診斷）；不收 payload／window／memwired（sheng 的記憶體視窗）與我們另有做法的；142 個 patch 依序套得上 |
+| 2 | KC：XnuPrelink 的 macOS 支援、profile `[kernel.prelink]`（vma2 roots、AMFI early init、GOT 改綁） | ✅ 11-14 fork 37ceb37（XnuPrelink 440589b，按名字配對 3213＋280／3544）、device b476450（roots、`fileset-sites/fileset-26A434-symbols.json` 由 `fileset-add-kexts.py --sites` 套用）；collection 搬到 0xfffffff007004000（slide 0x1f000000000） |
+| 3 | macOS kernel 連結（defconfig、archives、owner UUID） | ✅ 11-14 device b476450：`droidvm_macos27_defconfig`（`__TEXT,__cstring` 移進 `__TEXT_EXEC` 才放得進 Apple kernel 的 0x11c000）、board core 拆出、儲存 kext 兩個 OS 共用（kernel `__DATA` 槽 0x164000 放不下內建儲存）、Data store 緩衝動態配置；根 UUID 還是佔位 |
+| 4 | 根映像（OS＋SystemOS，owner 簽章 policy）、Data 種子、trust bundle、ADT／payload | |
+| 5 | macOS 的 kext：儲存、AES、網路、顯示、輸入、GPU、平台替身 | |
+| 6 | macOS 版 Metal 外掛 | |
+| 7 | 5566 上建 VM、開機、除錯到登入畫面 | |
+
+## 陷阱（11-14）
+
+- `unixnu defconfig --os macos…` 會改掉 unixnu 記住的選擇：之後的 iPadOS 建置要先 `unixnu defconfig droidvm_ipados27_defconfig`。
+- unixnu 建置會把子模組同步回 fork 記錄的版本：試新的 XnuPrelink 要 `git update-index --cacheinfo` 先記進 index。
+- tree 的 `scripts/` 是組 tree 時的複本，改了 device repo 的腳本要用 dev checkout 那份跑（或重組 tree）。
+- `ipados27/scripts/build-droidvm-gpu.py` 等 4 支是指向 `../../scripts/` 的符號連結：`git add` 要加上層那個（8f3b25c 漏了，d48a512 補）。
+- Mac 沒有免密碼 sudo：macOS Data 種子要保留 root／服務帳號的擁有者，得由使用者在 Mac 上 sudo 跑一次。
