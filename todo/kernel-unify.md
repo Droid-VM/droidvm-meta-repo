@@ -98,7 +98,7 @@ UniXNU-droidvm     patches/xnu-12377/series      板級共用：vCPU park、time
 | 4 | 把 macOS 線的通用驅動補丁收進 `main`：音訊 0002、0003、0005；視訊 0002–0005、0007、0009–0013；pl030-rtc。兩種中斷屬性名都接受；視訊 0008 不收。**收完之後 iPadOS guest 才能用 msm_vidc 直通後端** | I | ✅ 11-13 音訊、視訊全收（0008 改成開機參數 `droidvm-vt-thin-us`，預設關），兩種中斷屬性名、沒有就輪詢（device 2cd4c8e、a229647）；5566 開機與 MediaCodec 編解碼通過；msm_vidc 直通還沒解出畫面（第 9 節）；pl030-rtc、顯示 0002–0004 未收 |
 | 5 | macOS 線把釘的 commit 推到 `main`：它的音訊、視訊補丁縮到只剩 0008，NativeAdreno、DroidVMGpu、DarwinBoot 的補丁消失 | M | |
 | 6 | 編譯器 workaround 移進共用層（由 `__has_builtin` 等 guard 保護，Xcode clang 下無作用） | I= | ✅ 11-13 原始碼（fork a2b713f）；Xcode 下目標檔是否不變待 Mac 建置確認 |
-| 7 | 給 macOS kernel 我們的 host 安全組：16-bit ASID、vCPU park、啟動 flush、pmap sync flush 等 | M | |
+| 7 | 給 macOS kernel 我們的 host 安全組：16-bit ASID、vCPU park、啟動 flush、pmap sync flush 等 | M | ✅ 11-14 結構上已有：macOS kernel 走同一份 board 共用 series（`non-apple-vcpu-park`、`-vcpu-start-flush`、`-idle-wfi`、`-sigp-recover`、`zzx-pmap-sync-flush` 等），16-bit ASID 來自共用的 BCM2837.h（`HAS_16BIT_ASID`）；iPadOS 專屬的只剩 GPU 沙箱與 text fixup 等 5 個（ipados.series）；macOS 在 5566 開到桌面沒有 host 看門狗事件 |
 | 8 | macOS 的補丁系列改疊在共用層上：前兩個大補丁化進 arch series，16 個 macOS 專屬的改用 `XNU_TARGET_OS_OSX` guard 放進 macOS series，12 個診斷的進診斷 series | I=、M | ✅ 11-13 原始碼（fork 0b98053、554c181、a6970da；device 782c974、f60ffc2），沒有編譯過 |
 | 9 | fork 收上游的 `target` 開關，macOS kernel 用同一條流程建 | M | ✅ 開關（fork c69fdf6，與上游同字）；macOS kernel 經我們的流程編譯待做 |
 | 10 | 第 3 節那九件事各留一份實作 | I 再 M | 11-13 macOS 層一律用我們的實作（第 9 節）；擁有者鏈／磁碟佈局未定 |

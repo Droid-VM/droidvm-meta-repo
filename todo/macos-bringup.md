@@ -67,6 +67,12 @@ DarwinBoot 85332b3。可借用的知識：
 - 外掛的進度文字：`peek.py native_adreno_metal_rows 6144`（取可印字串）；`native_adreno_open_log` 看誰開了加速器。
 - panic：`panic.py`（11-14 起會找 4 KiB 頁內的位移）；`droidvm-reset:` 一行列出重開／panic 的類型、行程與回溯。
 
+## iPadOS 回歸（11-14 晚）
+
+macOS 這輪動到的共用部分（DroidVMGpu.cpp 的發布順序、DroidVMVirtioGpu3D.cpp 的表改動態配置、DroidVMReset.c、HidInputProbe.cpp、
+NativeMetal af958ac、Turnip 的 service 名 patch）以 dev 樹建的 iPadOS 27 在 5566 上回歸：資料掛上、330 個行程、SpringBoard 起來、
+411 幀、12 個 GPU client、570 次 fenced submission 0 拒絕；MetalCheck 42/42、GPU 錯誤／逾時 0。
+
 ## 陷阱（11-14）
 
 - `unixnu defconfig --os macos…` 會改掉 unixnu 記住的選擇：之後的 iPadOS 建置要先 `unixnu defconfig droidvm_ipados27_defconfig`。
