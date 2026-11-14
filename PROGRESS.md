@@ -1,6 +1,6 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-13。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
+更新：2026-11-14。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
 App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A446，iPad17,3／iPad Pro 13" M5，arm64e）**；
 原本的 iPadOS 17.7.11（21H461，iPad7,1）10-29 之後沒有再建置。兩條線、建置樹與機型的盤點見 [todo/builds.md](todo/builds.md)。
 
@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-14** macOS 27.0.1（26A434，虛擬 Mac 的 kernelcache）在 5566 上照我們的流程開到 Finder 桌面：已驗證的根＋SystemOS、不用 sudo 的 Data 種子、儲存／網路／顯示／GPU／輸入都是 kext，WindowServer 用 Metal 在手機 Adreno 上合成（device 06c78e6、fork 35d4beb、NativeMetal af958ac）→ [細節](todo/macos-bringup.md)
 - ✅ **11-13** 音訊預設省電、App 音效卡「延遲模式」可改（省電／標準／低延遲）：crosvm 13abbc1da、a88e7c116，app b50270b；5566 低延遲實測 burst 192 frames、0 丟幀
 - ✅ **11-13** iPadOS 的 VideoToolbox host 收進 macOS 線的視訊／音訊驅動補丁並會自己適配 host 的解碼後端（要求解碼順序，被拒就照顯示順序）；音訊、視訊改中斷：MediaCodec 下 H.264 268 fps、HEVC 367 fps（之前約 150）→ [細節](todo/builds.md)
 - ✅ **11-13** `macOS` 分支的 host 端併入 `wip/hackintosh`（crosvm、virtio-media、virglrenderer、edk2-gunyah、gunyah_host_mod），iPadOS 27 在 8 Elite Gen 5 上回歸通過；fork 與 DarwinBoot 也改推 `wip/hackintosh`

@@ -31,9 +31,9 @@ DarwinBoot 85332b3。可借用的知識：
 | 2 | KC：XnuPrelink 的 macOS 支援、profile `[kernel.prelink]`（vma2 roots、AMFI early init、GOT 改綁） | ✅ 11-14 fork 37ceb37（XnuPrelink 440589b，按名字配對 3213＋280／3544）、device b476450（roots、`fileset-sites/fileset-26A434-symbols.json` 由 `fileset-add-kexts.py --sites` 套用）；collection 搬到 0xfffffff007004000（slide 0x1f000000000） |
 | 3 | macOS kernel 連結（defconfig、archives、owner UUID） | ✅ 11-14 device b476450：`droidvm_macos27_defconfig`（`__TEXT,__cstring` 移進 `__TEXT_EXEC` 才放得進 Apple kernel 的 0x11c000）、board core 拆出、儲存 kext 兩個 OS 共用（kernel `__DATA` 槽 0x164000 放不下內建儲存）、Data store 緩衝動態配置；根 UUID 還是佔位 |
 | 4 | 根映像（OS＋SystemOS，owner 簽章 policy）、Data 種子、trust bundle、ADT／payload | ✅ 11-14：`root-image-identity.py`（[root] 值，fork 655ab48）、policy 驗證 346 萬＋70 萬區塊；Data 種子不用 sudo：`make-droidvm-macos-seed.py` 在 lima VM 裡以 root 寫入（`make-macos-data-linux.py`，device 9cc425e）；ADT：vma2 身分、`--adt-table`（boot-uuid、asmb）、root-matching（c920aaa）；`build-droidvm-all.py --os`（2cca425） |
-| 5 | macOS 的 kext：儲存 ✅（TARGET_OS_OSX vtable，b06b832）；網路 ✅、顯示 ✅、GPU 核心端 ✅（device 814d788）；輸入（編好待測）；AES、平台替身用不到（沒有它們也開得起來） | 進行中 |
-| 6 | macOS 版 Metal 外掛 | 進行中：fork 的 turnip／bridge／plugin 加 `macos27` 目標（上游 e7c359c、d434fc2）；NativeMetal 移植上游 bd09ede 的 macOS 入口（IOGPUMetalDevice 子類別、WindowServer 是 render server）；經 payload 的 GPU addon（`GPUBundles/`，`gpu-addon=1`）放到 /Library/GPUBundles |
-| 7 | 5566 上建 VM、開機、除錯到登入畫面 | 11-14 第 5-7 次：en0、IOTimeSync 註冊；WindowServer 打開 IOMobileFramebuffer 後每約 33 s 重啟（缺 Metal，同 macOS-DroidVM run 18）；Metal 加速器已發布（stage 5）。rig `droidvm-5566-macos`，VM `UniXNU-macOS27`：第 4 次開機到使用者空間——根（已驗證）、SystemOS、Data 掛上，launchd「Early boot complete」，140 個行程；還沒有顯示／輸入／網路（沒有 WindowServer）。修過：storage vtable（handleStart 的 reportRemovability 驗證失敗）、等 boot-uuid-media（改 root-matching）、mount-phase-1 的 apfs_boot_util EROFS（上游替身，c920aaa） |
+| 5 | macOS 的 kext：儲存、網路、顯示、GPU、輸入（device 814d788、06c78e6）；AES、平台替身用不到（沒有它們也開得起來） | ✅ 11-14（輸入：7 個裝置找到、6 個啟動，事件還沒試：app 不列這台 VM） |
+| 6 | macOS 版 Metal 外掛 | ✅ 11-14：fork 013aa8c／820eb5c（`macos27` 目標，上游 e7c359c、d434fc2）、8641129（NativeMetal af958ac：上游 bd09ede 的 macOS 入口，IOGPUMetalDevice 子類別、WindowServer 是 render server）、35d4beb（Turnip 的 virtio-gpu 路徑照 `TU_DARWIN_SERVICE` 找加速器）；經 payload 的 GPU addon（`GPUBundles/`，`gpu-addon=1`）放到 /Library/GPUBundles |
+| 7 | 5566 上建 VM、開機、除錯到登入畫面 | ✅ 11-14 第 13 次：自動登入到 Finder 桌面（Dock、選單列、小工具、桌布），WindowServer 用 Metal 合成，480 s 沒 panic。第 5-7 次：en0、IOTimeSync 註冊；WindowServer 打開 IOMobileFramebuffer 後每約 33 s 重啟（缺 Metal，同 macOS-DroidVM run 18）；Metal 加速器已發布（stage 5）。rig `droidvm-5566-macos`，VM `UniXNU-macOS27`：第 4 次開機到使用者空間——根（已驗證）、SystemOS、Data 掛上，launchd「Early boot complete」，140 個行程；還沒有顯示／輸入／網路（沒有 WindowServer）。修過：storage vtable（handleStart 的 reportRemovability 驗證失敗）、等 boot-uuid-media（改 root-matching）、mount-phase-1 的 apfs_boot_util EROFS（上游替身，c920aaa） |
 
 ### 開機記錄
 
@@ -44,6 +44,10 @@ DarwinBoot 85332b3。可借用的知識：
 5. 網路 kext（Apple 的 IONetworkingFamily）：en0、clocksyncd 不再卡。
 6. 顯示 kext（macOS-DroidVM 的 DroidVMDisplay，26A434 ABI）：WindowServer 打開 IOMFB、`map_display_type`，30 s 後找不到 Metal 裝置就退出。
 7. GPU 核心端（AGXAccelerator : IOAccelerator）：`droidvm_metal_publish` 0／5／0。
+8. 外掛裝上（/Library/GPUBundles），WindowServer 仍每 30 s 重啟：Turnip 的 virtio-gpu 路徑寫死找 `IOAcceleratorES`（只有 iPadOS 有），退回 KGSL proxy 被拒（`VK_ERROR_INITIALIZATION_FAILED`，外掛的文字列在 kernel 的 `native_adreno_metal_rows`）。
+9. Turnip 修好：virtio GPU 開始有命令，WindowServer 不再崩；但第一個畫面後 4 s「MACH Reboot」，VM 卡死（平台沒設 `PE_halt_restart`）。
+10-12. 加 PSCI 重設（DroidVMReset.c，會自己重開了）、`droidvm-reset-hold=1` 保留現場、印呼叫者與回溯：是 WindowServer 裡的 panic——IOMFB 交出主控台給 serial，寫到 arm64 唯讀的 `cons_ops_index`（`serial=3` 才會走這條）。
+13. `droidvm-macos-console-switch.patch`：到桌面。
 
 ### kext 連結器的 macOS 能力（device 814d788）
 
@@ -59,6 +63,9 @@ DarwinBoot 85332b3。可借用的知識：
 - `guestcpus.py`（`TH_THREAD_ID=1528`）：各 CPU 的執行緒與中斷狀態；`kext-syms.py out/kernel.macho 0 out/kexts-apple.nm`：Apple kext 符號（XnuPrelink 已換算成搬家後的位址）。
 - panic 時 `debugger_current_op` 0、entry 1、沒有 panic 字串：panic 路徑自己又出例外（在 SP1 上），看 cpu 的 kernel 堆疊。
 - `health.py`／`deploy27.sh` 的判斷是 iPadOS 的（backboardd、SpringBoard、外掛），macOS 會報 exit 1。
+- 畫面：這台 VM 不在 app 的清單裡（deploy27 經 daemon 建的），手機看不到；`scanout-grab-phone.sh /data/local/tmp/sg <2048*2732*8>` 抓 virtio-gpu 掃描輸出的 udmabuf（`RGhA` 半浮點，每像素 8 bytes），numpy 轉 PNG。`fbgrab.sh` 是開機 framebuffer（只看得到文字主控台）。
+- 外掛的進度文字：`peek.py native_adreno_metal_rows 6144`（取可印字串）；`native_adreno_open_log` 看誰開了加速器。
+- panic：`panic.py`（11-14 起會找 4 KiB 頁內的位移）；`droidvm-reset:` 一行列出重開／panic 的類型、行程與回溯。
 
 ## 陷阱（11-14）
 
