@@ -100,10 +100,10 @@ UniXNU-droidvm     patches/xnu-12377/series      板級共用：vCPU park、time
 | 6 | 編譯器 workaround 移進共用層（由 `__has_builtin` 等 guard 保護，Xcode clang 下無作用） | I= | ✅ 11-13 原始碼（fork a2b713f）；Xcode 下目標檔是否不變待 Mac 建置確認 |
 | 7 | 給 macOS kernel 我們的 host 安全組：16-bit ASID、vCPU park、啟動 flush、pmap sync flush 等 | M | ✅ 11-14 結構上已有：macOS kernel 走同一份 board 共用 series（`non-apple-vcpu-park`、`-vcpu-start-flush`、`-idle-wfi`、`-sigp-recover`、`zzx-pmap-sync-flush` 等），16-bit ASID 來自共用的 BCM2837.h（`HAS_16BIT_ASID`）；iPadOS 專屬的只剩 GPU 沙箱與 text fixup 等 5 個（ipados.series）；macOS 在 5566 開到桌面沒有 host 看門狗事件 |
 | 8 | macOS 的補丁系列改疊在共用層上：前兩個大補丁化進 arch series，16 個 macOS 專屬的改用 `XNU_TARGET_OS_OSX` guard 放進 macOS series，12 個診斷的進診斷 series | I=、M | ✅ 11-13 原始碼（fork 0b98053、554c181、a6970da；device 782c974、f60ffc2），沒有編譯過 |
-| 9 | fork 收上游的 `target` 開關，macOS kernel 用同一條流程建 | M | ✅ 開關（fork c69fdf6，與上游同字）；macOS kernel 經我們的流程編譯待做 |
+| 9 | fork 收上游的 `target` 開關，macOS kernel 用同一條流程建 | M | ✅ 開關（fork c69fdf6，與上游同字）；✅ 11-14 macOS kernel 經我們的流程建好並開到桌面（device 06c78e6，[macos-bringup](macos-bringup.md)） |
 | 10 | 第 3 節那九件事各留一份實作 | I 再 M | 11-13 macOS 層一律用我們的實作（第 9 節）；擁有者鏈／磁碟佈局未定 |
-| 11 | 從 8 個驅動檔抽出 virtio 傳輸層（mmio 或 PCI、中斷掛接），網路與輸入才能共用裝置程式碼 | I 再 M | |
-| 12 | macOS 的包裝（編進 kernel 或 kext）與根檔案系統佈局定案 | M | |
+| 11 | 從 8 個驅動檔抽出 virtio 傳輸層（mmio 或 PCI、中斷掛接），網路與輸入才能共用裝置程式碼 | I 再 M | 11-14 前提不在了：macOS 改用我們同一份 mmio 驅動（網路、輸入、儲存、GPU 都是 `package/` 同一份原始碼的 kext），兩邊已共用裝置程式碼；只有日後要支援 PCI 傳輸（macOS-DroidVM 的 `pci-host-ecam-generic`）才需要抽，暫不做 |
+| 12 | macOS 的包裝（編進 kernel 或 kext）與根檔案系統佈局定案 | M | ✅ 11-14：板級驅動一律 kext（兩個 OS 同一套連結器）；根檔案系統照上游 UniXNU 的疊合根（OS 映像＋SystemOS、Data 分開、擁有者鏈驗證）（使用者同意） |
 
 第 1–4、6 步只需要我們自己，不改變 macOS 的行為。第 10–12 步要兩位開發者一起決定。
 

@@ -293,3 +293,8 @@ host 選後端，guest 自己適配。crosvm 的 `--virtio-media kind=decoder,ba
     USERPTR 緩衝區散在 guest RAM 各處，一個 1.4 MB 緩衝區就可能釘住幾十個 2 MB 大頁，大頁模組過了寬限就放棄它們。
     已改成 msm_vidc 的 session 結束前先 STREAMOFF 兩個佇列並 REQBUFS(0)（還沒驗證）。**5566 的 VM 目前開不了，要重開手機。**
   - 在這兩點解決前，`auto`／`msm-vidc` 不要給一般 VM 用；App 預設仍是 MediaCodec。
+  - **11-14 重跑（crosvm 7aae3735f，已部署 5566）**：可見區域解決了——COMPOSE 兩種佇列都答 0x0，CAPTURE 的 CROP 答出
+    640x360，現在每個 session 都有正確尺寸；但仍 0 幀（每個 access unit 都失敗）。session 結束前的 STREAMOFF＋REQBUFS(0)
+    兩個佇列都回 EBUSY，沒放掉；停 VM 後池子 1197／3072，acquire 後 2196，照舊得重開手機（adb reboot 後 KernelSU 自動載入
+    大頁模組，app 的 4 個模組要 `load-modules.sh`）。下一步：查 EBUSY（佇列的記憶體型別可能不是 DMABUF——bitstream 是 MMAP？）
+    與 0 幀的原因（driver 的 event／錯誤碼）。每試一次直通都可能要重開手機。
