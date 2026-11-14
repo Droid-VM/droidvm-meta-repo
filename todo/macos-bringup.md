@@ -31,9 +31,9 @@ DarwinBoot 85332b3。可借用的知識：
 | 2 | KC：XnuPrelink 的 macOS 支援、profile `[kernel.prelink]`（vma2 roots、AMFI early init、GOT 改綁） | ✅ 11-14 fork 37ceb37（XnuPrelink 440589b，按名字配對 3213＋280／3544）、device b476450（roots、`fileset-sites/fileset-26A434-symbols.json` 由 `fileset-add-kexts.py --sites` 套用）；collection 搬到 0xfffffff007004000（slide 0x1f000000000） |
 | 3 | macOS kernel 連結（defconfig、archives、owner UUID） | ✅ 11-14 device b476450：`droidvm_macos27_defconfig`（`__TEXT,__cstring` 移進 `__TEXT_EXEC` 才放得進 Apple kernel 的 0x11c000）、board core 拆出、儲存 kext 兩個 OS 共用（kernel `__DATA` 槽 0x164000 放不下內建儲存）、Data store 緩衝動態配置；根 UUID 還是佔位 |
 | 4 | 根映像（OS＋SystemOS，owner 簽章 policy）、Data 種子、trust bundle、ADT／payload | ✅ 11-14：`root-image-identity.py`（[root] 值，fork 655ab48）、policy 驗證 346 萬＋70 萬區塊；Data 種子不用 sudo：`make-droidvm-macos-seed.py` 在 lima VM 裡以 root 寫入（`make-macos-data-linux.py`，device 9cc425e）；ADT：vma2 身分、`--adt-table`（boot-uuid、asmb）、root-matching（c920aaa）；`build-droidvm-all.py --os`（2cca425） |
-| 5 | macOS 的 kext：儲存 ✅（TARGET_OS_OSX vtable，b06b832）；AES、網路、顯示、輸入、GPU、平台替身 | 進行中 |
-| 6 | macOS 版 Metal 外掛 | |
-| 7 | 5566 上建 VM、開機、除錯到登入畫面 | 11-14 rig `droidvm-5566-macos`，VM `UniXNU-macOS27`：第 4 次開機到使用者空間——根（已驗證）、SystemOS、Data 掛上，launchd「Early boot complete」，140 個行程；還沒有顯示／輸入／網路（沒有 WindowServer）。修過：storage vtable（handleStart 的 reportRemovability 驗證失敗）、等 boot-uuid-media（改 root-matching）、mount-phase-1 的 apfs_boot_util EROFS（上游替身，c920aaa） |
+| 5 | macOS 的 kext：儲存 ✅（TARGET_OS_OSX vtable，b06b832）；網路 ✅、顯示 ✅、GPU 核心端 ✅（device 814d788）；輸入（編好待測）；AES、平台替身用不到（沒有它們也開得起來） | 進行中 |
+| 6 | macOS 版 Metal 外掛 | 進行中：fork 的 turnip／bridge／plugin 加 `macos27` 目標（上游 e7c359c、d434fc2）；NativeMetal 移植上游 bd09ede 的 macOS 入口（IOGPUMetalDevice 子類別、WindowServer 是 render server）；經 payload 的 GPU addon（`GPUBundles/`，`gpu-addon=1`）放到 /Library/GPUBundles |
+| 7 | 5566 上建 VM、開機、除錯到登入畫面 | 11-14 第 5-7 次：en0、IOTimeSync 註冊；WindowServer 打開 IOMobileFramebuffer 後每約 33 s 重啟（缺 Metal，同 macOS-DroidVM run 18）；Metal 加速器已發布（stage 5）。rig `droidvm-5566-macos`，VM `UniXNU-macOS27`：第 4 次開機到使用者空間——根（已驗證）、SystemOS、Data 掛上，launchd「Early boot complete」，140 個行程；還沒有顯示／輸入／網路（沒有 WindowServer）。修過：storage vtable（handleStart 的 reportRemovability 驗證失敗）、等 boot-uuid-media（改 root-matching）、mount-phase-1 的 apfs_boot_util EROFS（上游替身，c920aaa） |
 
 ### 開機記錄
 
@@ -41,6 +41,17 @@ DarwinBoot 85332b3。可借用的知識：
 2. 等 `boot-uuid-media` 到天荒地老：APFS 拿不到 iBoot 轉交的根雜湊就不發布；加 root-matching（IOMedia UUID）。
 3. launchd 的 mount-phase-1 中止（apfs_boot_util 想寫唯讀的根 container）：上游 `apfs_boot_util` 替身放在 Data 種子，`apfs-boot-shim=1`。
 4. 到使用者空間。
+5. 網路 kext（Apple 的 IONetworkingFamily）：en0、clocksyncd 不再卡。
+6. 顯示 kext（macOS-DroidVM 的 DroidVMDisplay，26A434 ABI）：WindowServer 打開 IOMFB、`map_display_type`，30 s 後找不到 Metal 裝置就退出。
+7. GPU 核心端（AGXAccelerator : IOAccelerator）：`droidvm_metal_publish` 0／5／0。
+
+### kext 連結器的 macOS 能力（device 814d788）
+
+- 依 libraries 解析 Apple kext 的符號（外部，找不到再用唯一的本地符號）。
+- `vtables`：自有類別對原始類別逐槽比 PAC diversity；原始類別重新宣告為純虛擬的槽，用祖先的 diversity 放行。
+- `patch_personalities`：改 collection 裡 Apple kext 的 personality（IOTimeSyncRootService 等 DroidVMNetwork）。
+- spec 可帶自己的 `personalities`、可以沒有 `attach`；macOS kext 一律 `TARGET_OS_OSX=1`。
+- kext 的 `__DATA` 空間很小（storage＋network＋graphics 用到幾乎滿）：大的靜態表要改動態配置。
 
 ### 除錯工具（macOS）
 
