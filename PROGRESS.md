@@ -1,6 +1,6 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-14。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
+更新：2026-11-15。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
 App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A446，iPad17,3／iPad Pro 13" M5，arm64e）**；
 原本的 iPadOS 17.7.11（21H461，iPad7,1）10-29 之後沒有再建置。兩條線、建置樹與機型的盤點見 [todo/builds.md](todo/builds.md)。
 
@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-15** macOS 27 在手機的 DroidVM app 裡看得到也能操作：鎖定畫面打密碼登入、桌面、觸控點按與拖曳、鍵盤；app 的 VM 清單列出這台。修了零拷貝顯示的頁數上限、host 顯示端不認 FP16 畫面、鍵盤報告被當觸控丟掉；觸控在 macOS 做成絕對座標指標，電池／cpufreq／音效 kext 也開給 macOS（device d325d0f、Virtualization c8c132c55）→ [細節](todo/macos-bringup.md)
 - ✅ **11-14** macOS 27.0.1（26A434，虛擬 Mac 的 kernelcache）在 5566 上照我們的流程開到 Finder 桌面：已驗證的根＋SystemOS、不用 sudo 的 Data 種子、儲存／網路／顯示／GPU／輸入都是 kext，WindowServer 用 Metal 在手機 Adreno 上合成（device 06c78e6、fork 35d4beb、NativeMetal af958ac）→ [細節](todo/macos-bringup.md)
 - ✅ **11-13** 音訊預設省電、App 音效卡「延遲模式」可改（省電／標準／低延遲）：crosvm 13abbc1da、a88e7c116，app b50270b；5566 低延遲實測 burst 192 frames、0 丟幀
 - ✅ **11-13** iPadOS 的 VideoToolbox host 收進 macOS 線的視訊／音訊驅動補丁並會自己適配 host 的解碼後端（要求解碼順序，被拒就照顯示順序）；音訊、視訊改中斷：MediaCodec 下 H.264 268 fps、HEVC 367 fps（之前約 150）→ [細節](todo/builds.md)
@@ -219,15 +220,14 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
   全部相同時仍把每顆都標成 P，這個 kernel 很可能開不了機，還沒試。→ [細節](todo/builds.md)
-- ⬜ **11-13** iPadOS 27／macOS 27 的 kernel 融合成一套原始碼：fork 加了 OS 的 `target` 開關與 `macos-27.0.1-26A434`
-  profile，板級補丁分成共用、iPadOS、macOS 三份，macOS 線 50 個補丁都有去處（重疊的一律用我們的實作），iPadOS 原始碼只多
-  arch 層 5 個通用修正與 6 個依編譯器判斷的區塊（11-14 開機驗證、已推送）。macOS kernel 在 Mac 上照同一條流程編得過
-  XNU 與裝置驅動；還沒做：最後的連結（等包裝方式定案）、磁碟佈局（macOS 線是單一容器）的決定。→ [細節](todo/kernel-unify.md)（第 9 節）
+- ⬜ **11-13** iPadOS 27／macOS 27 的 kernel 融合成一套原始碼：兩個 OS 從同一份 XNU 原始碼、同一條流程建出並開機（macOS 到
+  桌面、11-15 在 app 上可操作），驅動都是 kext、磁碟用上游 UniXNU 的佈局。剩下第 5 步：macOS-DroidVM（另一位貢獻者的 repo）
+  對我們原始碼的釘選版本要不要跟上、怎麼協調，由使用者決定。→ [細節](todo/kernel-unify.md)
 - ✅ **11-14** 驅動改成 kext：iPadOS 的 11 個板級驅動（含儲存、keystore、顯示與 GPU）全部以 kext 在 5566 開機驗證，kernel 只留平台與診斷，XNU patch 未動 → [細節](todo/kernel-unify.md)（第 11 節）
-- ⬜ **11-13** msm_vidc 直通在 iPadOS 上還解不出畫面（crosvm 回報可見區域 0x0），而且失敗後停 VM 讓 5566 的 hugepage
-  池少了約 2000 頁（11-14 用 adb 重開手機恢復，大頁模組由 KernelSU 自動載入）。已改成 session 結束前交還所有驅動
-  緩衝區，待驗證。在此之前 `auto`／`msm-vidc` 不給一般 VM 用。→ [細節](todo/builds.md)
-- ⬜ **11-13** host 合併後還沒驗證的：Windows guest、macOS guest、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（基本回歸
+- ⬜ **11-13** msm_vidc 直通在 iPadOS 上還解不出畫面：11-14 重跑可見區域對了（改讀 CROP），仍 0 幀；結束時 REQBUFS(0)
+  回 EBUSY，停 VM 後 5566 的 hugepage 池照樣少約 2000 頁（又用 adb 重開手機恢復，大頁模組由 KernelSU 自動載入）。每試一次
+  可能要重開手機，`auto`／`msm-vidc` 不給一般 VM 用。→ [細節](todo/builds.md)
+- ⬜ **11-13** host 合併後還沒驗證的：Windows guest、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（macOS guest 11-15 驗過；基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率
   下限對所有 guest 生效，耗電沒量；合併後的音訊只看了日誌沒用耳朵聽。
   → [細節](todo/builds.md)（第 7 節）

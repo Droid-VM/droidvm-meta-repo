@@ -31,7 +31,7 @@ DarwinBoot 85332b3。可借用的知識：
 | 2 | KC：XnuPrelink 的 macOS 支援、profile `[kernel.prelink]`（vma2 roots、AMFI early init、GOT 改綁） | ✅ 11-14 fork 37ceb37（XnuPrelink 440589b，按名字配對 3213＋280／3544）、device b476450（roots、`fileset-sites/fileset-26A434-symbols.json` 由 `fileset-add-kexts.py --sites` 套用）；collection 搬到 0xfffffff007004000（slide 0x1f000000000） |
 | 3 | macOS kernel 連結（defconfig、archives、owner UUID） | ✅ 11-14 device b476450：`droidvm_macos27_defconfig`（`__TEXT,__cstring` 移進 `__TEXT_EXEC` 才放得進 Apple kernel 的 0x11c000）、board core 拆出、儲存 kext 兩個 OS 共用（kernel `__DATA` 槽 0x164000 放不下內建儲存）、Data store 緩衝動態配置；根 UUID 還是佔位 |
 | 4 | 根映像（OS＋SystemOS，owner 簽章 policy）、Data 種子、trust bundle、ADT／payload | ✅ 11-14：`root-image-identity.py`（[root] 值，fork 655ab48）、policy 驗證 346 萬＋70 萬區塊；Data 種子不用 sudo：`make-droidvm-macos-seed.py` 在 lima VM 裡以 root 寫入（`make-macos-data-linux.py`，device 9cc425e）；ADT：vma2 身分、`--adt-table`（boot-uuid、asmb）、root-matching（c920aaa）；`build-droidvm-all.py --os`（2cca425） |
-| 5 | macOS 的 kext：儲存、網路、顯示、GPU、輸入（device 814d788、06c78e6）；AES、平台替身用不到（沒有它們也開得起來） | ✅ 11-14（輸入：7 個裝置找到、6 個啟動，事件還沒試：app 不列這台 VM） |
+| 5 | macOS 的 kext：儲存、網路、顯示、GPU、輸入（device 814d788、06c78e6）；AES、平台替身用不到（沒有它們也開得起來） | ✅ 11-14；11-15 輸入在 app 上驗過（鍵盤、觸控點按與拖曳），加電池、cpufreq、音效、console（device d325d0f） |
 | 6 | macOS 版 Metal 外掛 | ✅ 11-14：fork 013aa8c／820eb5c（`macos27` 目標，上游 e7c359c、d434fc2）、8641129（NativeMetal af958ac：上游 bd09ede 的 macOS 入口，IOGPUMetalDevice 子類別、WindowServer 是 render server）、35d4beb（Turnip 的 virtio-gpu 路徑照 `TU_DARWIN_SERVICE` 找加速器）；經 payload 的 GPU addon（`GPUBundles/`，`gpu-addon=1`）放到 /Library/GPUBundles |
 | 7 | 5566 上建 VM、開機、除錯到登入畫面 | ✅ 11-14 第 13 次：自動登入到 Finder 桌面（Dock、選單列、小工具、桌布），WindowServer 用 Metal 合成，480 s 沒 panic。第 5-7 次：en0、IOTimeSync 註冊；WindowServer 打開 IOMobileFramebuffer 後每約 33 s 重啟（缺 Metal，同 macOS-DroidVM run 18）；Metal 加速器已發布（stage 5）。rig `droidvm-5566-macos`，VM `UniXNU-macOS27`：第 4 次開機到使用者空間——根（已驗證）、SystemOS、Data 掛上，launchd「Early boot complete」，140 個行程；還沒有顯示／輸入／網路（沒有 WindowServer）。修過：storage vtable（handleStart 的 reportRemovability 驗證失敗）、等 boot-uuid-media（改 root-matching）、mount-phase-1 的 apfs_boot_util EROFS（上游替身，c920aaa） |
 
@@ -66,6 +66,38 @@ DarwinBoot 85332b3。可借用的知識：
 - 畫面：這台 VM 不在 app 的清單裡（deploy27 經 daemon 建的），手機看不到；`scanout-grab-phone.sh /data/local/tmp/sg <2048*2732*8>` 抓 virtio-gpu 掃描輸出的 udmabuf（`RGhA` 半浮點，每像素 8 bytes），numpy 轉 PNG。`fbgrab.sh` 是開機 framebuffer（只看得到文字主控台）。
 - 外掛的進度文字：`peek.py native_adreno_metal_rows 6144`（取可印字串）；`native_adreno_open_log` 看誰開了加速器。
 - panic：`panic.py`（11-14 起會找 4 KiB 頁內的位移）；`droidvm-reset:` 一行列出重開／panic 的類型、行程與回溯。
+
+## 輸入、手機畫面與其他 kext（11-15）
+
+結果（device d325d0f、Virtualization c8c132c55、crosvm 4c267a2e 部署在 5566）：macOS 在 app 的畫面上看得到也能操作——鎖定畫面
+打密碼登入、桌面（桌布、Dock、選單列）、點按與拖曳、鍵盤辨識精靈走完；app 的 VM 清單也列出這台（vms.json 加入，備份
+`vms.json.bak-20261115-macos`）。沒驗：app 的滑鼠模式（相對滑鼠）、雙指捲動／右鍵（adb 沒有多指）、音效出聲。
+
+- **HID 探測沒跑**：`HidInputProbe.cpp` 要 `offline-hid-input=1`、`offline-hid-home=1`，macOS 的 kernel_args 原本沒有（board.toml
+  補上）；macOS 的 IOHIDDevice 也是 0xd0 bytes，大小檢查照過。**不要** `sheng-touch-hid`：它讓鍵盤裝置帶 iPadOS 的觸控 collection，
+  探測再把它的 service 改成 Built-In／DisplayIntegrated／Digitizer，macOS 的 dext 於是把每筆按鍵報告送進 digitizer 路徑丟掉
+  （`createEventForDigitizerCollection generates null event`），WindowServer 也把它當內建觸控螢幕——密碼打不進去。
+- **鍵盤辨識精靈**：鍵盤宣告 HID country code 33 仍會跳一次（VendorID／ProductID 為 0，macOS 不認得）；走完後存在 Data 的
+  `/Library/Preferences/com.apple.keyboardtype.plist`（`0-0-33` → 40 ANSI）。新的 Data 種子會再跳一次，要省掉就把這個 plist 放進種子。
+- **macOS kext 的 vtable 有保留槽**（`APPLE_KEXT_VTABLE_PADDING`）：IOHIDDevice 334 槽，iPadOS 207。NativeHidInput 寫死的 iPadOS 槽號
+  （觸控邊緣標記包 `dispatchEvent` 的第 198 槽）在 macOS 是 `IOService::terminate`；ShengHidInput 24f1f3f 換槽前比對 PAC diversity，
+  所以在 macOS 自動略過（邊緣標記與筆的傾角不作用，不會掛錯函式）。
+- **macOS 不把觸控 digitizer 當指標**：`DroidVMPointerHid.inc`（只在 `DROIDVM_INPUT_MOUSE`，macOS 的輸入 kext）把觸控螢幕做成 QEMU
+  式的絕對座標指標（單指停 80 ms 或移動才按下，點按＝左鍵、拖曳；雙指捲動；雙指輕點＝右鍵），app 的「滑鼠」模式（REL_X/Y）
+  做成五鍵滑鼠，`DroidVMVirtioInput.c` 多認一種 `KIND_MOUSE`。iPadOS 不變。
+- **手機上黑屏**：WindowServer 的主圖層是 `RGhA`（FP16），45 MB 的 surface 在 4 KiB 頁最多 10928 段，DroidVMDisplay 用 MaxCommand
+  算的上限只有 8188 段，零拷貝掃描輸出每幀都失敗（kIOReturnNoResources），退回的 CPU 轉換（約 140 ms）只寫開機 framebuffer
+  ——app 的顯示不看那塊。改用板子的 `MaxEntries`（16384，走 transport 的 huge request），`droidvm_display_scanout_why` 記失敗原因。
+  零拷貝之後 host 端還得認 FP16：app 顯示端的 Vulkan 匯入只認 32-bit fourcc（`Failed to import display dmabuf ... 0x48344241`），
+  Virtualization c8c132c55 加 AB4H／XB4H → `R16G16B16A16_SFLOAT`，blit 進 8-bit 時夾到 [0,1]（同 guest 自己的 CPU 轉換）。
+  另外 macOS 閒置會關顯示器（`DroidVMDisplay: display off`）並鎖螢幕；叫醒它的是任何 HID 活動（log 裡看到的是動作感測器的方向事件）。
+- **其他 kext 開給 macOS**：電池（IOPMPowerSource，選單列有充電中的電池）、cpufreq（6 個 vCPU 窗口）、音效（IOAudio2Family 也在
+  macOS 的 collection；兩個裝置發布、coreaudiod 開了，出聲沒驗）起來了；virtio-console 是 0 個埠（這台 VM 沒設，iPadOS 那台也沒有）。
+- **查 macOS 輸入的方法**：`logarchive.py` 拉 unified log（434 MB 約 17 分鐘，uuidtext 是上千個小檔），`unifiedlog_iterator` 轉
+  JSONL（17 GB）後 grep 時間窗；`com.apple.iohid` 的「Service added」列出每個 HID 服務的用途與 transport，dext 的
+  `IOUserHIDEventDriver.cpp` 行說明報告怎麼解析，「HID activity」說明哪個服務在送事件。
+- rig：`input.py` 在 VM surface 還沒有 buffer 時改用它的背景圖層換算（之前退回全螢幕、點到螢幕外）；`vm.sh attach` 改看
+  `droidvm_input_published`（動作感測器讓 `droidvm_input_events` 一直增加，判斷形同虛設）。
 
 ## iPadOS 回歸（11-14 晚）
 
