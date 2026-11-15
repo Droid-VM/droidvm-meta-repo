@@ -292,9 +292,35 @@ host 選後端，guest 自己適配。crosvm 的 `--virtio-media kind=decoder,ba
     沒有行程持有、沒有 attachment 的 1.4 MB udmabuf：msm_vidc 在 session 關閉時沒放掉佇列裡的 CAPTURE 緩衝區。guest 的
     USERPTR 緩衝區散在 guest RAM 各處，一個 1.4 MB 緩衝區就可能釘住幾十個 2 MB 大頁，大頁模組過了寬限就放棄它們。
     已改成 msm_vidc 的 session 結束前先 STREAMOFF 兩個佇列並 REQBUFS(0)（還沒驗證）。**5566 的 VM 目前開不了，要重開手機。**
-  - 在這兩點解決前，`auto`／`msm-vidc` 不要給一般 VM 用；App 預設仍是 MediaCodec。
+  - 在這兩點解決前，`auto`／`msm-vidc` 不要給一般 VM 用；App 預設仍是 MediaCodec。（11-15 兩點都已解決，見下。）
   - **11-14 重跑（crosvm 7aae3735f，已部署 5566）**：可見區域解決了——COMPOSE 兩種佇列都答 0x0，CAPTURE 的 CROP 答出
     640x360，現在每個 session 都有正確尺寸；但仍 0 幀（每個 access unit 都失敗）。session 結束前的 STREAMOFF＋REQBUFS(0)
     兩個佇列都回 EBUSY，沒放掉；停 VM 後池子 1197／3072，acquire 後 2196，照舊得重開手機（adb reboot 後 KernelSU 自動載入
     大頁模組，app 的 4 個模組要 `load-modules.sh`）。下一步：查 EBUSY（佇列的記憶體型別可能不是 DMABUF——bitstream 是 MMAP？）
     與 0 幀的原因（driver 的 event／錯誤碼）。每試一次直通都可能要重開手機。
+- **11-15 解決：根因是 udmabuf 模組少了 macOS 線的 `msm_prime`**（gunyah_host_mod 4e6d10a、crosvm 9748c8987、device d9f71db）。
+  - 不開 VM 就重現：device `tools/rig/vidcprobe.c` 在手機上以 root 照 vidc.rs 的 ioctl 順序跑，CAPTURE 用散開的 memfd 段做 udmabuf。
+    第一個 CAPTURE 的 QBUF 回 EINVAL，dmesg 寫著 `mem_buf_dma_buf_exclusive_owner` 的 WARN，以及 `secure buffer mapping to
+    non-secure region 8 not allowed` → `state changed to ERROR` → 之後每個 REQBUFS 都是 `inst in error state`（就是那個 EBUSY）。
+    被拒的那塊 udmabuf 從此留在核心裡，沒有 attachment、沒有行程持有：這就是停 VM 後大頁池少頁的機制。同一個 session 換成
+    dma-heap 緩衝區，60 幀全部解出。
+  - msm_vidc 只認 Qualcomm mem_buf 匯出的 dma-buf，認不得的一律當安全緩衝區。macOS 線 11-05 也碰到同一件事（它的 k27/TODO.md：
+    「手機重啟後 udmabuf 模組 msm_prime 回到 N」），它手機上的 udmabuf 模組有 `msm_prime` 開關，crosvm 的 KMS 顯示也會去開它
+    （gpu_display_kms.rs `MsmPrime`，b5e309f95）。但模組那半邊從沒推上 gunyah_host_mod（macOS 分支＝我們的 wip/hackintosh 6d8ef2f），
+    所以合併時拿不到。
+  - 補上（6.12 build 才有）：`msm_prime=1` 時，新的 udmabuf 照 Qualcomm 自己的 heap 匯出：`mem_buf_vmperm_alloc()`（只屬 HLOS、RWX）
+    ＋`mem_buf_dma_buf_export()`，map 時 pin、release 時 try_reclaim 再放 kref。結構與原型取自 OnePlusOSS/android_kernel_oneplus_sm8850
+    的 mem-buf-exporter.h。陷阱：`struct mem_buf_dma_buf_ops` 是 lookup 在前、attach 在後；vmperm 的原型在 6.1（SM8650）、
+    6.6（SM8750）、6.12（SM8850）三個版本都不同，原型錯了就是 CFI 硬重開。所以每個函式先比 kCFI 型別雜湊（函式入口前一個字），
+    要和我們同原型函式的一致才會呼叫。5566 載入時記錄 `msm_prime: Qualcomm mem_buf found, prototypes match`。
+  - crosvm：VMM（還是 root）在解碼器可能走直通（`auto`／`msm-vidc`）時打開 `msm_prime`，而且不關回去。KGSL 碰到只屬 HLOS 的
+    mem_buf 緩衝區，判定為非安全、照樣匯入（它的 verify_secure_access），跟以前「認不得、跳過檢查」的結果一樣。
+  - 驗證（5566）：
+    - 探針：H.264 720p、HEVC 720p、10-bit HEVC（P010）都全數解出，結束的 REQBUFS(0) 回 0，沒有留下緩衝區；udmabuf 與 dma-heap
+      的逐幀雜湊相同（不做 dma-buf sync，照 guest 的讀法）。
+    - iPadOS 27 `backend=auto`：H.264 60/60 幀 226 fps、HEVC 60/60 198 fps、10-bit 30/30 86 fps，全部走 msm_vidc 直通；亮度和
+      MediaCodec 同一列相同（10-bit 平均差 0.19）。msm_vidc 沒有拒收、沒有 WARN，每個 session 都正常關閉；停 VM 後大頁池
+      3072/3072，沒有殘留的 udmabuf。同一次開機 MediaCodec 是 H.264 189 fps、10-bit 22.7 fps。短片的數字大多是開 session 的時間。
+  - 部署：新模組放在手機 app 的 `usr/lib/modules/android16-6.12/`（舊的是 `.bak-1106`），本機 `gunyah_host_mod/dist/` 也換了，
+    下次建 APK 就會帶上。換模組要先停 VM；舊模組的洩漏緩衝區還在的話卸不掉，只能重開手機。
+  - 還沒做：6.6 與 6.1 的 `msm_prime`（原型不同，要在 5568／5567 上測）；4K／長片與 macOS guest 走直通沒測；App 預設仍是 MediaCodec。
