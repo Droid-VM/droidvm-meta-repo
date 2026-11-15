@@ -232,8 +232,8 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   被重啟、app 轉圈）；App cryptex 裡 Safari 的代理程式（書籤同步、通知等）被 AMFI 的 launch constraint 擋下；自動登入約 20 秒後
   就鎖螢幕（沒有 AppleKeyStore，密碼 droid）；部分網站（Wikipedia）載不出內容；水平捲動沒驗。→ [細節](todo/macos-bringup.md)
 - ⬜ **11-15** msm_vidc 直通的 `msm_prime` 只做了 6.12（SM8850）：6.6（SM8750）、6.1（SM8650）的 mem_buf 原型不同，要在 5568／5567
-  上測（編碼直通用自己的 dma-heap 緩衝區，不受影響）；macOS 的 Safari 不經 paravirt 解碼器（兩種後端都 0 個 session），直通在 macOS
-  驗不到；`auto` 跑 4K／長片後停 VM 池子少 2–8 頁（acquire 補回）；MediaCodec 後端 4K 編碼卡住、ffmpeg 編碼掉幀（D78），
+  上測（編碼直通用自己的 dma-heap 緩衝區，不受影響）；macOS 合併後根本沒開 VideoToolbox host（內建開機參數漏了
+  `droidvm-vt-paravirt=1`，device 55b23d7 補上、待重建）：開了之後鎖屏航拍的 4K HEVC 走 msm_vidc 直寫，但鎖屏仍黑（macOS 線的 P4 沒進插件）；`auto` 跑 4K／長片後停 VM 池子少 2–8 頁（acquire 補回）；MediaCodec 後端 4K 編碼卡住、ffmpeg 編碼掉幀（D78），
   guest 編碼佇列 64 幀滿了就讓 session 失敗；App 兩個後端預設仍是 MediaCodec。→ [細節](todo/builds.md)
 - ⬜ **11-13** host 合併後還沒驗證的：Windows guest、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（macOS guest 11-15 驗過；基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率

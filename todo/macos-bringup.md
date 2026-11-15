@@ -153,3 +153,24 @@ NativeMetal af958ac、Turnip 的 service 名 patch）以 dev 樹建的 iPadOS 27
 - tree 的 `scripts/` 是組 tree 時的複本，改了 device repo 的腳本要用 dev checkout 那份跑（或重組 tree）。
 - `ipados27/scripts/build-droidvm-gpu.py` 等 4 支是指向 `../../scripts/` 的符號連結：`git add` 要加上層那個（8f3b25c 漏了，d48a512 補）。
 - Mac 沒有免密碼 sudo：macOS Data 種子要保留 root／服務帳號的擁有者，得由使用者在 Mac 上 sudo 跑一次。
+
+## 鎖屏航拍壁紙的硬體解碼（11-15 查）
+
+macOS 線 11-04 做到：鎖屏航拍（`/System/Library/Wallpapers/.default/Golden Gate.mov`，4096x2160 HEVC Main10，WallpaperAerials
+用 AVAssetReader 解）走 paravirt VideoToolbox → crosvm `vidc=true` → msm_vidc 直寫播放器的 IOSurface（P3）＋ Apple vtpv 語義
+（0011）＋ WindowServer 原地讀 YCbCr 平面（P4，macOS-DroidVM 3623549：metal2vulkan-macos/0001-ycbcr-planes-only.patch 與插件的
+METAL2VULKAN_YCBCR_PLANES_ONLY），使用者確認有畫面。詳見該 repo `docs/k27-vt-p3-status.md`、`docs/k27-vt-zero-copy-plan.md`。
+
+合併後在我們的 macOS（release 11-15 09:37）上：
+- **VideoToolbox host 沒開**：`package/DroidVMBootArgsMacOS27.c` 把 `droidvm-vt-paravirt=1` 留給 bring-up，一直沒加；DroidVMVideo
+  kext 在 collection 裡，但 Apple 的 paravirt 驅動沒發布，VideoToolbox 全走軟解。證據：整個開機 0 行 DroidVMVTHost、crosvm 0 個解碼
+  session，Safari 播 H.264 也一樣。device 55b23d7 補上，下次 macOS release 才會帶上。
+- 開機命令列加上這個參數、解碼器 `backend=auto` 試一次（5566，測完已換回 release 磁碟與原設定）：桌面的靜態畫面和鎖屏的航拍都開出
+  4096x2160 hvc1 session，走 msm_vidc、解碼順序、P010、「decodes into 6 pool surfaces in place」（P3＋msm_prime 都通）。桌面的
+  session 解一幀就關（桌面只用靜態畫面，正常）；另有 18 個開了沒用就關的 session（in 0 out 0）。停 VM 後池子是整的。
+- **鎖屏還是黑的**，畫面 3 s 內 0 像素變化；開參數前（全軟解）也是黑的，所以不是解碼器的問題。鎖屏那個 session 5 s 後被關，guest 沒有
+  它的 dinv 計數。WallpaperAerials 沒崩。最可能是顯示端：macOS 線的 P4（以及它之前的 CPU 轉換 NativeMetal f750b22／2860550）都不在
+  我們的 Metal 插件裡；我們的插件雖然能做兩平面 YCbCr 紋理（iPadOS 播影片就靠它），4K P010（x420）在 WindowServer 裡是否成功沒看到
+  證據——要讀 guest 的 unified log（WindowServer 的 refuseSurface／「Failed to allocate MTLTexture from IOSurface」）。
+- 待做：重建 macOS release（帶 55b23d7）；讀 WindowServer 的 log 確定鎖屏黑的原因；需要的話把 P4 移植進插件（會動到 iPadOS 共用
+  的插件，要兩邊回歸）。
