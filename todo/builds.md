@@ -343,4 +343,34 @@ host 選後端，guest 自己適配。crosvm 的 `--virtio-media kind=decoder,ba
   - 碼率：guest 那半邊還是 2 Mbps 預設，因為 VideoToolbox 的設定根本沒送到 host（`esup` 沒列 AverageBitRate 等，見
     [audio-media.md](audio-media.md#11-02-videotoolbox-編碼器不吃-app-設定)）。host 這邊直通後端的碼率控制（含執行中改碼率）已經
     會原樣送到硬體，補 guest 那邊就會生效。
-  - App：「編碼後端」選項在解碼後端下面（`vpu_encoder_backend`），選 MediaCodec 時不加 key；單元測試 11/11。APK 還沒裝上手機。
+  - App：「編碼後端」選項在解碼後端下面（`vpu_encoder_backend`），選 MediaCodec 時不加 key；單元測試 11/11。
+- **11-15 驗收**（5566；crosvm 075cf8164、device 10acf21、app r334 15b15c9 裝上手機）。
+  - App：APK 從原本的工作目錄建（它 11-13 裝上的那份就含另一個 session 未提交的 GPU 即時優先權改動，照舊不變；payload 與手機上的
+    逐位元相同，所以 crosvm 不會被 App 重新解開蓋掉），裝完重啟 daemon。編輯畫面兩個選項都出得來、選單三項、說明跟著換（沒存）。
+    Ubuntu VM 只靠 App 的設定（`vpu_enabled`＋兩個 backend key），daemon 產生的命令列是 `kind=decoder,…,backend=auto` 與
+    `kind=encoder,…,backend=auto`。
+  - iPadOS 27，三種設定：
+    - mediacodec／mediacodec：720p／1080p 編碼、解碼 suite 都過；4K H.264／HEVC 編碼卡住（session 開了不再出幀，90 s 後被砍；
+      MediaCodec 後端原有問題，直通沒有）；600 幀 1080p 編碼 374 出 226 失敗（見下面 guest 佇列）；10-bit 解碼一次 1/30、一次 30/30。
+    - msm-vidc／msm-vidc：全過。
+    - auto／auto（含大型測試）：全過——4K H.264／HEVC 編碼 60/60（約 33 fps）、4K H.264 與 10-bit HEVC 解碼 120/120（117／70 fps，
+      MediaCodec 是 57／47）、900 幀 1080p 解碼 900/900（362 fps，MediaCodec 269）、600 幀 1080p 編碼 600/600。
+  - 修了一個問題：msm_vidc 的編碼器在幀編好時**不叫醒 poll**（vencprobe -L 一次一幀：100 ms 逾時就是每秒 9.8 幀，1 ms 是 1080p
+    157 fps），crosvm 原本每 20 ms 才看一次，guest 送得少時就是每幀等 20 ms；600 幀的編碼因此塞滿 guest 的 64 幀佇列，第 127 幀
+    失敗。解碼器會叫醒，但不是每個緩衝區都叫（vidcprobe -d -L：100 ms 是 236 fps，1 ms 是 1400）。現在兩邊都是驅動手上有工作時
+    1 ms、沒有時 100 ms（編碼器 500 ms 沒進展就不再 1 ms，免得丟幀的驅動讓它一直轉）。
+  - Linux guest（Ubuntu，ffmpeg v4l2m2m）：直通編碼 H.264／HEVC 300/300、PSNR 46 dB、碼率照 ffmpeg 要的 4 Mbps；MediaCodec
+    編碼只出 264／262 幀（ffmpeg 只配 4 個 bitstream 緩衝區，就是 D78 的殘留），所以 PSNR 對不齊。解碼走 MediaCodec，每幀都解出
+    （裸 Annex B 檔沒有時間戳，ffmpeg 預設把同為 0 的幀丟掉，要 `-fps_mode passthrough` 才數得到）。解碼器指名 `msm-vidc` 時 Linux
+    解不出來：ffmpeg 用 MMAP 的 host 緩衝區，直通驅動寫不進去，session 結束——App 的說明就是這樣寫的，`auto` 會把它交給 MediaCodec。
+  - macOS：解碼器設 `auto` 開機，登入卡在轉圈（那次開機沒有任何解碼 session，跟解碼器無關；換回原設定重開就登得進去）。Safari
+    播 test-videos.co.uk 的 720p H.264 正常，但 crosvm 一個解碼 session 都沒有：macOS 的 Safari 沒走 paravirt 解碼器，所以直通在
+    macOS 上還驗不到（要先讓 macOS 的 VideoToolbox 選它）。
+  - 還開著的：
+    - guest（DroidVMVTHost）的編碼佇列 64 幀滿了，`efrm` 直接回 -12911，VideoToolbox 就結束 session；應該讓呼叫者等。直通夠快
+      已經碰不到，MediaCodec 或比 App 慢的編碼器還會。要改 guest 核心，手機上的 iPadOS 是 Mac 開發樹的 dirty build，這次沒動。
+    - `auto` 跑完 4K／長片停 VM 後大頁池少 2 和 8 頁（MediaCodec 與一般測試都是整的）；不開 VM 的探針解 4K 後 udmabuf 立刻放掉，
+      重現不了；acquire=3 補得回來，vm.sh start 也會自己補。
+    - MediaCodec 後端 4K 編碼卡住，原因未查。
+    - 同樣 2 Mbps，msm_vidc 的 VBR 在 guest 的簡單畫面上只用到約 1.3 Mbps（MediaCodec 用滿），畫質低 6–11 dB；探針的 testsrc2
+      照設定（6 Mbps→5.9）。
