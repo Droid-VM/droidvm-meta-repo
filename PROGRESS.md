@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-15** macOS 鎖屏的航拍動態桌布又能用硬體播了：合併後 macOS 根本沒開 VideoToolbox host（內建開機參數漏了），補上後還差兩件——WindowServer 原地讀影片平面、不再永久佔住解碼池的 surface（移植 macOS 線的 P4），以及片尾最後一幀卡住時把它 drain 出來。5566 上 4K HEVC 10-bit 一段接一段播（每段 1800 幀、30 fps），走 msm_vidc 直通（device 55b23d7、e7450bc，NativeMetal 43f78ae，fork d48df9c）→ [細節](todo/macos-bringup.md)
 - ✅ **11-15** VPU 編解碼雙後端驗收（5566）：App r334 裝上（兩個後端選項；Ubuntu VM 由 App 的設定產生 `backend=`）。iPadOS 在 mediacodec／msm-vidc／auto 三種設定下全過，含 4K 編解碼、900 幀解碼、600 幀編碼；修了 msm_vidc 編碼器不叫醒 poll（1080p 一次一幀從每幀 20 ms 等待到 6 ms，crosvm 075cf8164）。Linux guest 直通編碼 300/300、46 dB → [細節](todo/builds.md)
 - ✅ **11-15** VPU 編碼也有多後端了：crosvm 編碼器吃 `backend=mediacodec|auto|msm-vidc`，msm_vidc 編碼器（/dev/video33）為第一個直通驅動，App 多一個「編碼後端」選項；guest 不用改。5566 iPadOS 27 `auto` 下 H.264／HEVC 720p～1080p 與奇數尺寸 7 個 session 全走 msm_vidc、每幀都出、PSNR 38–43 dB、池子完整（crosvm ba887a2d3、device 9483b31、app 15b15c9）→ [細節](todo/builds.md)
 - ✅ **11-15** msm_vidc 直通在 iPadOS 上解得出來了：根因是 udmabuf 模組少了 macOS 線從沒推上去的 `msm_prime`，msm_vidc 把不認得的 udmabuf 當安全緩衝區拒收並扣住（這也是停 VM 後大頁池少頁的原因）。補上 mem_buf 匯出（先比對 kCFI 原型），由 crosvm 打開；5566 `auto` 下 H.264／HEVC／10-bit 全數解出、畫面與 MediaCodec 相同、池子完整（gunyah_host_mod 4e6d10a、crosvm 9748c8987、device d9f71db）→ [細節](todo/builds.md)
@@ -232,8 +233,8 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   被重啟、app 轉圈）；App cryptex 裡 Safari 的代理程式（書籤同步、通知等）被 AMFI 的 launch constraint 擋下；自動登入約 20 秒後
   就鎖螢幕（沒有 AppleKeyStore，密碼 droid）；部分網站（Wikipedia）載不出內容；水平捲動沒驗。→ [細節](todo/macos-bringup.md)
 - ⬜ **11-15** msm_vidc 直通的 `msm_prime` 只做了 6.12（SM8850）：6.6（SM8750）、6.1（SM8650）的 mem_buf 原型不同，要在 5568／5567
-  上測（編碼直通用自己的 dma-heap 緩衝區，不受影響）；macOS 合併後根本沒開 VideoToolbox host（內建開機參數漏了
-  `droidvm-vt-paravirt=1`，device 55b23d7 補上、待重建）：開了之後鎖屏航拍的 4K HEVC 走 msm_vidc 直寫，但鎖屏仍黑（macOS 線的 P4 沒進插件）；`auto` 跑 4K／長片後停 VM 池子少 2–8 頁（acquire 補回）；MediaCodec 後端 4K 編碼卡住、ffmpeg 編碼掉幀（D78），
+  上測（編碼直通用自己的 dma-heap 緩衝區，不受影響）；macOS 鎖屏航拍已修好（見已完成），VideoToolbox host 的
+  decode order idle drain 改動還沒在 iPadOS 版本上跑過；`auto` 跑 4K／長片後停 VM 池子少 2–8 頁（acquire 補回）；MediaCodec 後端 4K 編碼卡住、ffmpeg 編碼掉幀（D78），
   guest 編碼佇列 64 幀滿了就讓 session 失敗；App 兩個後端預設仍是 MediaCodec。→ [細節](todo/builds.md)
 - ⬜ **11-13** host 合併後還沒驗證的：Windows guest、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（macOS guest 11-15 驗過；基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率

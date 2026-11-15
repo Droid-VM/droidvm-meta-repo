@@ -172,5 +172,22 @@ METAL2VULKAN_YCBCR_PLANES_ONLY），使用者確認有畫面。詳見該 repo `d
   它的 dinv 計數。WallpaperAerials 沒崩。最可能是顯示端：macOS 線的 P4（以及它之前的 CPU 轉換 NativeMetal f750b22／2860550）都不在
   我們的 Metal 插件裡；我們的插件雖然能做兩平面 YCbCr 紋理（iPadOS 播影片就靠它），4K P010（x420）在 WindowServer 裡是否成功沒看到
   證據——要讀 guest 的 unified log（WindowServer 的 refuseSurface／「Failed to allocate MTLTexture from IOSurface」）。
-- 待做：重建 macOS release（帶 55b23d7）；讀 WindowServer 的 log 確定鎖屏黑的原因；需要的話把 P4 移植進插件（會動到 iPadOS 共用
-  的插件，要兩邊回歸）。
+- ~~待做~~ 11-15 晚修好，三件事：
+  1. **開機參數**：`DroidVMBootArgsMacOS27.c` 加 `droidvm-vt-paravirt=1`（device 55b23d7）。
+  2. **顯示端（macOS 線 P4）**：WindowServer 把每個解碼池 surface 的紋理都留著，而 render server 以前「紋理活多久就把 surface
+     算成使用中多久」，池子的 surface 永遠回不來，VideoToolbox 一直配新的（看到 44 塊 26.7 MB，約 1.2 GB），guest 記憶體耗盡、
+     host 的 Dbuf 等不到回覆，鎖屏全黑。每個 4K 紋理還另轉一份 RGBA16F 加暫存（約 100 MiB）。改法照 P4：插件只對 WindowServer
+     設 `METAL2VULKAN_YCBCR_PLANES_ONLY=1`（`/private/var/ngpu/debug/no-ycbcr-planes` 可關），runtime 用 fork 的 metal2vulkan 0039
+     只建平面、原地讀；frontend 把 4:2:0 YCbCr（500、505）surface 只在綁到它的 command buffer 從 submit 到完成之間算使用中
+     （NativeMetal 43f78ae，fork d48df9c；`commandUse` 放在 class extension，因為 fork 的 build-adreno-metal-plugin.py 會原樣比對
+     NBTexture 介面）。iPadOS 的 render server 是 backboardd，不受影響。
+  3. **片尾**：每段片子的最後一幀 msm_vidc 不吐出來（387 進 386 出），播放器同步 dfrm 等 10 秒後放棄，VideoToolbox 從此不再用
+     paravirt 解碼器（err -19093），桌布就停住。VideoToolbox host 的 idle drain 原本只在 display order 跑，改成 decode order 也跑：
+     閒置 1 秒、且這個 session 已經出過幀才 drain（device e7450bc）。200 ms 太短：4K session 開頭要等 SOURCE_CHANGE、CAPTURE 與
+     Dbuf，第一幀就超過 200 ms，在 CAPTURE 還沒串流時 drain 就回不來，session 卡在 draining、輸入 4096 筆塞滿（-12911 一萬次）。
+     探針確認一般串流（含去掉 AUD 的）msm_vidc 每幀都即時出、最後一幀也不用 drain，所以是航拍片子本身的原因，沒再追。
+- 驗證（5566，macOS release 11-15 23:27，dev tree 有本機改動；解碼器 `backend=auto` 已寫進 App 的 vms.json）：鎖屏顯示 Golden Gate
+  航拍、畫面在動（每秒約 70 萬像素變化）；session 5–9 每段 1800 幀（60 秒、30 fps），片尾各一次 idle drain、立刻接下一段；整次開機
+  VideoToolbox host 只有 1 個錯誤。WindowServer 以 user pages 導入池子 surface（553 MiB），不再轉換。顯示器休眠時暫停、喚醒後繼續。
+- 還開著：VideoToolbox host 偶爾 surface lookup 失敗（stage 40/41/42，有一次開機累積 193 個，最近一次只有 1 個），原因沒查；guest
+  記憶體仍緊（鎖屏時 free 20–100 MiB）；idle drain 的改動還沒在 iPadOS 版本上跑過。
