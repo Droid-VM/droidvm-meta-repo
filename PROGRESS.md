@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-15** macOS 的 Safari 能用（App cryptex 成為第三顆驗證磁碟；磁碟宣告為內建，DiskArbitration 不再在登入畫面把它卸下），app 的滑鼠模式看得到游標（virtio-gpu 游標平面，移植自 macOS-DroidVM），雙指捲動方向與距離跟著手指、雙指輕點是右鍵（device ec40561、50e48ec、be96aa2、683a9cd，fork 0c7637f）→ [細節](todo/macos-bringup.md)
 - ✅ **11-15** macOS 27 在手機的 DroidVM app 裡看得到也能操作：鎖定畫面打密碼登入、桌面、觸控點按與拖曳、鍵盤；app 的 VM 清單列出這台。修了零拷貝顯示的頁數上限、host 顯示端不認 FP16 畫面、鍵盤報告被當觸控丟掉；觸控在 macOS 做成絕對座標指標，電池／cpufreq／音效 kext 也開給 macOS（device d325d0f、Virtualization c8c132c55）→ [細節](todo/macos-bringup.md)
 - ✅ **11-14** macOS 27.0.1（26A434，虛擬 Mac 的 kernelcache）在 5566 上照我們的流程開到 Finder 桌面：已驗證的根＋SystemOS、不用 sudo 的 Data 種子、儲存／網路／顯示／GPU／輸入都是 kext，WindowServer 用 Metal 在手機 Adreno 上合成（device 06c78e6、fork 35d4beb、NativeMetal af958ac）→ [細節](todo/macos-bringup.md)
 - ✅ **11-13** 音訊預設省電、App 音效卡「延遲模式」可改（省電／標準／低延遲）：crosvm 13abbc1da、a88e7c116，app b50270b；5566 低延遲實測 burst 192 frames、0 丟幀
@@ -224,6 +225,9 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   桌面、11-15 在 app 上可操作），驅動都是 kext、磁碟用上游 UniXNU 的佈局。剩下第 5 步：macOS-DroidVM（另一位貢獻者的 repo）
   對我們原始碼的釘選版本要不要跟上、怎麼協調，由使用者決定。→ [細節](todo/kernel-unify.md)
 - ✅ **11-14** 驅動改成 kext：iPadOS 的 11 個板級驅動（含儲存、keystore、顯示與 GPU）全部以 kext 在 5566 開機驗證，kernel 只留平台與診斷，XNU patch 未動 → [細節](todo/kernel-unify.md)（第 11 節）
+- ⬜ **11-15** macOS 還沒解的：記憶體壓力（6 GiB 的 VM 開著 Safari 一陣子後 free 約 14 MB、wired 約 2.25 GB，Dock／SystemUIServer
+  被重啟、app 轉圈）；App cryptex 裡 Safari 的代理程式（書籤同步、通知等）被 AMFI 的 launch constraint 擋下；自動登入約 20 秒後
+  就鎖螢幕（沒有 AppleKeyStore，密碼 droid）；部分網站（Wikipedia）載不出內容；水平捲動沒驗。→ [細節](todo/macos-bringup.md)
 - ⬜ **11-13** msm_vidc 直通在 iPadOS 上還解不出畫面：11-14 重跑可見區域對了（改讀 CROP），仍 0 幀；結束時 REQBUFS(0)
   回 EBUSY，停 VM 後 5566 的 hugepage 池照樣少約 2000 頁（又用 adb 重開手機恢復，大頁模組由 KernelSU 自動載入）。每試一次
   可能要重開手機，`auto`／`msm-vidc` 不給一般 VM 用。→ [細節](todo/builds.md)
