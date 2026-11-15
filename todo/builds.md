@@ -324,3 +324,23 @@ host 選後端，guest 自己適配。crosvm 的 `--virtio-media kind=decoder,ba
   - 部署：新模組放在手機 app 的 `usr/lib/modules/android16-6.12/`（舊的是 `.bak-1106`），本機 `gunyah_host_mod/dist/` 也換了，
     下次建 APK 就會帶上。換模組要先停 VM；舊模組的洩漏緩衝區還在的話卸不掉，只能重開手機。
   - 還沒做：6.6 與 6.1 的 `msm_prime`（原型不同，要在 5568／5567 上測）；4K／長片與 macOS guest 走直通沒測；App 預設仍是 MediaCodec。
+- **11-15 編碼器也有直通後端**（crosvm ba887a2d3、device 9483b31 `tools/rig/vencprobe.c`、app 15b15c9）。
+  - crosvm：`--virtio-media kind=encoder` 吃和解碼器同一個 `backend=`。`HwEncoderBackend`（direct_enc.rs）裡永遠有 MediaCodec，
+    `auto`（這台手機有的直通驅動）或指名的驅動擋在前面：驅動接得下的 session（vidc_enc.rs：H.264、HEVC，VBR 或 CBR）給驅動，
+    其餘以及 STREAMON 時被驅動拒絕的給 MediaCodec。guest 看到的編碼器完全一樣，所以 `auto` 不需要 guest 配合。
+  - msm_vidc 編碼器的規矩（探針在 5566 量的）：coded size 與 bitstream 的 sizeimage 跟著 `S_FMT(OUTPUT)` 走，要重讀；兩個 queue
+    都沒有 MMAP，原始幀和 bitstream 都用我們的 dma-heap 緩衝區；NV12 列寬對齊 128，色度從 `sizeimage / bytesperline * 2/3` 列開始
+    （高度對齊 32）；參數集一律接在第一個關鍵幀前面，`HEADER_MODE_SEPARATE` 由 crosvm 自己切；STREAMON 後每個 CAPTURE 緩衝區
+    會先空著還回來一次；`ENC_CMD_STOP` 以空的 LAST 結束，`STREAMOFF`＋`STREAMON(OUTPUT)`＋`ENC_CMD_START` 之後能接著編。
+    碼率控制看時間戳差（`TIME_DELTA_BASED_RC` 預設開），所以給驅動的時間戳照 session 的幀率排，出來再對回 guest 的。
+  - 每幀原始畫面複製一次進驅動的排列、每個編好的幀複製一次出來：guest 記憶體不進驅動，解碼器那個 udmabuf 被扣住的問題不會發生，
+    也不需要 `msm_prime`（6.6／6.1 照樣能用，沒測）；VMM 只多給 helper camera 群組。
+  - 探針（不開 VM）：H.264／HEVC 360p～1080p 與 1000x562 PSNR 46–50 dB，碼率照設定（6 Mbps→5.9、10 Mbps CBR→9.3）；drain 後的
+    第二輪 60/60。
+  - iPadOS 27（5566，編解碼都 `auto`）：VideoToolbox 7 個編碼 session（H.264／HEVC 720p、1080p，1000x562，30–60 幀）全走 msm_vidc、
+    每幀都出；拉回 PC 解碼對照重算的原圖 PSNR 38–43 dB（碼率是 2 Mbps 預設）；解碼 suite 照樣直通；停 VM 後池子 3072/3072。
+    720p H.264 編碼 105 fps、1080p 51 fps，數字含 guest CPU 畫每一幀的時間，不是編碼器的上限。
+  - 碼率：guest 那半邊還是 2 Mbps 預設，因為 VideoToolbox 的設定根本沒送到 host（`esup` 沒列 AverageBitRate 等，見
+    [audio-media.md](audio-media.md#11-02-videotoolbox-編碼器不吃-app-設定)）。host 這邊直通後端的碼率控制（含執行中改碼率）已經
+    會原樣送到硬體，補 guest 那邊就會生效。
+  - App：「編碼後端」選項在解碼後端下面（`vpu_encoder_backend`），選 MediaCodec 時不加 key；單元測試 11/11。APK 還沒裝上手機。
