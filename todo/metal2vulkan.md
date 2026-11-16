@@ -7,7 +7,8 @@ guest 的 Metal 由 NativeMetal plugin 交給 metal2vulkan，經 Turnip（virtio
 
 **來源與 patch 疊層**
 
-- 上游 steelbrain/metal2vulkan（development），釘在 `624bab39`（`scripts/data/gpu-metal-vulkan-inputs.json`）。
+- 上游 steelbrain/metal2vulkan（development），**11-16 起釘在 `555b13d5`**（與 macOS 線、上游 UniXNU 相同；之前是 `624bab39`，
+  見下方「11-16 移到 555b13d5」）。以下 624bab39 的敘述是當時的狀態。
   上游改寫過歷史：624bab39 不在任何分支上，development 上的對應是 `99a4604fb`（主旨、日期相同，約 700 行原始碼不同）；
   11-03 之後的 commit 雜湊不再變。
 - 第一層：AdrenoMetal bridge patch 0001–0024（UniXNU 上游的，C ABI、stage trace、QoS、診斷開關等）。
@@ -100,10 +101,48 @@ guest 的 Metal 由 NativeMetal plugin 交給 metal2vulkan，經 Turnip（virtio
 
 ### 7. 跟上游的距離
 
-- 上游 development 一週動了 +99k／−22k 行；UniXNU 上游 11-07 已改釘 963f0e64（642c4fe），我們沒跟。
-- 升級的代價：28 個 board patch 加 24 個 bridge patch 要重新對齊，0032–0038 有一部分是上游的回移植或與上游重疊。
-- 963f0e64 量過：direct 89.6 ms（我們 82.4）、`each` 跑不完（我們的 0033／0034 修掉的 O(N²) 上游還在）。
-- 做法：照需要回移植（`bp.sh`），每次用 `icb_scale` 與 core tests 對照 base／fix 的失敗清單。
+- 11-16 已移到 555b13d5（見下節）。之後的距離：上游 development 11-15 到 244fa022；NativeMetal 上游 main 比 `macOS` 分支多 9 個
+  commit（texture layout policy，配上游 UniXNU #265 的建置改動），沒跟。
+
+## 11-16 移到 555b13d5（併入 macOS 線的 GPU 分支）
+
+使用者要「把合併做完」：macOS 線的 GPU 插件（Droid-VM/NativeMetal `macOS`，134 個 commit，含上游 UniXNU/AdrenoMetal 的新堆疊）
+建在 555b13d5 上，所以翻譯層一起換基底（2596 個上游 commit）。
+
+**現在的疊層**（fork `scripts/build-adreno-metal-bridge.py`，按套用順序）：555b13d5 → NativeMetal `bridge/patches` 12 個（0040
+把舊的 runtime／board 補丁合成一個）→ fork `patches/metal2vulkan`：0040–0042（macOS 線的 metal2vulkan-macos 0003–0005：rate-map 與
+opaque indirect pointer 的 reflection、identity swizzle）→ 我們的 0011–0015、0023、0024、0021、0036、0037、0025、0033、0038、0017、0019、
+0020、0027–0031。SEMANTICS_VERSION 2024（0036、0037 各加一）。
+
+| 我們的補丁 | 結果 |
+|---|---|
+| 0011–0014、0023、0024 | 原樣套上 |
+| 0015 | 移植；另外拿掉上游的 `color_inputs_attached`（凡有 `[[color(n)]]` 輸入卻沒有 attachment 一律拒），否則 QuartzCore 的 path_blit_frag_lph 又被拒 |
+| 0017、0019、0020、0027–0031 | 移植（記憶體）；0017 改成限制 heap 的 kept budget；0020 也停掉 blocks made ahead；0031 的報告改用上游六種 pool |
+| 0021 | 加一列：任何 Adreno（0040 只有 740 的「讀原始碼」列） |
+| 0025、0038 | 移植；0038 要在 5566 量 renderBundles：上游的 host step 現在能重用 kept chunk，0038 改成每幀在 commit 時整段錄 |
+| 0033 | 移植；render pass instance 那部分在上游改寫的 InstanceShadows 上重做 |
+| 0036、0037 | 移植（0036 也涵蓋上游新增的 1／2 位元組單位） |
+| 0016、0018、0022、0026、0032、0035、0039 | 上游或 bridge 0040 已有同樣的修正，不帶 |
+| 0034 | **沒帶**：每個 draw × 常駐資源的成本在新基底上還在（WebKit 不用 bundle 時），但上游新的 kept draw／execution 處處假設 plan 列出常駐資源，移植量太大 |
+
+**驗證**：每組 `cargo check` 加所改模組的單元測試（lavapipe 的 device test 受限於主機 llvm-as 18／20 不認 `captures(none)`；
+用 rustup stable 自帶的 LLVM 22 `llvm-as` 可以：`METAL2VULKAN_LLVM_AS=…/rustlib/x86_64-unknown-linux-gnu/bin/llvm-as`）；golden hash 表
+在新基底上本來就有 285 格沒更新，0036 之後 1038 格，要在 macOS 上 bless。5566：iPadOS 27 到主畫面，Metal Check 41/42——第 30 項
+跑不了：裝置現在對 `minimumLinearTextureAlignmentForPixelFormat:` 答 64（上游 RUNTIME_VERSION 1853：照驅動、按格式），造不出
+「列寬不是 64 倍數」的情況；主畫面 GPU 記憶體與之前同級（backboardd 634 MiB、wired 2.1 GiB）。macOS 27 鎖屏航拍、桌面、Safari 正常。
+
+**NativeMetal**：`macOS` 分支在 646a4bc 併上游 51b7003 時大多取上游那邊，丟了我們的板級功能（client 的 Turnip BO cache 上限、
+render server encode thread 的 RR 54、閒置 trim 與壓力時 hold back、client-mem 等診斷、QuartzCore 虛擬化答案）。重做那次合併
+兩邊都留（未發布的 9b6244c），差異套回成 NativeMetal 935c468。那些 bridge 匯出要我們的 0013／0020，所以 macOS-DroidVM 若改釘這個
+NativeMetal，它的 bridge 建置也得套我們的翻譯層補丁。插件的診斷開機參數照上游改名：`diag=1`、`tu-debug=`、`fb-bgra=1`、
+`gpu-trace=1`、`metal-flow=`、`wallpaper-freeze=1`（沒有 `sheng-` 前綴）。閒置 trim 的 timer 與壓力 source 改成 static：只被區域
+變數持有的 ARC dispatch source 不會觸發（上游 46fdc91），所以這兩條路徑以前可能從沒跑過，壓力下的行為還沒在手機上看過。
+
+**做法（之後要再換基底時）**：scratchpad `gm/m2v`（steelbrain/metal2vulkan clone，另抓 624bab39）裡每個補丁一個 commit：`ours`
+＝舊疊層、`theirs`＝新疊層、`fin`＝移植結果；`git apply --cached` 照清單套到乾淨 pin 的樹要等於 `fin` 的樹。Mac 上換掉已套用的
+補丁時，build 樹的 `.cache/gpu-reference/metal2vulkan` 要先 `checkout -f` + `clean -fd` 回到 pin，否則 bridge 建置拒絕
+（"differs from the pinned revision plus its recorded patches"）。
 
 ## 工具
 

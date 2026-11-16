@@ -300,12 +300,21 @@ monitor 與 busy scan、late probe 本身、上面兩個轉接層。
 
 - macOS 端照同樣方式做（kext 的 builder 要支援 macOS 的 kernel collection），再決定兩個 OS 共用的驅動原始碼怎麼排。
 
-## 12. 11-16 盤點：macOS 線還有什麼沒進 `wip/hackintosh`
+## 12. 11-16：macOS 線併完（使用者：「把合併做完」）
 
-| 範圍 | 狀態 |
+上午盤點時沒進來的兩塊，下午都併了：
+
+| 範圍 | 結果 |
 |---|---|
-| host：crosvm、virglrenderer、gunyah_host_mod、edk2-gunyah、mesa、gfxstream | crosvm 等五個 repo 的 `macOS` 分支沒有不在 `wip/hackintosh` 的 commit；gfxstream 的 `macOS` 與我們用的 `droidvm` 分支是同一個 commit（全數已合） |
-| kernel、驅動 | 一份原始碼、同一條流程（第 9–11 節）；macOS-DroidVM 的 `wip/hackintosh` b5d09e0 只把音訊、視訊改吃我們的原始碼 |
-| GPU 插件（Droid-VM/NativeMetal） | `macOS` 分支有 134 個（非 merge）commit 不在我們的 `wip/hackintosh`（10-22 到 11-15，自 312cde5 起 59 個檔 +10275／−3574），建在 metal2vulkan development 555b13d5（我們釘 624bab39）。內容：macOS 建置與插件入口、lowering thread／commit 時送出／tile memory、閒置資源丟棄、系統 shader cache、reflection 修正、診斷。我們只移植了游標（683a9cd）與舊版 P4（43f78ae） |
-| macOS-DroidVM 自己（58359aa 之後 11 個） | `vmm-hidden-processes`（Weather 的雲）、`gpu-bundles-sandbox-map`（WebKit GPU process 拿得到 Metal，離屏的 opacity／filter／mask 不再空白）兩個 kernel 補丁；m2v 0003–0005（rate-map 與 opaque indirect pointer 的 reflection、identity swizzle）；XR10 只對 WindowServer 隱藏；新版 P4（4f77b11：WindowServer 每個合成 surface 都只在 commit 到 GPU 完成之間算使用中，CAImageQueue 才能回收顯示過的 slot——我們移植的是只算 4:2:0 影片的舊版，和 macOS 的記憶體壓力可能有關）；KC 保留 driverkit.serial（網路開機不再等 240 s，要看我們的 KC 是否同樣缺） |
-| 還是使用者決定的 | macOS-DroidVM 的 `main`／`macOS` 要不要改吃我們的原始碼（第 5 步）；GPU 插件兩條線怎麼併（11-08 起 GPU 暫停） |
+| host：crosvm、virglrenderer、gunyah_host_mod、edk2-gunyah、mesa、gfxstream | 早已全數在 `wip/hackintosh`（各 `macOS` 分支是它的祖先；gfxstream 同一個 commit） |
+| GPU 插件（Droid-VM/NativeMetal） | `macOS` 分支併入 `wip/hackintosh`（935c468），翻譯層換到 555b13d5，我們的板級補丁移過去（fork 6efbb97）；細節與沒帶的 0034 見 [metal2vulkan.md](metal2vulkan.md)「11-16 移到 555b13d5」 |
+| P4 | 改成 macOS 線現行的寫法、折進原始碼：WindowServer 的每個合成 surface 只在 commit 到 GPU 完成之間算使用中；`METAL2VULKAN_YCBCR_PLANES_ONLY`（WindowServer 與 WallpaperAerialsExtension）下 4:2:0 surface（500、505、540、543）原地讀，其他超過 1 Mpx 的 YCbCr 在 macOS 拒收；XR10 在 macOS 只對 WindowServer 隱藏。都只在 macOS 生效 |
+| macOS-DroidVM 的 kernel 端 | `gpu-bundles-sandbox-map` 收進 `macos.series`（WebKit 的 GPU 行程拿得到插件）；Weather 的雲改用我們已有的 `owner-hide-vmm=Weather`（macOS 內建開機參數）；KC 保留 driverkit.serial 是 board.toml 早有的（device 80b6294） |
+| macOS-DroidVM 本身 | `wip/hackintosh` 併入它 `macOS` 分支之後的 11 個 commit（f7d070f）；它的 NativeMetal 仍釘它自己的版本 |
+
+5566 驗證：iPadOS 27 主畫面、Metal Check 41/42（第 30 項見 metal2vulkan.md）、GPU 記憶體與之前同級；macOS 27 鎖屏航拍 8 段
+（VideoToolbox host 0 個錯誤）、登入桌面、Safari（apple.com，CSS filter／opacity／mask 正確）。
+
+還是使用者決定的：macOS-DroidVM 的 `main`／`macOS` 要不要改吃我們的原始碼（第 5 步）。若它改釘我們的 NativeMetal 935c468：
+它的 `build-metal-plugin.sh` 裡那些文字替換已在原始碼裡（錨點不在了），而 bridge 匯出的 trim／hold-back 要我們 fork 的翻譯層補丁
+0013、0020，它的 bridge 建置也得套那疊。

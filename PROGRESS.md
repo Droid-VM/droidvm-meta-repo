@@ -1,6 +1,6 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-15。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
+更新：2026-11-16。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
 App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A446，iPad17,3／iPad Pro 13" M5，arm64e）**；
 原本的 iPadOS 17.7.11（21H461，iPad7,1）10-29 之後沒有再建置。兩條線、建置樹與機型的盤點見 [todo/builds.md](todo/builds.md)。
 
@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-16** macOS 線併完：GPU 插件（Droid-VM/NativeMetal `macOS`，134 個 commit）併入，翻譯層從 624bab39 換到 macOS 線與上游用的 555b13d5，我們 29 個板級補丁 21 個移過去、7 個上游已有、0034 沒帶；macOS 線的 P4 新版、WebKit GPU 行程載入插件、Weather 的雲也收了。5566 上 iPadOS 27 主畫面與 Metal Check 41/42、macOS 27 鎖屏航拍與 Safari 正常（NativeMetal 935c468，fork 6efbb97，device 80b6294）→ [細節](todo/metal2vulkan.md)、[盤點](todo/kernel-unify.md)（第 12 節）
 - ✅ **11-15** macOS 鎖屏的航拍動態桌布又能用硬體播了：合併後 macOS 根本沒開 VideoToolbox host（內建開機參數漏了），補上後還差兩件——WindowServer 原地讀影片平面、不再永久佔住解碼池的 surface（移植 macOS 線的 P4），以及片尾最後一幀卡住時把它 drain 出來。5566 上 4K HEVC 10-bit 一段接一段播（每段 1800 幀、30 fps），走 msm_vidc 直通（device 55b23d7、e7450bc，NativeMetal 43f78ae，fork d48df9c）→ [細節](todo/macos-bringup.md)
 - ✅ **11-15** VPU 編解碼雙後端驗收（5566）：App r334 裝上（兩個後端選項；Ubuntu VM 由 App 的設定產生 `backend=`）。iPadOS 在 mediacodec／msm-vidc／auto 三種設定下全過，含 4K 編解碼、900 幀解碼、600 幀編碼；修了 msm_vidc 編碼器不叫醒 poll（1080p 一次一幀從每幀 20 ms 等待到 6 ms，crosvm 075cf8164）。Linux guest 直通編碼 300/300、46 dB → [細節](todo/builds.md)
 - ✅ **11-15** VPU 編碼也有多後端了：crosvm 編碼器吃 `backend=mediacodec|auto|msm-vidc`，msm_vidc 編碼器（/dev/video33）為第一個直通驅動，App 多一個「編碼後端」選項；guest 不用改。5566 iPadOS 27 `auto` 下 H.264／HEVC 720p～1080p 與奇數尺寸 7 個 session 全走 msm_vidc、每幀都出、PSNR 38–43 dB、池子完整（crosvm ba887a2d3、device 9483b31、app 15b15c9）→ [細節](todo/builds.md)
@@ -225,11 +226,14 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
   全部相同時仍把每顆都標成 P，這個 kernel 很可能開不了機，還沒試。→ [細節](todo/builds.md)
-- ⬜ **11-13** iPadOS 27／macOS 27 的 kernel 融合成一套原始碼：兩個 OS 從同一份 XNU 原始碼、同一條流程建出並開機（macOS 到
-  桌面、11-15 在 app 上可操作），驅動都是 kext、磁碟用上游 UniXNU 的佈局。11-16 盤點：host 各 repo 的 `macOS` 分支已全數在
-  `wip/hackintosh` 裡；沒進來的是 macOS 線的 GPU 插件（NativeMetal `macOS` 134 個 commit，不同的 metal2vulkan 基底）與
-  macOS-DroidVM 11-13 之後的 11 個 commit（兩個 kernel 補丁、三個 m2v 補丁、新版 P4、XR10）；它對我們原始碼的釘選要不要跟上
-  由使用者決定。→ [細節](todo/kernel-unify.md)（第 12 節）
+- ⬜ **11-13** iPadOS 27／macOS 27 的 kernel 融合成一套原始碼：兩個 OS 從同一份 XNU 原始碼、同一條流程建出並開機，驅動都是 kext，
+  11-16 macOS 線的 host、kernel、GPU 都已併入 `wip/hackintosh`。剩下第 5 步：macOS-DroidVM（另一位貢獻者的 repo）的 `main`／`macOS`
+  要不要改吃我們的原始碼由使用者決定；改釘我們的 NativeMetal 的話，它的 bridge 也要套我們 fork 的翻譯層補丁。
+  → [細節](todo/kernel-unify.md)（第 12 節）
+- ⬜ **11-16** 翻譯層換到 555b13d5 後還沒做的：0034（encoder 層級的常駐）沒帶，WebKit 不用 bundle 時每個 draw × 常駐資源的成本
+  回來了；0038 換掉上游會重用錄製的 host step，要在 5566 量 renderBundles；Metal Check 第 30 項因線性紋理對齊改答 64 跑不了；
+  閒置 trim 與壓力 hold back 這次才真的會觸發（ARC 下 dispatch source 要 static），壓力下沒在手機上看過；golden hash 表要在 macOS bless。
+  → [細節](todo/metal2vulkan.md)
 - ✅ **11-14** 驅動改成 kext：iPadOS 的 11 個板級驅動（含儲存、keystore、顯示與 GPU）全部以 kext 在 5566 開機驗證，kernel 只留平台與診斷，XNU patch 未動 → [細節](todo/kernel-unify.md)（第 11 節）
 - ⬜ **11-15** macOS 還沒解的：記憶體壓力（6 GiB 的 VM 開著 Safari 一陣子後 free 約 14 MB、wired 約 2.25 GB，Dock／SystemUIServer
   被重啟、app 轉圈）；App cryptex 裡 Safari 的代理程式（書籤同步、通知等）被 AMFI 的 launch constraint 擋下；自動登入約 20 秒後
