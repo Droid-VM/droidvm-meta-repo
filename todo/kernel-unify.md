@@ -318,3 +318,6 @@ monitor 與 busy scan、late probe 本身、上面兩個轉接層。
 還是使用者決定的：macOS-DroidVM 的 `main`／`macOS` 要不要改吃我們的原始碼（第 5 步）。若它改釘我們的 NativeMetal 935c468：
 它的 `build-metal-plugin.sh` 裡那些文字替換已在原始碼裡（錨點不在了），而 bridge 匯出的 trim／hold-back 要我們 fork 的翻譯層補丁
 0013、0020，它的 bridge 建置也得套那疊。
+
+11-16 晚：macOS 線音訊 0004（ring 跨尾端）那個 bug 我們的 `package/DroidVMAudio.cpp` 也有，已修（device 3da41ea）。
+PCIe／MSI／USB 的方向與第 1 步見 [pcie-msi.md](pcie-msi.md)。
