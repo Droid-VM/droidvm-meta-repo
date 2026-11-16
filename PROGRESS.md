@@ -226,8 +226,10 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
   全部相同時仍把每顆都標成 P，這個 kernel 很可能開不了機，還沒試。→ [細節](todo/builds.md)
 - ⬜ **11-13** iPadOS 27／macOS 27 的 kernel 融合成一套原始碼：兩個 OS 從同一份 XNU 原始碼、同一條流程建出並開機（macOS 到
-  桌面、11-15 在 app 上可操作），驅動都是 kext、磁碟用上游 UniXNU 的佈局。剩下第 5 步：macOS-DroidVM（另一位貢獻者的 repo）
-  對我們原始碼的釘選版本要不要跟上、怎麼協調，由使用者決定。→ [細節](todo/kernel-unify.md)
+  桌面、11-15 在 app 上可操作），驅動都是 kext、磁碟用上游 UniXNU 的佈局。11-16 盤點：host 各 repo 的 `macOS` 分支已全數在
+  `wip/hackintosh` 裡；沒進來的是 macOS 線的 GPU 插件（NativeMetal `macOS` 134 個 commit，不同的 metal2vulkan 基底）與
+  macOS-DroidVM 11-13 之後的 11 個 commit（兩個 kernel 補丁、三個 m2v 補丁、新版 P4、XR10）；它對我們原始碼的釘選要不要跟上
+  由使用者決定。→ [細節](todo/kernel-unify.md)（第 12 節）
 - ✅ **11-14** 驅動改成 kext：iPadOS 的 11 個板級驅動（含儲存、keystore、顯示與 GPU）全部以 kext 在 5566 開機驗證，kernel 只留平台與診斷，XNU patch 未動 → [細節](todo/kernel-unify.md)（第 11 節）
 - ⬜ **11-15** macOS 還沒解的：記憶體壓力（6 GiB 的 VM 開著 Safari 一陣子後 free 約 14 MB、wired 約 2.25 GB，Dock／SystemUIServer
   被重啟、app 轉圈）；App cryptex 裡 Safari 的代理程式（書籤同步、通知等）被 AMFI 的 launch constraint 擋下；自動登入約 20 秒後
