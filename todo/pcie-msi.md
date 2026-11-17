@@ -9,9 +9,75 @@
 | 步 | 內容 | 狀態 |
 |---|---|---|
 | 1 | App 對 Gunyah VM 預設開 crosvm 的 MBI 幀（`--mbi-spis 64`），每台可關 | ✅ 11-16（app 505b4a6） |
-| 2 | DarwinBoot `--dynamic` 把 device tree 的 PCIe 主橋與 MBI 幀翻成 ADT 節點 | 未開始 |
-| 3 | macOS 的 USB 直通（Apple 的 PCIe 橋、xHCI、USB 家族） | 未開始 |
+| 2 | DarwinBoot `--dynamic` 把 device tree 的 PCIe 主橋與 MBI 幀翻成 ADT 節點；macOS 一個 binary 兩種傳輸都能用 | ✅ 11-17（見下節） |
+| 3 | macOS 的 USB 直通（Apple 的 PCIe 橋、xHCI、USB 家族） | 卡住：xHCI 驅動等不到 AppleUSBHostResources（11-17） |
 | 4 | iPadOS 的 USB（自寫通用 PCIe 主橋） | 未開始，最後再評估 |
+
+## 第 2 步與「一個 binary」（11-17）
+
+使用者問：macOS 現在 mmio 版和 pci 版要編譯期指定嗎？能不能做成一個 binary，bootloader 生成 ADT、XNU 自動偵測，偵測不到就由
+bootloader 補開機參數，host 兩種都提供、guest 兩種都能用。
+
+- macOS-DroidVM（另一位貢獻者的線）是開機前決定：`MACOS_PCIE`、`MACOS_NET_PCI`、`MACOS_DATA_PCI`、`MACOS_USB_PCI` 這組環境變數
+  同時影響 `k27/try.sh` 的 KC 內容、`scripts/run-macos-vm.py` 離線做的 ADT（從抓下來的 FDT），以及 `scripts/droidvm-app.py` 的 VM 設定，
+  三者要一致。它自己的文件記錄過同一個 KC 只換 ADT 就能改走 AppleVirtIO，所以真正逼它換 KC 的只有兩個替身驅動（佔住 en0 的
+  DroidVMEthernet、頂替 IOUSBHostFamily 的 ARMPlatformStandIn）。
+- host 本來就兩種都有：crosvm 每一類裝置都能放 MMIO 或 PCI（`--virtio-mmio-{block,input,net,gpu,snd,media,console}`），App 的
+  `virtio_transport`（mmio／pci，整台 VM）在 MMIO 時自己加 input、net、gpu（有聲卡、console 時也加）這些開關；個別裝置要留在 MMIO
+  就寫進 extra_options。這次 host 沒改。
+
+### 改了什麼（全部已推 `wip/hackintosh`）
+
+| repo | commit | 內容 |
+|---|---|---|
+| ArmCpu | afddd58 | SPI 槽 16 → 128，依 INTID 直接查槽；attach 加鎖並等 GIC 就緒；`armcpu_spi_set_enabled`、`armcpu_spi_distribute`（取自 macOS 線三個 ArmCpu 補丁） |
+| DarwinBoot | ac57c33 | FDT 有 MBI 幀時生成 `/arm-io/pcie`（`pcie,vmapple1`，Apple 橋的契約：28 位元組小端 ranges、`device-interrupt-parent` 'MBIF'、`msi-frame-index` 0）與 `/arm-io/gic-mbi`；arm-io 的 ranges 拉長到涵蓋 64 位元 PCI 窗口（0x4_2000_0000）。沒有 MBI 幀時輸出逐位元不變 |
+| fork | c0b97b2 | 兩個 gitlink |
+| device | 5b41b7d | macOS KC 加 AppleVirtualPlatform、AppleVirtIO；新 kext DroidVMGicMsi（macOS 線的 MSI 控制器，掛在 `/arm-io/gic-mbi`，`AppleVirtualPlatformPCIE` 的 personality 改掛 IOPlatformDevice）；網路 kext 在沒有 MMIO 網卡時也發布 IOTimeSync 等的資源（等到任何 Ethernet 介面或 10 秒） |
+| device | 6a93e50 | 虛擬 GPU 傳輸的 256 個 slot 表改從 heap 配（24 KiB）：多保留的 Apple kext 吃掉了板級 kext 的 `__DATA` 空洞，少一頁放不下 |
+| device | c29df5c | xHCI 驅動先不放進 KC（見下面「沒解決的」） |
+
+偵測全在執行期：IOKit 依 ADT 節點與 PCI 列舉配對，我們的 MMIO 驅動只在 DarwinBoot 生成的 MMIO 節點上啟動，Apple 的 AppleVirtIO 接
+PCI 上的 virtio 裝置。iPadOS 也拿到這兩個節點，但它的 KC 沒有對應驅動，不受影響。沒用到開機參數。
+
+### 驗證（5566，macOS 27 與 iPadOS 27，gpumerge 樹的乾淨 git 建置）
+
+| 設定 | 結果 |
+|---|---|
+| macOS，`virtio_transport` mmio（原設定） | 照常開機、網路、GPU；PCI 匯流排上本來就有 crosvm 的 pvpanic 與一個 virtio 裝置（1af4:107c），Apple 橋列舉、AppleVirtIOPCITransport 接上 |
+| macOS，pci（開機碟與網卡在 PCI，其餘用 extra_options 留在 MMIO） | 韌體與 DarwinBoot 從 virtio-pci 讀開機碟；AppleVirtIOBlockStorageDevice 接開機碟（FAT 由 FSKit msdos 唯讀掛上）；AppleVirtIONetwork 成為 en0（configd 依資料庫給 unit 0），IPv4／IPv6 對外 TCP 正常；MSI：INTID 64（碟）、84–87（網卡，1.2 萬／8 千次中斷）；桌面、鎖屏、解鎖 |
+| macOS，pci 但網卡留 MMIO（只有開機碟在 PCI） | 鎖定再解鎖正常 |
+| iPadOS 27（同一批 ArmCpu、DarwinBoot、GPU slot 改動） | 主畫面、GPU 15 clients 0 逾時、virtio-gpu 0 錯誤、網路、音訊 clients 2 0 延遲 |
+
+測完 macOS VM 設定已還原（mmio、原 extra_options、沒有 xHCI），5566 跑 macOS 27 新版。
+
+### 沒解決的
+
+- **開了 xHCI 時 PCI 網卡起不來**：AppleVirtIOPCITransport 有發布，但 AppleVirtIONetwork 沒有；沒有 en0 → IOTimeSync 沒有介面可用
+  （assert）→ WindowServer 等不到 → 黑屏。不是 MSI 不夠（`--mbi-spis 128` 一樣）、也不是 xHCI 驅動（拿掉一樣）。需要 IORegistry
+  才看得出是哪一步沒過；那個狀態下沒有桌面可開 Terminal。
+- **xHCI 驅動**：`AppleUSBXHCIPCI` 的 start 卡在 `waitForMatchingService('AppleUSBHostResources')`（IOUSBHostFamily 的 IOResources
+  personality，一直沒註冊）。macOS 線靠 ARMPlatformStandIn 頂替 AppleSMC 與多留幾個 USB kext 走通；我們的 KC 帶的是真的 AppleSMC。
+  先從 KC 拿掉（c29df5c），VM 開了 xHCI 也只是沒人管。
+- **網卡在 PCI 時解鎖卡過一次**：開機自動登入後自動上鎖的那個鎖屏，輸入密碼後畫面停住（WindowServer 不再送 GPU 工作，執行緒都在
+  等訊息，kernel 沒卡）；之後同設定手動上鎖再解鎖正常，那個自動上鎖沒再出現，沒能重現。3 次解鎖 1 次。
+- **MSI 分散到各 CPU 沒效果**：`armcpu_spi_distribute` 寫 IROUTER 後讀回都是 0，全部 MSI 仍由 CPU 0 處理（照樣能用）。
+- **macOS 沒有任何網卡就開不到桌面**（原本就這樣）：IOTimeSync 要一個網路介面的位址當時鐘 ID。
+- **我們自己的驅動還只有 MMIO**：GPU、media、我們的輸入（觸控轉指標、筆、觸控板、感測器）、音訊、Data 盤（擁有者鏈驗證）。這些類別放
+  PCI 時目前沒人接；要給這幾個驅動加一層 virtio-pci 傳輸（IOPCIDevice personality、modern capability、MSI-X），之後才算「兩種都能用」。
+  Apple 有驅動的類別（block、net、console、entropy、基本鍵盤滑鼠、sound）已經兩種都行。
+- App 的 `virtio_transport` 是整台 VM 一個選項；要逐類別選，現在只能靠 extra_options。
+
+### 方法與陷阱
+
+- macOS VM 沒有 ssh：`export.py`（檔案信箱）可以讀 guest 的檔、列行程、拿 stackshot；`peek.py __ZL4gSpi` 看 ArmCpu 每條 SPI 的
+  INTID 與次數（MBI 是 64 以上）；unified log 用 `logarchive.py` 增量拉，再只硬連結開機後修改過的 tracev3 做成小 archive 給
+  `unifiedlog_iterator`，訊息欄位用 python 過濾（整份 archive 直接 grep 會輸出幾十 GB）。
+- rig 的 `vm.sh start` 先跑 `daemon-recover.sh`，以 rig 自己的 `unixnu-vm.config.json` 為準：改 VM 設定要兩邊一起改（daemon 用
+  `vm_modify`，rig 改那個檔）。
+- `deploy27.sh --keep-plugin` 留下的舊插件不在新 release 的信任裡時，iPadOS 的 GPU clients 會是 0；iPadOS 要讓 deploy 把插件推進去。
+- 新增 kext 或多留 Apple kext 都會吃 `__DATA` 空洞：`fileset-add-kexts.py` 報「past the chain table of __DATA」就是不夠（root 的
+  chain table 只涵蓋到原 KC 的頁數，最後 3 頁不能用）。
 
 ## 第 1 步（11-16）
 
@@ -73,7 +139,7 @@
 - 看 crosvm 實際參數：`/proc/<pid>/cmdline`。
 - Windows 有沒有 MSI：比較 crosvm 各執行緒 `/proc/<pid>/task/*/status` 的 `voluntary_ctxt_switches`。
 
-## 第 2–4 步（未開始）
+## 第 2–4 步（11-16 寫的原計畫；第 2 步的實作見上）
 
 參照 macOS-DroidVM 的 `docs/k27-vmapple-pcie-msi-plan.md` 與 `scripts/run-macos-vm.py`（`MACOS_PCIE=1` 的 make_adt）；它們已在自己的流程
 驗過 AppleVirtIO 區塊與網路、xHCI 三組 interrupter、實體 USB 滑鼠直通。

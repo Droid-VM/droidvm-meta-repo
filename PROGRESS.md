@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-17** macOS 一個 binary 兩種傳輸：DarwinBoot 從 FDT 生成 PCIe 主橋與 MSI 幀的 ADT 節點，KC 帶 Apple 的 PCIe 橋、AppleVirtIO 與 MSI 控制器 kext，執行期配對；5566 上開機碟與網卡放 PCI（MSI）照樣上網、開桌面，原本的 MMIO 設定與 iPadOS 27 不受影響（ArmCpu afddd58，DarwinBoot ac57c33，fork c0b97b2，device c29df5c）→ [細節](todo/pcie-msi.md)
 - ✅ **11-17** host 補合：macOS 線 11-16 之後的 host commit 與 App `dev` 的兩個都收了（crosvm simplefb 省 cache 掃描、edk2 的 PPTT 大小核拓撲與上游 PR #5、GKI 6.6 的 halt_poll 模組、原生顯示依 VM 刷新率要面板模式、iptables 跳轉不重複）；5566 上 iPadOS 27、macOS 27、Ubuntu、Windows 11 都開過，Windows 綁核後工作管理員變成 1 插槽、共用 L2（crosvm c69de01da，edk2 ee11a29，app c361aa6）→ [細節](todo/builds.md)（第 7 節）
 - ✅ **11-16** PCI MSI/MSI-X 改成每個 guest 自己偵測：App 對 Gunyah VM 預設開 crosvm 的 MBI 幀（`--mbi-spis 64`，編輯器可關），5566 上 Linux 的 PCI 裝置全改走 MSI-X、iPadOS／macOS 照常；舊版 edk2 只留 32 KB 給 device tree、開了會在韌體就當掉，App 讀韌體開頭自己不開。5566 的 App 換 r335 與 a7903f0 的韌體（app 505b4a6）→ [細節](todo/pcie-msi.md)
 - ✅ **11-16** 音訊驅動的 ring 越界修好：240 幀的週期不整除 8192 幀的 ring，每 34 個週期有一個讀寫、清除到 ring 後面 832 位元組（macOS 線曾因此 kernel data abort）；跨尾端的週期改走暫存緩衝區分兩段，零時間戳改成每圈都更新。5566 上 macOS（afplay）與 iPadOS（鈴聲試聽）驗過，0 延遲、0 panic（device 3da41ea）
@@ -227,7 +228,8 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 ## 未解／待查
 
 - ⬜ **11-16** PCIe／MSI 後續：Windows 拿得到 MSI 幀但驅動仍走 INTx（原因未查）；App payload 裡的 edk2 還是舊的（5566 手動換了，11-17 換成 ee11a29；
-  5567／5568 沒動，舊韌體下 App 自動不開）；第 2–4 步（DarwinBoot 翻譯 PCIe 與 MSI 幀、macOS USB 直通、iPadOS 自寫 PCIe 主橋）未開始。
+  5567／5568 沒動，舊韌體下 App 自動不開）。macOS（11-17）：開了 xHCI 時 PCI 網卡起不來、xHCI 驅動等不到 AppleUSBHostResources（先不放進 KC）、
+  網卡在 PCI 時解鎖卡過一次；GPU、media、我們的輸入、音訊、Data 盤還只有 MMIO 驅動。iPadOS 自寫 PCIe 主橋未開始。
   → [細節](todo/pcie-msi.md)
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
