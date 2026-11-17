@@ -290,7 +290,7 @@ Virtualization）內容都已在。
 | Windows 11 | 原設定：開到桌面、連網，工作管理員「4 插槽、4 核、L2 48 MB」。暫時設 `cpu_affinity 0=2:1=3:2=6:3=7`（App 自動帶 capacity 與兩個 cluster）：開到桌面，變成「1 插槽、4 核、L2 24 MB」＝PPTT 生效。測完設定還原 |
 
 - iptables：daemon 連重啟兩次，每條 droidvm 跳轉都只有一條。
-- simplefb 的改動在這四台上看不出差別：macOS 用 virtio-gpu 顯示，沒有 simplefb 執行緒。
+- simplefb 的改動沒有做前後對照：macOS 走 virtio-gpu 顯示，沒有 simplefb 執行緒；Windows 用 simplefb，但沒量那個執行緒。
 
 **陷阱（Windows）**：
 - App 的「停止」（`vm_stop`）對 crosvm 是 `Exit`，等於拔電源。Windows 開機一兩分鐘內被這樣停掉，下次開機就進修復環境
