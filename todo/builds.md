@@ -263,6 +263,42 @@ NativeAdreno 的 6 個已經都在。
 - 建置樹裡那份未提交的音訊修改（另一個工作階段的）仍未提交；合併時拿掉了它與合併後基底重複的兩個宣告，原樣與調整後的
   diff 都存在 rig 的 `out/` 裡。
 
+### 11-17 補合（使用者：「Host 功能都合併完了嗎？」→「好」）
+
+再拿每個 repo 的所有分支跟 `wip/hackintosh` 比一次（GitHub compare，SHA 對不上的再 `git cherry` 比內容）。11-16 之後 macOS 線
+又推了幾個 host commit，加上 App `dev` 分支兩個，這次都收了：
+
+| repo | 收進來的 | `wip/hackintosh` |
+|---|---|---|
+| crosvm | macOS 線 a569df4ba：GPU 畫面自己出圖後，simplefb 的 boot 畫面沒人讀的 tick 不再整片刷 cache（作者量 macOS 登入畫面該執行緒 3.2%→0.2% 核心）。合併 commit | c69de01da |
+| edk2-gunyah | 快轉 7 個：上游 PR #5（PrePi 選韌體所在的 RAM bank、排除獨立 framebuffer）、PPTT（cpu-map 的分群、`capacity-dmips-mhz` 排成效率等級、共用的最外層 cache）、`VIRTIO_GPU_ENABLE` 建置開關（預設不變）；另一個 MBI commit 和 a7903f0 patch-id 相同 | ee11a29 |
+| DroidVM-Prebuilt-Root | 快轉 2 個：GKI 6.6 用的 `gunyah-halt-poll-gki-6.6.ko` 與 match.json（作者量 Windows 4K 隨機 +30–70%）；bot 已更新 DroidVM-Prebuilts（4253f07b11） | f7c6ce8 |
+| App | cherry-pick lateautumn233 `dev` 的 c3dcc50（原生顯示依 VM 設定的刷新率向面板要模式）、dc204f3（iptables 的跳轉在 daemon 重啟後只掛一次＋BridgeForwardingTest） | c361aa6 |
+
+沒收的：gunyah_host_mod 623f8e7（作者版的 `msm_prime`，和我們 4e6d10a 同一功能，會衝突；我們的有 kCFI 檢查）。不屬於 macOS 線、
+沒動的：App 的 `webui`（192 個 commit：WebUI＋設定改走 daemon 服務，配套 DroidVM-Daemon／DroidVM-WebUI）與 leehe-byte 在它上面的
+UVC 攝影機。其餘分支（crosvm 的 drm／wingpu／wip/vpu／backup、App master 的 22 個、virglrenderer、virtio-media、mesa、gfxstream、
+Virtualization）內容都已在。
+
+**5566 驗證**（App r337、新 crosvm、App 目錄的 edk2 換 ee11a29，舊檔 `.bak-a7903f0`；四台都是 App 自動帶 `--mbi-spis 64`）：
+
+| guest | 結果 |
+|---|---|
+| iPadOS 27 | 主畫面、Data、GPU 11 clients 0 逾時、網路、音訊 clients 2，這次開機 0 個新 crash；App 依 VM 的 120 Hz 向面板投 120 Hz 的票 |
+| macOS 27 | 鎖屏航拍在動、登入到桌面（Finder、系統設定、Dock） |
+| Ubuntu | 新韌體版本字串、MBI、MSI 39 個、ssh、systemd running（走 device tree，PPTT 不影響它） |
+| Windows 11 | 原設定：開到桌面、連網，工作管理員「4 插槽、4 核、L2 48 MB」。暫時設 `cpu_affinity 0=2:1=3:2=6:3=7`（App 自動帶 capacity 與兩個 cluster）：開到桌面，變成「1 插槽、4 核、L2 24 MB」＝PPTT 生效。測完設定還原 |
+
+- iptables：daemon 連重啟兩次，每條 droidvm 跳轉都只有一條。
+- simplefb 的改動在這四台上看不出差別：macOS 用 virtio-gpu 顯示，沒有 simplefb 執行緒。
+
+**陷阱（Windows）**：
+- App 的「停止」（`vm_stop`）對 crosvm 是 `Exit`，等於拔電源。Windows 開機一兩分鐘內被這樣停掉，下次開機就進修復環境
+  （WinRE「Choose your keyboard layout」），看起來像是新設定害的。要比較 Windows 的開機結果，先讓它自己關機。
+- crosvm 的 `powerbtn`，Windows 不理；可以從工作管理員的「執行新工作」下 `shutdown /s /t 0` 關機，crosvm 隨即結束。
+- Windows 自己關機那次，10 秒後池子只回到 2048/3072（少約 1000 頁，orphan 0）；下一次 `vm.sh start` 用 acquire=3 補滿了。
+  只看到這一次，原因沒查。
+
 ### VPU 多後端
 
 host 選後端，guest 自己適配。crosvm 的 `--virtio-media kind=decoder,backend=(mediacodec,auto,msm-vidc)`，App 的圖形頁「解碼後端」。

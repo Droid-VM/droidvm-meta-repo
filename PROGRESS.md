@@ -1,6 +1,6 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-16。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
+更新：2026-11-17。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
 App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A446，iPad17,3／iPad Pro 13" M5，arm64e）**；
 原本的 iPadOS 17.7.11（21H461，iPad7,1）10-29 之後沒有再建置。兩條線、建置樹與機型的盤點見 [todo/builds.md](todo/builds.md)。
 
@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-17** host 補合：macOS 線 11-16 之後的 host commit 與 App `dev` 的兩個都收了（crosvm simplefb 省 cache 掃描、edk2 的 PPTT 大小核拓撲與上游 PR #5、GKI 6.6 的 halt_poll 模組、原生顯示依 VM 刷新率要面板模式、iptables 跳轉不重複）；5566 上 iPadOS 27、macOS 27、Ubuntu、Windows 11 都開過，Windows 綁核後工作管理員變成 1 插槽、共用 L2（crosvm c69de01da，edk2 ee11a29，app c361aa6）→ [細節](todo/builds.md)（第 7 節）
 - ✅ **11-16** PCI MSI/MSI-X 改成每個 guest 自己偵測：App 對 Gunyah VM 預設開 crosvm 的 MBI 幀（`--mbi-spis 64`，編輯器可關），5566 上 Linux 的 PCI 裝置全改走 MSI-X、iPadOS／macOS 照常；舊版 edk2 只留 32 KB 給 device tree、開了會在韌體就當掉，App 讀韌體開頭自己不開。5566 的 App 換 r335 與 a7903f0 的韌體（app 505b4a6）→ [細節](todo/pcie-msi.md)
 - ✅ **11-16** 音訊驅動的 ring 越界修好：240 幀的週期不整除 8192 幀的 ring，每 34 個週期有一個讀寫、清除到 ring 後面 832 位元組（macOS 線曾因此 kernel data abort）；跨尾端的週期改走暫存緩衝區分兩段，零時間戳改成每圈都更新。5566 上 macOS（afplay）與 iPadOS（鈴聲試聽）驗過，0 延遲、0 panic（device 3da41ea）
 - ✅ **11-16** macOS 線併完：GPU 插件（Droid-VM/NativeMetal `macOS`，134 個 commit）併入，翻譯層從 624bab39 換到 macOS 線與上游用的 555b13d5，我們 29 個板級補丁 21 個移過去、7 個上游已有、0034 沒帶；macOS 線的 P4 新版、WebKit GPU 行程載入插件、Weather 的雲也收了。5566 上 iPadOS 27 主畫面與 Metal Check 41/42、macOS 27 鎖屏航拍與 Safari 正常（NativeMetal 935c468，fork 6efbb97，device 80b6294）→ [細節](todo/metal2vulkan.md)、[盤點](todo/kernel-unify.md)（第 12 節）
@@ -225,7 +226,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 未解／待查
 
-- ⬜ **11-16** PCIe／MSI 後續：Windows 拿得到 MSI 幀但驅動仍走 INTx（原因未查）；App payload 裡的 edk2 還是舊的（5566 手動換了，
+- ⬜ **11-16** PCIe／MSI 後續：Windows 拿得到 MSI 幀但驅動仍走 INTx（原因未查）；App payload 裡的 edk2 還是舊的（5566 手動換了，11-17 換成 ee11a29；
   5567／5568 沒動，舊韌體下 App 自動不開）；第 2–4 步（DarwinBoot 翻譯 PCIe 與 MSI 幀、macOS USB 直通、iPadOS 自寫 PCIe 主橋）未開始。
   → [細節](todo/pcie-msi.md)
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
@@ -247,7 +248,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   上測（編碼直通用自己的 dma-heap 緩衝區，不受影響）；macOS 鎖屏航拍已修好（見已完成），VideoToolbox host 的
   decode order idle drain 改動還沒在 iPadOS 版本上跑過；`auto` 跑 4K／長片後停 VM 池子少 2–8 頁（acquire 補回）；MediaCodec 後端 4K 編碼卡住、ffmpeg 編碼掉幀（D78），
   guest 編碼佇列 64 幀滿了就讓 session 失敗；App 兩個後端預設仍是 MediaCodec。→ [細節](todo/builds.md)
-- ⬜ **11-13** host 合併後還沒驗證的：Windows guest（11-16 開機與網路正常，其餘沒測）、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（macOS guest 11-15 驗過；基本回歸
+- ⬜ **11-13** host 合併後還沒驗證的：Windows guest（11-17 開到桌面、連網、PPTT 生效；xHCI、游標沒測）、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（macOS guest 11-15 驗過；基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率
   下限對所有 guest 生效，耗電沒量；合併後的音訊只看了日誌沒用耳朵聽。
   → [細節](todo/builds.md)（第 7 節）

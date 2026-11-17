@@ -306,7 +306,7 @@ monitor 與 busy scan、late probe 本身、上面兩個轉接層。
 
 | 範圍 | 結果 |
 |---|---|
-| host：crosvm、virglrenderer、gunyah_host_mod、edk2-gunyah、mesa、gfxstream | 早已全數在 `wip/hackintosh`（各 `macOS` 分支是它的祖先；gfxstream 同一個 commit） |
+| host：crosvm、virglrenderer、gunyah_host_mod、edk2-gunyah、mesa、gfxstream | 當時都在 `wip/hackintosh`（gfxstream 同一個 commit）。macOS 線 11-16 之後又推了 crosvm 1 個、edk2 7 個、gunyah_host_mod 1 個、預編譯模組 2 個，11-17 補合，見 [builds.md](builds.md) 第 7 節「11-17 補合」 |
 | GPU 插件（Droid-VM/NativeMetal） | `macOS` 分支併入 `wip/hackintosh`（935c468），翻譯層換到 555b13d5，我們的板級補丁移過去（fork 6efbb97）；細節與沒帶的 0034 見 [metal2vulkan.md](metal2vulkan.md)「11-16 移到 555b13d5」 |
 | P4 | 改成 macOS 線現行的寫法、折進原始碼：WindowServer 的每個合成 surface 只在 commit 到 GPU 完成之間算使用中；`METAL2VULKAN_YCBCR_PLANES_ONLY`（WindowServer 與 WallpaperAerialsExtension）下 4:2:0 surface（500、505、540、543）原地讀，其他超過 1 Mpx 的 YCbCr 在 macOS 拒收；XR10 在 macOS 只對 WindowServer 隱藏。都只在 macOS 生效 |
 | macOS-DroidVM 的 kernel 端 | `gpu-bundles-sandbox-map` 收進 `macos.series`（WebKit 的 GPU 行程拿得到插件）；Weather 的雲改用我們已有的 `owner-hide-vmm=Weather`（macOS 內建開機參數）；KC 保留 driverkit.serial 是 board.toml 早有的（device 80b6294） |

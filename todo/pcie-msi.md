@@ -39,6 +39,7 @@
   - 工作樹裡另一個 session 未提交的 GPU 即時優先權改動照舊一起建進去，沒有提交。
   - payload 沒重打包（跟手機上逐位元相同）：重打包會連帶把手機上 11-15 的 crosvm 換回 payload 裡的舊版。
 - App 目錄的 `usr/share/droidvm/edk2-gunyah.fd` 直接換成 a7903f0 建的檔（舊檔留 `.bak-20261116`，擁有者與 SELinux 標籤不變）。
+  11-17 再換成 ee11a29（PPTT、PR #5，標頭一樣是 `b 0x20000`，App 照常開 MSI；舊檔 `.bak-a7903f0`）。
   下次完整打包 APK 時，`6_build_apk_prepare.sh` 會自己帶 `edk2-gunyah/edk2-gunyah.fd`。
 - iPadOS 27 與 macOS 27 兩台 VM 的韌體改成 App 內建（設定裡 firmware 空字串），不再用 17 那台目錄裡的 `edk2-virtio-gpu.fd`。
 - 沒動的：17 那台 VM 與 rig 的 template（`fresh-deploy.sh` 把 `EDK2_FD` 推成 `edk2-virtio-gpu.fd`）仍是舊韌體，App 會自己不開 MSI。
