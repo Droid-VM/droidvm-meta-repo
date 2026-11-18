@@ -10,8 +10,82 @@
 |---|---|---|
 | 1 | App 對 Gunyah VM 預設開 crosvm 的 MBI 幀（`--mbi-spis 64`），每台可關 | ✅ 11-16（app 505b4a6） |
 | 2 | DarwinBoot `--dynamic` 把 device tree 的 PCIe 主橋與 MBI 幀翻成 ADT 節點；macOS 一個 binary 兩種傳輸都能用 | ✅ 11-17（見下節） |
-| 3 | macOS 的 USB 直通（Apple 的 PCIe 橋、xHCI、USB 家族） | 卡住：xHCI 驅動等不到 AppleUSBHostResources（11-17）；開 xHCI 時網卡起不來的問題 11-18 修好 |
+| 3 | macOS 的 USB 直通（Apple 的 PCIe 橋、xHCI、USB 家族） | ✅ 控制器與埠 11-18（device 8d1b84c）；裝置端沒實測（手機上沒插裝置） |
 | 4 | iPadOS 的 USB（自寫通用 PCIe 主橋） | 未開始，最後再評估 |
+
+## 11-18 下午：上次列的後續依序處理
+
+使用者：「把這些修正按順序做完」（上次報告「還沒做的」那張清單）。結果：
+
+| # | 項目 | 結果 |
+|---|---|---|
+| 1 | Windows 用新 crosvm | ✅ 開到桌面、有線網路、裝置管理員沒有資源衝突、系統內關機正常（見上節驗證表） |
+| 2 | iPadOS 部署 ioreg 工具 | ✅ efde148 的 release 部署到 5566，1.2 秒拿到整棵樹 |
+| 3 | macOS-DroidVM 的 ADT 要不要跟著改 | 不用：它的 VM 沒開電池，ADT 每次 prepare 從手機當下的 FDT 重做 |
+| 4 | macOS 的 USB（xHCI）驅動 | ✅ 起來了（device 8d1b84c），見下 |
+| 5 | 網卡走 PCI 時解鎖卡住 | 沒重現：PCI＋USB 設定下開機自動上鎖後解鎖 1 次、手動鎖定解鎖 4 次都正常 |
+| 6 | MSI 沒分散到各 CPU | 其實有分散，是讀回值誤導（ArmCpu 652675b），見下 |
+| 7 | 我們自己的驅動加 virtio-pci | 輸入驅動完成（device a615820），見下；GPU、media、音訊、Data 盤還沒做 |
+
+### 4. USB：KC 連結工具把 IOUSBHostFamily 的 personality 拿掉了
+
+- XnuPrelink 的 `fileset_emit.py` 只保留 **roots** 的 `IOKitPersonalities`：只當依賴被帶進 KC 的 kext，personality 一律刪掉
+  （KC 紀錄 `kernel.json` 的 `personalities_dropped`）。IOUSBHostFamily 原本只是依賴，所以它的 `AppleUSBHostResources`
+  （IOResources、`IOResourceMatch IOKit`）從來沒註冊，`AppleUSBXHCIPCI` 的 start 就一直等。
+- 修法：macOS 的 prelink roots 加 IOUSBHostFamily、AppleUSBXHCIPCI、AppleUSBHostCompositeDevice、AppleUSBHub、
+  IOUSBHostHIDDeviceSafeBoot、IOUSBMassStorageDriver、IOSCSIBlockCommandsDevice（macOS-DroidVM 的 MACOS_USB_PCI 那組加 hub）。
+- 驗證：AppleUSBHostResources 註冊、AppleUSBXHCIPCI 起來，8 個 USB2、7 個 USB3 埠（「ports limit reached」：crosvm 給 16 個）；
+  網卡、桌面、解鎖照常。
+- 11-17 以為「xHCI 驅動卡住時把網卡也拖住」不對：網卡起不來是 crosvm 電池那個問題（上節）。
+- 沒驗到：手機上沒插 USB 裝置，裝置端（HID、隨身碟）沒實測。USB2 埠 1–7 上電時 `AppleUSBXHCIPort::powerOn: deadline passed
+  (PORTSC 0x00000000)`，USB3 埠沒有；crosvm 的 PORTSC 預設有 PP，原因沒查。
+
+### 6. MSI 分散：Gunyah 讀 IROUTER 永遠是 0
+
+- 每核心計數（ArmCpu `armcpu_core_spi`／`armcpu_core_mbi`，新加）：MSI 依 `armcpu_spi_distribute` 分到 CPU 1–3
+  （開機碟 99 次在 CPU 1，網卡約 1 萬次各在 CPU 2、3）。
+- 11-17 以為沒效，是因為 `DroidVMGicMsi` 印的 IROUTER 讀回值都是 0：Gunyah 讀每條 SPI 的 IROUTER 都回 0（確定有效的 SPI IPI
+  那幾條也是），讀回值不能當證據。
+- 實驗中改用兩次 32 位元寫入（低半、再寫高半 0）後線都回到 CPU 0：要一次 64 位元寫入。
+- virtio-mmio 的線與我們 PCI 輸入裝置的線仍掛在 CPU 0（attach 時的路由）。
+
+### 7. 輸入驅動接 PCI 上的 virtio-input
+
+App 的 `virtio_transport` 設 pci、extra_options 不加 `--virtio-mmio-input` 時，輸入裝置都在 PCI 上，原本由 Apple 的
+AppleVirtIOInput 當成一般鍵盤、滑鼠、觸控板接走（沒有觸控螢幕、筆、感測器、我們的觸控板）。
+
+| 檔案 | 作用 |
+|---|---|
+| `DroidVMVirtioPci.c/.h` | virtio-pci（modern）傳輸。驅動照用 virtio-mmio 的暫存器位移，這裡翻成 common／notify／ISR／device config 的存取；設定空間走 ECAM（`/arm-io/pcie`），BAR 用 Apple 配好的位址；MSI-X 向量 0 由這裡寫，指到 MBI 範圍頂端一條空的 SPI（MSI 控制器從底部發） |
+| `DroidVMVirtioPciNub.cpp` | `DroidVMVirtioPCI`，放在 DroidVMGicMsi kext：以 PCI id 佔住 virtio-input function、發布它的位址，不碰裝置 |
+| `DroidVMVirtioPciWatch.cpp` | 輸入 kext：驅動啟動時掛配對通知，把佔住的 function 交給 `droidvm_input_add_pci` |
+| `DroidVMVirtioInput.c` | PCI 裝置的暫存器存取走傳輸層；啟動後也能加裝置（同一把鎖、worker 隨第一個裝置啟動、中斷模式隨裝置數重算） |
+| `HidInputProbe.cpp` | 筆、滑鼠、觸控板、感測器的 HID 服務改由 `native_hid_input_extras` 發布，每種一次，PCI 裝置加進來時再跑一次 |
+
+陷阱（都在 5566 實際踩到）：
+
+- **AppleVirtIOPCITransport 的 probe 把分數設成 10000**：我們的 personality 用 2000 時一個 function 都搶不到，也沒有任何訊息
+  （io=0x16 看得出我們的 class 連 probe 都沒被叫）。改 20000。
+- **佇列在 MSI-X 設好之前就啟用**：佇列向量被寫成 NO_VECTOR，裝置一次中斷都不發，輸入只靠 250 ms 保底輪詢在動。改成先設中斷
+  再啟動裝置（reset 會清掉向量，status 每次寫入後補設設定向量，佇列啟用前設佇列向量）。
+- **新 kext 放不進 KC 的 `__DATA`**：獨立的 DroidVMVirtioPCI kext 讓 fileset-add-kexts.py 報「past the chain table of __DATA」，
+  所以放進 DroidVMGicMsi kext。
+- 先前推論「輸入 kext 在早期配對時載不進來」是錯的，真正原因是上面的分數。
+
+驗證（5566，macOS，開機碟、網卡、USB、7 個輸入裝置都在 PCI）：每個 function 拿到自己的 MBI SPI（INTID 121–127）；開機幾分鐘
+中斷 30920 次，保底逾時 27 次、其中 1 次才有資料；Spotlight 打字、觸控點計算機按鈕、感測器資料約每秒 370 筆；鍵盤、筆、觸控
+指標、滑鼠、觸控板、3 個感測器的 HID 服務都有。
+
+### 回歸（最終版：fork f54247a、device 67e84ee、ArmCpu 652675b，gpumerge 樹乾淨建置）
+
+| guest | 結果 |
+|---|---|
+| iPadOS 27 | 主畫面、GPU 13 clients 0 逾時、en0；6 種輸入裝置、鍵盤／觸控／筆、觸控板、3 個感測器的 HID 服務都在，滑動有事件 |
+| macOS 27 原本的 MMIO 設定 | 桌面、網路、7 種輸入裝置與 HID 服務、觸控與按鍵事件 |
+| macOS 27 PCI＋USB＋輸入在 PCI | 見上（最終版只差註解與 iPadOS 那邊的巨集） |
+
+5566 結束時跑 macOS 27 原本的 MMIO 設定、最終版。rig 的工具：`m1118/pcicfg.py` 多了 `pci-input`（PCI＋USB，輸入也走 PCI）。
+
 
 ## 開了 xHCI 時 PCI 網卡起不來（11-18，已修）
 
@@ -109,14 +183,14 @@ PCI 上的 virtio 裝置。iPadOS 也拿到這兩個節點，但它的 KC 沒有
 ### 沒解決的
 
 - ~~開了 xHCI 時 PCI 網卡起不來~~：11-18 修好，原因是 crosvm 的電池位址與 BAR 重排（見上節）。
-- **xHCI 驅動**：`AppleUSBXHCIPCI` 的 start 卡在 `waitForMatchingService('AppleUSBHostResources')`（IOUSBHostFamily 的 IOResources
+- ~~**xHCI 驅動**~~（11-18 修好：IOUSBHostFamily 列為 KC root，見最上節）：`AppleUSBXHCIPCI` 的 start 卡在 `waitForMatchingService('AppleUSBHostResources')`（IOUSBHostFamily 的 IOResources
   personality，一直沒註冊）。macOS 線靠 ARMPlatformStandIn 頂替 AppleSMC 與多留幾個 USB kext 走通；我們的 KC 帶的是真的 AppleSMC。
   先從 KC 拿掉（c29df5c），VM 開了 xHCI 也只是沒人管。
 - **網卡在 PCI 時解鎖卡過一次**：開機自動登入後自動上鎖的那個鎖屏，輸入密碼後畫面停住（WindowServer 不再送 GPU 工作，執行緒都在
   等訊息，kernel 沒卡）；之後同設定手動上鎖再解鎖正常，那個自動上鎖沒再出現，沒能重現。3 次解鎖 1 次。
-- **MSI 分散到各 CPU 沒效果**：`armcpu_spi_distribute` 寫 IROUTER 後讀回都是 0，全部 MSI 仍由 CPU 0 處理（照樣能用）。
+- ~~**MSI 分散到各 CPU 沒效果**~~（11-18：其實有效，是 Gunyah 讀 IROUTER 永遠回 0，見最上節）：`armcpu_spi_distribute` 寫 IROUTER 後讀回都是 0，全部 MSI 仍由 CPU 0 處理（照樣能用）。
 - **macOS 沒有任何網卡就開不到桌面**（原本就這樣）：IOTimeSync 要一個網路介面的位址當時鐘 ID。
-- **我們自己的驅動還只有 MMIO**：GPU、media、我們的輸入（觸控轉指標、筆、觸控板、感測器）、音訊、Data 盤（擁有者鏈驗證）。這些類別放
+- **我們自己的驅動還只有 MMIO**：GPU、media、音訊、Data 盤（擁有者鏈驗證）；輸入 11-18 兩種都行了（見最上節）。這些類別放
   PCI 時目前沒人接；要給這幾個驅動加一層 virtio-pci 傳輸（IOPCIDevice personality、modern capability、MSI-X），之後才算「兩種都能用」。
   Apple 有驅動的類別（block、net、console、entropy、基本鍵盤滑鼠、sound）已經兩種都行。
 - App 的 `virtio_transport` 是整台 VM 一個選項；要逐類別選，現在只能靠 extra_options。

@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-18** macOS PCI 後續依序處理：USB（xHCI）驅動起來了（KC 只留 roots 的 personality，IOUSBHostFamily 改列 root）；MSI 其實有分散到各 CPU（Gunyah 讀 IROUTER 永遠是 0，之前被讀回值誤導）；我們的輸入驅動能接 PCI 上的 virtio-input（觸控、鍵盤、筆、觸控板、感測器，MSI-X）；Windows 用新 crosvm 正常；iPadOS 部署了 ioreg 工具（device 8d1b84c、67e84ee，ArmCpu 652675b，fork f54247a）→ [細節](todo/pcie-msi.md)
 - ✅ **11-18** 開了 USB（xHCI）時 macOS 的 PCI 網卡起不來，修好了：crosvm 把 goldfish 電池配在 PCI 視窗裡，macOS 自己重排 BAR 時把網卡蓋在電池上，crosvm 拒絕映射又把錯誤丟掉，網卡的存取全落空。電池移到視窗外固定位址，被拒的 BAR 搬移改成等對方搬走再補上。5566 上 macOS PCI＋USB 有 en0、能上網；macOS 原設定、iPadOS 27、Ubuntu 照常。另加 kernel 檔案信箱的 IORegistry 匯出（`export.py ioreg`，沒桌面也能看 ioreg）（crosvm da647254c，device efde148）→ [細節](todo/pcie-msi.md)
 - ✅ **11-17** macOS 一個 binary 兩種傳輸：DarwinBoot 從 FDT 生成 PCIe 主橋與 MSI 幀的 ADT 節點，KC 帶 Apple 的 PCIe 橋、AppleVirtIO 與 MSI 控制器 kext，執行期配對；5566 上開機碟與網卡放 PCI（MSI）照樣上網、開桌面，原本的 MMIO 設定與 iPadOS 27 不受影響（ArmCpu afddd58，DarwinBoot ac57c33，fork c0b97b2，device c29df5c）→ [細節](todo/pcie-msi.md)
 - ✅ **11-17** host 補合：macOS 線 11-16 之後的 host commit 與 App `dev` 的兩個都收了（crosvm simplefb 省 cache 掃描、edk2 的 PPTT 大小核拓撲與上游 PR #5、GKI 6.6 的 halt_poll 模組、原生顯示依 VM 刷新率要面板模式、iptables 跳轉不重複）；5566 上 iPadOS 27、macOS 27、Ubuntu、Windows 11 都開過，Windows 綁核後工作管理員變成 1 插槽、共用 L2（crosvm c69de01da，edk2 ee11a29，app c361aa6）→ [細節](todo/builds.md)（第 7 節）
@@ -229,8 +230,8 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 ## 未解／待查
 
 - ⬜ **11-16** PCIe／MSI 後續：Windows 拿得到 MSI 幀但驅動仍走 INTx（原因未查）；App payload 裡的 edk2 還是舊的（5566 手動換了，11-17 換成 ee11a29；
-  5567／5568 沒動，舊韌體下 App 自動不開）。macOS：xHCI 驅動等不到 AppleUSBHostResources（先不放進 KC）、網卡在 PCI 時解鎖卡過一次；
-  GPU、media、我們的輸入、音訊、Data 盤還只有 MMIO 驅動。iPadOS 自寫 PCIe 主橋未開始。
+  5567／5568 沒動，舊韌體下 App 自動不開）。macOS：USB 裝置直通沒實測（手機上沒插裝置），USB2 埠上電讀到 PORTSC 0；網卡在 PCI
+  時解鎖卡過一次（11-18 再試 5 次都正常）；GPU、media、音訊、Data 盤還只有 MMIO 驅動（輸入兩種都行）。iPadOS 自寫 PCIe 主橋未開始。
   → [細節](todo/pcie-msi.md)
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
