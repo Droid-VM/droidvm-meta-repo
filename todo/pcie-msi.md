@@ -46,7 +46,7 @@
 | macOS 27 原 MMIO 設定 | 開機、en0、GPU |
 | iPadOS 27 | Data、SpringBoard、GPU 12 clients 0 逾時、en0；guest 裡 ioreg 讀到電池 79%、4077 mV |
 | Ubuntu | 14 個 PCI 裝置、上網、crosvm 沒有 BAR 等待訊息（這台沒開電池） |
-| Windows 11 | 這輪沒開（要在系統內關機，否則下次進 WinRE） |
+| Windows 11（開 USB） | 開到桌面、有線網路已連線、tap 雙向有流量；crosvm 沒有 BAR 等待或 `MMIO-UNMAPPED`；裝置管理員的「其他裝置」（PCI 裝置 0:10、0:12 與 4 個 ACPI 裝置）都是 Code 28 沒驅動，沒有資源衝突；在系統內 `shutdown /s /t 0` 關機，crosvm 正常結束、池子回滿 |
 
 ### 工具：kernel 檔案信箱的 IORegistry（device efde148）
 

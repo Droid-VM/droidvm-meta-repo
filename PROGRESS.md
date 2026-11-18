@@ -230,7 +230,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 - ⬜ **11-16** PCIe／MSI 後續：Windows 拿得到 MSI 幀但驅動仍走 INTx（原因未查）；App payload 裡的 edk2 還是舊的（5566 手動換了，11-17 換成 ee11a29；
   5567／5568 沒動，舊韌體下 App 自動不開）。macOS：xHCI 驅動等不到 AppleUSBHostResources（先不放進 KC）、網卡在 PCI 時解鎖卡過一次；
-  GPU、media、我們的輸入、音訊、Data 盤還只有 MMIO 驅動。iPadOS 自寫 PCIe 主橋未開始。11-18 的 crosvm 改動 Windows 還沒開過。
+  GPU、media、我們的輸入、音訊、Data 盤還只有 MMIO 驅動。iPadOS 自寫 PCIe 主橋未開始。
   → [細節](todo/pcie-msi.md)
 - ⬜ **11-13** 構建線：27 已經能從 git 重現並有部署紀錄（見下方完成項）；還沒做的是 5567／5568 的部署、舊建置樹與測試
   留下的檔案的清理，以及要使用者決定的事（17 凍結與否、iPhone 要不要試、清理）。DarwinBoot 在 vCPU capacity
