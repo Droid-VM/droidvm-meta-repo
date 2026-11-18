@@ -54,7 +54,8 @@
   節點與其子樹帶屬性（`*` 全部）。沒桌面、沒網路時也能用，1 秒內回來。
 - 屬性用 `dictionaryWithProperties()` 複製，不走 `getProperty()`：IOPCIDevice 被讀 `IOInterruptSpecifiers` 時會順便把 MSI 向量
   定下來（IOPCIFamily 的 resolveInterrupts），會改變正在看的東西。
-- iPadOS 27／macOS 27 的 board core 都有（kind 9）；iPadOS 17 的信箱沒有。
+- iPadOS 27／macOS 27 的 board core 都有（kind 9）；iPadOS 17 的信箱沒有。iPadOS 27 已部署（5566，efde148 的 release，deploy27）：
+  1.2 秒拿到整棵樹，電池 79%、4073 mV；部署後主畫面、GPU 13 clients 0 逾時、en0 正常。
 
 ### 方法與陷阱
 
