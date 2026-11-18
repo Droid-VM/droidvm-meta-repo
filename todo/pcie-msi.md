@@ -10,8 +10,61 @@
 |---|---|---|
 | 1 | App 對 Gunyah VM 預設開 crosvm 的 MBI 幀（`--mbi-spis 64`），每台可關 | ✅ 11-16（app 505b4a6） |
 | 2 | DarwinBoot `--dynamic` 把 device tree 的 PCIe 主橋與 MBI 幀翻成 ADT 節點；macOS 一個 binary 兩種傳輸都能用 | ✅ 11-17（見下節） |
-| 3 | macOS 的 USB 直通（Apple 的 PCIe 橋、xHCI、USB 家族） | 卡住：xHCI 驅動等不到 AppleUSBHostResources（11-17） |
+| 3 | macOS 的 USB 直通（Apple 的 PCIe 橋、xHCI、USB 家族） | 卡住：xHCI 驅動等不到 AppleUSBHostResources（11-17）；開 xHCI 時網卡起不來的問題 11-18 修好 |
 | 4 | iPadOS 的 USB（自寫通用 PCIe 主橋） | 未開始，最後再評估 |
+
+## 開了 xHCI 時 PCI 網卡起不來（11-18，已修）
+
+### 原因
+
+- crosvm（arm64）的 goldfish 電池跟 PCI 32 位元 BAR 從同一個位址池配置，排在 crosvm 放的最後一個 BAR 後面；FDT 卻把整個池
+  （0x2000000+0x2000000）都宣告成 PCI 視窗。
+- macOS 的 IOPCIConfigurator 會自己重排所有 BAR（Linux 保留韌體配好的，所以沒事）。多一個 xHCI（64 KiB BAR，排第一）時，
+  排列變長，網卡的 BAR 落在 0x2018000+0x8000，蓋住電池（那次開機在 0x2019000）。沒開 xHCI 時排列只到 0x2018010，碰巧沒蓋到。
+- crosvm 的 `PciRoot::config_space_write` 搬 BAR 時 `mmio_bus.insert` 因重疊失敗，錯誤被 `let _ =` 丟掉：網卡從此沒有映射，
+  所有存取都是 `MMIO-UNMAPPED`（crosvm stderr），讀到 0。
+- guest 端看到的樣子：AppleVirtIOPCITransport 有發布、MSI 也分到了（INTID 84–87），但 AppleVirtIONetwork 的 start 在等完
+  IOBSD（IONetworkController::start 的 `waitForService("IOBSD")`，約 26 秒）之後失敗，沒有 en0 → IOTimeSync 沒介面 → 黑屏。
+  11-17 以為的「MSI 向量不夠」不成立（`--mbi-spis 128` 一樣、ioreg 看得到向量）。
+
+### 修法（crosvm da647254c，`wip/virtio-mmio` 與 `wip/hackintosh`）
+
+| 改動 | 說明 |
+|---|---|
+| 電池移出 PCI 視窗 | arm64 固定在 0x8000（MBI 幀後一頁），不再隨 VM 的 PCI 裝置數量移動；`add_goldfish_battery` 多一個固定位址參數，x86 照舊配置 |
+| 被拒的 BAR 搬移改成等待 | 重疊被拒的 BAR 記成 pending，之後任何裝置移走範圍就重試（真硬體上兩個裝置各解碼自己的 BAR，一次搬一個時本來就會短暫重疊） |
+| 解碼關著的裝置不留舊映射 | crosvm 建 VM 時不管 COMMAND 有沒有開解碼都把 BAR 掛上 bus；解碼關著時 guest 改寫 BAR（沒有驅動的裝置），舊位址的映射原本會一直留著 |
+| remove 只刪自己的 | `Bus::remove` 只比對位址，會刪到別的裝置；改用 `remove_owned`。裝置對自己已掛上的範圍再 insert 不算錯 |
+
+我們的三條 board 都用 DarwinBoot `--dynamic`，電池位址從 FDT 讀，搬家不用改 guest。macOS-DroidVM（離線從 FDT 做 ADT）要重做 ADT 才會跟上。
+
+### 驗證（5566，新 crosvm）
+
+| guest | 結果 |
+|---|---|
+| macOS 27，開機碟與網卡在 PCI、開 xHCI | AppleVirtIONetwork 掛上、en0、IPv4／IPv6、流量；沒有 `MMIO-UNMAPPED`；電池在新位址讀到 79% |
+| macOS 27 原 MMIO 設定 | 開機、en0、GPU |
+| iPadOS 27 | Data、SpringBoard、GPU 12 clients 0 逾時、en0；guest 裡 ioreg 讀到電池 79%、4077 mV |
+| Ubuntu | 14 個 PCI 裝置、上網、crosvm 沒有 BAR 等待訊息（這台沒開電池） |
+| Windows 11 | 這輪沒開（要在系統內關機，否則下次進 WinRE） |
+
+### 工具：kernel 檔案信箱的 IORegistry（device efde148）
+
+- `export.py ioreg [FILTER] OUTPUT`：整棵 service plane，ioreg 的格式（class、id、registered／matched、busy、retain），FILTER 命中的
+  節點與其子樹帶屬性（`*` 全部）。沒桌面、沒網路時也能用，1 秒內回來。
+- 屬性用 `dictionaryWithProperties()` 複製，不走 `getProperty()`：IOPCIDevice 被讀 `IOInterruptSpecifiers` 時會順便把 MSI 向量
+  定下來（IOPCIFamily 的 resolveInterrupts），會改變正在看的東西。
+- iPadOS 27／macOS 27 的 board core 都有（kind 9）；iPadOS 17 的信箱沒有。
+
+### 方法與陷阱
+
+- IOKit 的 `io=0x6`（probe／start）開機參數在 development kernel 裡有效：失敗的 probe 與超過 0.5 秒的 start 走 IOLog（序列埠
+  sbsa1 看得到）；`::start(...) failed` 走 kprintf，這台看不到。這次靠「AppleVirtIONetwork start took 26514 ms」確定 start 跑完了。
+- `unixnu.toml` 的 args 在開機碟（FAT）上，`mcopy` 改一份推上去就能加開機參數；還原推回原碟。
+- Apple kext 的反組譯：KC 裡 AppleVirtIO 有 1721 個符號；scratchpad 的 `kdis.py`（stub 經 chained fixup 解析成目標）與 `vt.py`
+  （vtable 槽位 → 方法名）。
+- 要讓網卡走 PCI：`virtio_transport` 設 pci、extra_options 拿掉 `--virtio-mmio-net`（mmio 模式下 App 會自己補），rig 的
+  `unixnu-vm.config.json` 與 daemon 兩邊都要改（scratchpad 的 `pcicfg.py orig|pci|pci-xhci` 一次改兩邊）。
 
 ## 第 2 步與「一個 binary」（11-17）
 
@@ -53,9 +106,7 @@ PCI 上的 virtio 裝置。iPadOS 也拿到這兩個節點，但它的 KC 沒有
 
 ### 沒解決的
 
-- **開了 xHCI 時 PCI 網卡起不來**：AppleVirtIOPCITransport 有發布，但 AppleVirtIONetwork 沒有；沒有 en0 → IOTimeSync 沒有介面可用
-  （assert）→ WindowServer 等不到 → 黑屏。不是 MSI 不夠（`--mbi-spis 128` 一樣）、也不是 xHCI 驅動（拿掉一樣）。需要 IORegistry
-  才看得出是哪一步沒過；那個狀態下沒有桌面可開 Terminal。
+- ~~開了 xHCI 時 PCI 網卡起不來~~：11-18 修好，原因是 crosvm 的電池位址與 BAR 重排（見上節）。
 - **xHCI 驅動**：`AppleUSBXHCIPCI` 的 start 卡在 `waitForMatchingService('AppleUSBHostResources')`（IOUSBHostFamily 的 IOResources
   personality，一直沒註冊）。macOS 線靠 ARMPlatformStandIn 頂替 AppleSMC 與多留幾個 USB kext 走通；我們的 KC 帶的是真的 AppleSMC。
   先從 KC 拿掉（c29df5c），VM 開了 xHCI 也只是沒人管。
