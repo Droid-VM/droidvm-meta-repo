@@ -36,7 +36,8 @@
 | 解碼關著的裝置不留舊映射 | crosvm 建 VM 時不管 COMMAND 有沒有開解碼都把 BAR 掛上 bus；解碼關著時 guest 改寫 BAR（沒有驅動的裝置），舊位址的映射原本會一直留著 |
 | remove 只刪自己的 | `Bus::remove` 只比對位址，會刪到別的裝置；改用 `remove_owned`。裝置對自己已掛上的範圍再 insert 不算錯 |
 
-我們的三條 board 都用 DarwinBoot `--dynamic`，電池位址從 FDT 讀，搬家不用改 guest。macOS-DroidVM（離線從 FDT 做 ADT）要重做 ADT 才會跟上。
+我們的三條 board 都用 DarwinBoot `--dynamic`，電池位址從 FDT 讀，搬家不用改 guest。macOS-DroidVM 也不用改：它的 VM 沒開電池（CI 用的
+`configs/k27-generated.dtb` 沒有 goldfish 節點，ADT 也不做電池節點），每次 prepare 都從手機當下的 FDT 重做 ADT，PCI 視窗與其他位址都沒變。
 
 ### 驗證（5566，新 crosvm）
 
