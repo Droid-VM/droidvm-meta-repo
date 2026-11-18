@@ -13,6 +13,57 @@
 | 3 | macOS 的 USB 直通（Apple 的 PCIe 橋、xHCI、USB 家族） | ✅ 控制器與埠 11-18（device 8d1b84c）；裝置端沒實測（手機上沒插裝置） |
 | 4 | iPadOS 的 USB（自寫通用 PCIe 主橋） | 未開始，最後再評估 |
 
+## 11-18 晚：GPU、media、音訊、Data 盤也接上 PCI
+
+使用者：「都接上去」。四個驅動都能接 PCI 上的 virtio 裝置了，macOS 的 GPU、輸入、音訊、media、Data 盤、網卡、開機碟、USB 可以全部走 PCI
+（OS 映像仍是 MMIO：開機的根是我們的 NativeVirtioBlock 驗證過的映像）。
+
+| 驅動 | PCI 上怎麼找到裝置 | 注意 |
+|---|---|---|
+| GPU（`DroidVMVirtioGpu.cpp`） | 沒有 `/arm-io/virtio-gpu` 時 `droidvm_vio_pci_take(16)` | 顯示驅動在 PCI 列舉之前就啟動：`take` 在 PCI 主橋還沒發布任何 function 時等它（上限 10 秒），之後再給 1 秒讓 nub 發布完；3D 用的 `drm-host-pool` 改從 `/arm-io/pcie` 拿 |
+| 音訊（`DroidVMVirtioSnd.c`） | 沒有 `/arm-io/virtio-snd` 時 `take(25)` | Apple 的 AppleVirtIOSound 原本會接走它 |
+| media（`DroidVMVirtioMedia.c`） | 視窗之後再逐個 `take(48)` | 池用 `/arm-io/pcie` 的 `media-host-pool`（crosvm 有池時不宣告共享記憶體 BAR） |
+| Data 盤（`DroidVMDataStore.c`） | 沒有 `/arm-io/data-store` 時 `take(2, "data-store")` | 佔住 function 的 class 對每個 virtio-blk 讀一次 block 0：有 `DroidVMDataStore` 標籤才佔住（`DroidVMRole`），其他磁碟照舊給 Apple |
+
+共通的部分：
+
+- `DroidVMVirtioPciNub.cpp`（DroidVMGicMsi kext）的 personality 改成 `0x10421af4 0x10501af4 0x10521af4 0x10591af4 0x10701af4`。
+- `DroidVMVirtioPciWatch.cpp` 改成各驅動 kext 共用：`droidvm_vio_pci_take(type, role, wait_ms)`（開機時掃一次的驅動）與
+  `droidvm_vio_pci_watch(type, add)`（輸入，裝置隨時來）。
+- DarwinBoot e27c1c2：`/arm-io/pcie` 也帶 `drm-host-pool`、`media-host-pool`（沒有 MBI 幀時 ADT 不變）。
+- 建置：macOS 的板級 kext 一律 `-DDROIDVM_VIRTIO_PCI=1`；kext 規格多一個 `sources_macosx`（只在 macOS 加的來源）；Storage kext 的
+  建置腳本在 macOS 加傳輸層。
+- macOS 內建開機參數加 `ml-timeout-report-phy-read-delay=0`、`ml-timeout-report-phy-write-delay=0`：development kernel 把每個
+  `ml_io_read/write`（Apple 的 PCI 驅動走這個）和中斷遮蔽逾時（500 µs）比，超過就 panic；VM 裡每次存取都 trap 到 crosvm，
+  xHCI 驅動 reset 控制器那次用了 557 µs（panic「Write to IO vaddr … paddr 0x2000020 (value: 0x2) timed out」）。
+
+陷阱：
+
+- **Data 卷偶爾來不及**（全 PCI 時約 1/4 次開機）：核心在根掛好後（`load_init_program`）才問 NativeRamBlock 要 Data 卷
+  （`native_ram_block_volume_seed`，Data 盤也是這時才開），NativeRamBlock 在 IOBSD 時和根磁碟一起被配對；根贏了這場競態時它的磁碟
+  還沒註冊（根是 disk7s1，好的開機是 disk8s1）→ panic「offline scratch Data mount failed: 2」。MMIO 時也是同一場競態，只是都贏。
+  修法：儲存 kext 交給核心的這個 hook 包一層，找不到時等（最多 30 秒）。另外 `take` 把「佔住 function 的 class 還在 start、還沒
+  發布屬性」也算配對中（防禦性的，disk 的 start 會先讀 block 0）。
+- **那個 panic 看起來像凍住**：panic 的 CPU 停下其他 CPU 時，有一顆正印 console 印到一半（console 停在半行），panic 的 CPU 在
+  `console_suspend()` 等它 → 互卡；全域的 `debugger_current_op` 還是 0、panic 區沒有紀錄（panic.py 說「not a panic」）。真正的
+  原因在那顆 CPU 的 per-CPU `debugger_state`（panic 字串、caller）。工具：scratchpad `m1118/kva.py`（走核心頁表：4 KiB、
+  從 0xffffffc000000000 起的 38 位元空間、256 項的第一級；讀每顆 CPU 的 debugger_state）。
+
+驗證（5566，macOS，GPU、輸入、音訊、media、Data 盤、網卡、開機碟、USB 全在 PCI）：
+
+| 設定 | 結果 |
+|---|---|
+| macOS，全部走 PCI（OS 映像除外） | 連續 6 次開機都正常（其中 4 次用上 Data 卷等待，晚 3.4–3.6 秒）；桌面由 PCI GPU 畫（Metal client、3D 提交）、鎖定畫面的 Aerial 走 PCI media 解碼、afplay 走 PCI 音訊（821 個週期、有中斷）、鍵盤與觸控、Data 盤讀寫 |
+| macOS 原本的 MMIO 設定 | 所有驅動照舊走 MMIO（GPU 中斷 51、Data 盤、音訊、media、7 種輸入），沒有任何 PCI 佔用、沒有等待 |
+| iPadOS 27 | Data 盤、音訊（中斷）、media、6 種輸入與 HID 服務、GPU 13 clients、en0 |
+
+5566 結束時跑 macOS 原本的 MMIO 設定（最終版）。`m1118/pcicfg.py` 多了 `pci-all`（GPU、音訊、media、輸入、Data 盤都走 PCI；
+Data 盤改成 `--block`）。
+
+沒解決的：Data 卷在全 PCI 時晚 3.5 秒的原因沒查（有等待就不會 panic）；panic 時與 console 互卡會讓 panic 看起來像凍住（XNU 本身的
+行為，用 kva.py 看）。
+
+
 ## 11-18 下午：上次列的後續依序處理
 
 使用者：「把這些修正按順序做完」（上次報告「還沒做的」那張清單）。結果：
@@ -25,7 +76,7 @@
 | 4 | macOS 的 USB（xHCI）驅動 | ✅ 起來了（device 8d1b84c），見下 |
 | 5 | 網卡走 PCI 時解鎖卡住 | 沒重現：PCI＋USB 設定下開機自動上鎖後解鎖 1 次、手動鎖定解鎖 4 次都正常 |
 | 6 | MSI 沒分散到各 CPU | 其實有分散，是讀回值誤導（ArmCpu 652675b），見下 |
-| 7 | 我們自己的驅動加 virtio-pci | 輸入驅動完成（device a615820），見下；GPU、media、音訊、Data 盤還沒做 |
+| 7 | 我們自己的驅動加 virtio-pci | 輸入（device 67e84ee）；GPU、media、音訊、Data 盤 11-18 晚也完成（上一節） |
 
 ### 4. USB：KC 連結工具把 IOUSBHostFamily 的 personality 拿掉了
 
@@ -190,7 +241,7 @@ PCI 上的 virtio 裝置。iPadOS 也拿到這兩個節點，但它的 KC 沒有
   等訊息，kernel 沒卡）；之後同設定手動上鎖再解鎖正常，那個自動上鎖沒再出現，沒能重現。3 次解鎖 1 次。
 - ~~**MSI 分散到各 CPU 沒效果**~~（11-18：其實有效，是 Gunyah 讀 IROUTER 永遠回 0，見最上節）：`armcpu_spi_distribute` 寫 IROUTER 後讀回都是 0，全部 MSI 仍由 CPU 0 處理（照樣能用）。
 - **macOS 沒有任何網卡就開不到桌面**（原本就這樣）：IOTimeSync 要一個網路介面的位址當時鐘 ID。
-- **我們自己的驅動還只有 MMIO**：GPU、media、音訊、Data 盤（擁有者鏈驗證）；輸入 11-18 兩種都行了（見最上節）。這些類別放
+- ~~**我們自己的驅動還只有 MMIO**~~：11-18 全部兩種都行了（輸入、GPU、media、音訊、Data 盤，見最上面兩節）。這些類別放
   PCI 時目前沒人接；要給這幾個驅動加一層 virtio-pci 傳輸（IOPCIDevice personality、modern capability、MSI-X），之後才算「兩種都能用」。
   Apple 有驅動的類別（block、net、console、entropy、基本鍵盤滑鼠、sound）已經兩種都行。
 - App 的 `virtio_transport` 是整台 VM 一個選項；要逐類別選，現在只能靠 extra_options。
