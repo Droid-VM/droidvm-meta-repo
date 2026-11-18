@@ -299,6 +299,36 @@ Virtualization）內容都已在。
 - Windows 自己關機那次，10 秒後池子只回到 2048/3072（少約 1000 頁，orphan 0）；下一次 `vm.sh start` 用 acquire=3 補滿了。
   只看到這一次，原因沒查。
 
+### 11-19 再確認（使用者：「先幫我確認 host 功能是不是都合併過來了（包含 macOS 功能新開發的功能）」）
+
+**原始碼：都在。** 這次不限日期，Droid-VM 下每個 host repo 的每個分支都跟 `wip/hackintosh`（沒有的就跟預設分支）比：
+
+- 各 repo 的 `macOS` 分支（macOS 線的 host 分支）相對 `wip/hackintosh` 都是 ahead 0：crosvm、virglrenderer、virtio-media、
+  v4l2r、edk2-gunyah、DroidVM-Prebuilt-Root、mesa、gfxstream、NativeMobileDisplay。例外兩個都不用收：gunyah_host_mod 623f8e7
+  （作者版 `msm_prime`，和我們的 4e6d10a 同功能）；DroidVM-Prebuilts d0df25b50（bot 由同一個 Prebuilt-Root f7c6ce8 產的，
+  manifest 和 `wip/hackintosh` 的逐位元相同）。
+- macOS-DroidVM（`macOS` 分支）文件引用的 host commit：crosvm 14084603f、938e2e70d、9c63a289d、a62d621d9、b7960bae6、d7fdd3079、
+  fe24182b6，virtio-media d509294 都是 `wip/hackintosh` 的祖先；crosvm b4f3cf04d（k27/TODO.md 的 USERPTR 單段映射）是 rebase 前的
+  編號，同一改動是 9da9b17d1，在 `wip/hackintosh`；24af265 是 macOS-DroidVM 自己的 commit（guest 開機參數），不是 App。
+- 11-17 之後沒有新的 macOS 線 host commit；舊分支（11-13 以前）的內容 11-17 已比過。
+
+**沒合，不屬於 macOS 線（要使用者決定）**：App `dev`／`webui`（226 個 commit，WebUI＋daemon 服務化，配套 DroidVM-Daemon、
+DroidVM-WebUI）；leehe-byte 的 UVC 攝影機（11-18 晚又推到 DroidVM-Daemon `dev`：`--uvc-camera`、VPU 開關、大頁對帳死鎖），它要的
+crosvm 28054c77 不在 Droid-VM/crosvm 的任何分支，只以二進位存在 DroidVM-Prebuilts 的 `feat/uvc-vpu`；外部 PR：App #95（Android
+觸控板擷取）、#93（daemon fd 重複 close）、#92（Windows SAC 換行），crosvm #12（rutabaga 資源 reset，Windows WDDM 線）。
+
+**打包：沒跟上。** App 首次執行解開的 runtime 是 DroidVM-Prebuilt-Root `manual-build/` 裡手動放的二進位，`wip/hackintosh` 上：
+
+| 檔案 | 最後更新 | 缺什麼 |
+|---|---|---|
+| `usr/bin/crosvm` | 10-27 e6302e457（crosvm 0f2db62ae） | `--mbi-spis`、`--virtio-mmio-snd`／`-console`／`-media`、震動、磁力計、觸控筆，11-13 合進來的 macOS 線（msm_vidc 直通、WebRTC、xHCI MSI-X、AAudio callback），11-18 的電池搬家與 BAR 修正 |
+| `libvirglrenderer.so`、`libvulkan_freedreno.so` | 09-02 | drm2kgsl 之後的全部（優先權修正、11-13 合併） |
+| `edk2-gunyah.fd` | 09-09 | MBI 用的空間（App 因此不開 MSI，已知）、PPTT |
+| `udmabuf-gki-*.ko` | 08-28 | `msm_prime`（msm_vidc 直通） |
+
+`wip/hackintosh` 建的 APK 配這份 payload，MMIO 模式有音效卡時會把 `--virtio-mmio-snd` 交給不認得它的 crosvm。5566 能跑是因為 crosvm、
+edk2、host Turnip 都是手動換的。另外 App 在 MMIO 模式不會自動加 `--virtio-mmio-media`（5566 的 VM 是 extra_options 帶的）。
+
 ### VPU 多後端
 
 host 選後端，guest 自己適配。crosvm 的 `--virtio-media kind=decoder,backend=(mediacodec,auto,msm-vidc)`，App 的圖形頁「解碼後端」。
