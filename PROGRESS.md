@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-21** vmpkg 打包器（`make-vmpkg.py`）：release 加機型範本打成 App 能匯入的 vmpkg，iPadOS 27（9.7 GB）與 macOS 27（12.4 GB）都在 5566 上從 Mac 建置、打包、上手機、匯入到開機走通（iPad 到鎖定畫面、Mac 到桌面，綁核自動換算、網卡接上、Data 稀疏）；格式也用 App 自己的讀取程式碼驗過（device 28819f5、283f251）→ [細節](todo/vmpkg-pipeline.md)（第 12 節）
 - ✅ **11-21** 2x 縮放補丁不再綁 24A446：board.toml 只寫上限高度（1920），建置時從該版 shared cache 照程式在做的事找出兩條 QuartzCore 指令（認不出就讓建置失敗）；24A446 找到的與原本寫死的逐位元相同，macOS 27、iPadOS 17 的快取也都找對了，5566 上 kernel 套用 2 個（device 051f787）→ [細節](todo/vmpkg-pipeline.md)（第 11 節）
 - ✅ **11-21** UniXNU 的 VM 設定不再寫死：OS 映像與 Data store 變成 VM 自己的磁碟，音效卡、視訊加速、記憶體池、電池（新周邊）都是 App 的設定，`extra_options` 是空的；空白的新磁碟第一次開機自己變成 Data store；App 自動一顆 vCPU 綁一顆核心（`cpu_pin_auto`，vmpkg 匯入時換算成這支手機的核心；XNU guest 不綁核會因 vCPU 被搬動而當掉）；DarwinBoot 在 capacity 相同時不再全標 P；匯入改成稀疏寫出。5566 上 iPadOS 27、macOS 27 都驗過（app 8fca948、ca5db51，device be12c79、3eab5bb，DarwinBoot 7baa221，fork 8789b8d）→ [細節](todo/vmpkg-pipeline.md)（第 10 節）
 - ✅ **11-18** 我們的 GPU、media、音訊、Data 盤驅動也能接 PCI 上的 virtio 裝置：macOS 可以除 OS 映像外全部走 PCI，連續 6 次開機正常；順帶修掉 Data 卷與根磁碟的開機競態（全 PCI 時約 1/4 次 panic）、關掉 VM 裡不適用的 MMIO 逾時 panic（device c4b6a7a，DarwinBoot e27c1c2，fork dba62c1）→ [細節](todo/pcie-msi.md)
@@ -257,9 +258,9 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   guest 編碼佇列 64 幀滿了就讓 session 失敗；App 兩個後端預設仍是 MediaCodec。→ [細節](todo/builds.md)
 - ⬜ **11-19** host 原始碼都已合進 `wip/hackintosh`（含 macOS 線新功能），但 App 打包的 runtime（DroidVM-Prebuilt-Root `manual-build/`）沒跟上：crosvm 是 10-27、virglrenderer／host Turnip 09-02、edk2 09-09、udmabuf 沒有 `msm_prime`；
   App 在 MMIO 模式不會自動加 `--virtio-mmio-media`。webui 線、UVC 攝影機、外部 PR 沒合，要使用者決定。→ [細節](todo/builds.md)（第 7 節 11-19）
-- ⬜ **11-21** 構建流水線（`--os`、`--device ipad|iphone|mac` → App 可直接匯入的 vmpkg）：倉庫盤點、設計、vmpkg 格式、兩份沒有手機資訊的
-  VM 範本都有了，寫死的設定也改掉了；還沒寫打包器（`make-vmpkg.py`）與一條指令的流水線。App 編輯器沒有自動綁核的開關；iPhone 和
-  MacBook 身分沒做，要使用者決定。→ [細節](todo/vmpkg-pipeline.md)
+- ⬜ **11-21** 構建流水線（`--os`、`--device ipad|mac` → App 可直接匯入的 vmpkg）：打包器與 iPad／Mac 的實測都做完了；還沒有一條指令的
+  `build-vmpkg.py`（建置＋打包）、Mac 直接推手機的正式流程、App 編輯器的自動綁核開關；四份綁 24A446 的資料要通用化；iPhone 要使用者決定
+  （MacBook 用 VirtualMac2,1）。 → [細節](todo/vmpkg-pipeline.md)
 - ⬜ **11-13** host 合併後還沒驗證的：Windows guest（11-17 開到桌面、連網、PPTT 生效；xHCI、游標沒測）、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（macOS guest 11-15 驗過；基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率
   下限對所有 guest 生效，耗電沒量；合併後的音訊只看了日誌沒用耳朵聽。

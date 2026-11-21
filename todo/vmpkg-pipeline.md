@@ -4,7 +4,8 @@
 vmpkg 可以直接 app 匯入使用。流水線過程可以指定 ios/macos 版本，設備類型（ipad 還是 iphone 還是 macbook）」
 
 第 1 節是倉庫清單，第 2 節是現在的流程和它離「App 匯入」還差什麼，第 3–5 節是設計與 vmpkg 格式，第 6–7 節是 App 端要補的與還沒驗證的，
-第 8 節是分階段的做法，第 9 節是要使用者決定的事，第 10 節是 11-21 把 VM 設定裡寫死的部分改掉。建置樹、rig 與 17／27 兩條線的現況見 [builds.md](builds.md)（第 2–3 節）。
+第 8 節是分階段的做法，第 9 節是要使用者決定的事，第 10 節是 11-21 把 VM 設定裡寫死的部分改掉，第 11 節是縮放補丁的通用化，
+第 12 節是打包器與 iPad／Mac 的實測。建置樹、rig 與 17／27 兩條線的現況見 [builds.md](builds.md)（第 2–3 節）。
 
 ## 1. XNU guest 相關的倉庫
 
@@ -168,7 +169,7 @@ resolve → build（Mac）→ package（make-vmpkg.py）→ verify（格式、�
 
 ## 8. 分階段的做法
 
-1. **先打包現有的兩個組合**（`ipad` 加 27.0.1、`mac` 加 27.0.1）：`make-vmpkg.py`（含格式驗證）；在 5566 用 App 匯入並開機。
+1. ✅ **先打包現有的兩個組合**（`ipad` 加 27.0.1、`mac` 加 27.0.1）：`make-vmpkg.py`（含格式驗證）；在 5566 用 App 匯入並開機（第 12 節）。
    11-21 已做完的前置：兩份 VM 範本（`ipados27/vmpkg/`）、App 的稀疏匯入、`--virtio-mmio-media`、電池周邊、自動綁核（第 10 節）。
 2. **一條指令**：`build-vmpkg.py --os --device` 把 build 與 package 包在一起；組合表放在裝置 repo（`vmpkg/targets.toml`）。
 3. **整理機型 profile**：把綁著「一版 build、一個機型」的資料搬進每個組合自己的目錄，讓「加一個組合」只是加一個目錄和一組資料。
@@ -179,7 +180,7 @@ resolve → build（Mac）→ package（make-vmpkg.py）→ verify（格式、�
 
 1. ~~App 附帶的 runtime 要不要更新~~：11-21 使用者說先假設 `wip/hackintosh` 的 crosvm 就是主線（第 6 節第 3 點）。
 2. **iPhone 要不要開始**：11-13 的建議是先不開、之後限時試作；這次流水線把它列成了參數。
-3. **「macbook」指的是什麼**：只要 macOS（現在的 VirtualMac2,1 就夠），還是要真的 MacBook 機型身分。
+3. ~~「macbook」指的是什麼~~：11-21 使用者：「macbook 先用 vm 就好」——VirtualMac2,1。
 4. **vmpkg 要不要發布、發到哪裡**：見第 4 節第 5 點的授權問題。
 
 ## 10. 11-21：VM 設定裡寫死的部分改掉
@@ -215,9 +216,10 @@ bootloader）。App 的開機分頁有「自訂 UEFI 韌體」，vmpkg 也能帶
 - 空白 16 GiB 稀疏檔當 Data store：第一次開機寫上標籤（`DroidVMDataStore` + 1），NativeRamBlock 是「Fresh」（state 3）；第二次開機
   「接續」（state 2），資料有存下來。
 - **不綁核開不了機**：舊 DarwinBoot 把六顆都標 P → `sched_clutch.c` 的 `low_node != high_node` assert panic；新 DarwinBoot 過了這關，
-  但 DriverKit 的 HID 驅動連續當掉到 kernel panic（「crashed too many times」），locationd 有 PAC 失敗。同一個 build、同一份 Data，綁核就
-  正常：vCPU 被 Gunyah 搬動，和 10-26 的記憶體錯亂同一類（XNU 有些 TLB 清除只做在目前這顆實體核心）。所以 XNU guest 一律綁核，
-  由 `cpu_pin_auto` 自動做。
+  但 DriverKit 的 HID 驅動連續當掉到 kernel panic（「crashed too many times」）。同一個 build、同一份 Data，綁核就正常：vCPU 被 Gunyah
+  搬動，和 10-26 的記憶體錯亂同一類（XNU 有些 TLB 清除只做在目前這顆實體核心）。所以 XNU guest 一律綁核，由 `cpu_pin_auto` 自動做。
+  （更正：當時也看到 locationd 的 PAC 失敗（subcode `0xdac11a30`），但它在綁核、全新 Data 的開機也會出現——空白 store 測試的第二次開機、
+  vmpkg 匯入的 iPad 第一次開機都有——所以不是不綁核的證據，是全新 Data 上 locationd 自己的問題，還沒查。）
 - `cpu_pin_auto`（iPadOS 與 macOS 各一次）：算出 `0=2:1=3:2=4:3=5:4=6:5=7`、capacity 762×4／1024×2、兩個叢集、virtual cpufreq，
   跟 rig 手設的一樣；兩台都正常開機。
 - App 單元測試：PortableDevicesTest、SparseImportTest、AutoPinTest，加上相鄰的 CodecDeviceConfig、CrosvmMediaPool。
@@ -274,3 +276,53 @@ Data、SpringBoard、13 個 GPU client 正常。
 
 其他還綁著 24A446、換版本要重做的資料（[builds.md](builds.md) 第 4 節）：`fileset-reviewed.json`、`legacy-display-24A446.json`、
 `hid-device-24A446.json`、profile 的 `original-classes.json`。
+
+## 12. 11-21：打包器，iPad 與 Mac 的 vmpkg 從建置到 App 匯入開機都走通
+
+使用者：「macbook 先用 vm 就好，先做 ipad/mac 的」——`--device mac` 就是 VirtualMac2,1。
+
+**打包器**（device 28819f5）：`ipados27/scripts/make-vmpkg.py --release DIR --device ipad|mac --out NAME.vmpkg [--name --screen WxH@HZ
+--memory-mb --cpus --data-gib --volume-mib --level]`
+
+- VM：`ipados27/vmpkg/<device>.vm.json`，套上名稱、畫面、記憶體、vCPU 數。
+- 磁碟：release 的（大小與 SHA-256 對 `release.json`；要乾淨、要是該機型的 OS），加一顆新的 Data store（標籤＋全 0；iPad 16 GiB、
+  Mac 32 GiB）。
+- 網卡接封包裡唯一的網路 `net0`（接 Wi-Fi 的 L2 橋）；App 匯入時可選「加入手機現有的」或「新建」。
+- 格式照 App（第 5 節）；預設分卷 500 MiB；manifest 多一個 App 不讀的 `droidvm_release`（commit、seed、補丁、雜湊）。
+- 寫完照 App 的讀法讀回來驗證（大小、CRC32、解壓、tar 項目、每顆磁碟的 SHA-256）。
+- 也用 **App 自己的 Java 讀取程式碼**驗過小封包（暫用單元測試，測試 classpath 放真的 `org.json`）：分卷與單檔都讀得完，磁碟逐 byte
+  相同、Data store 稀疏（1 GiB 實佔 64 KiB）。
+
+**release 的來源**：
+
+- iPad：要「新 VM」的 release（不帶 `--generation`，自己的新 seed）——舊 generation seed 裡的 plugin 不被新 build 信任。
+  在正式樹 `ipados27`（更新到 fork 8789b8d、device 28819f5）用新產生的晶片 id 建：新 seed 68 秒，整體約 6 分鐘。
+- Mac：`gpumerge` 的 macOS release（generation seed 可以，macOS 的 plugin 在開機碟裡）。
+
+**5566 實測**（封包從 Mac 經這台主機串流到手機，`ssh cat | adb exec-in`，約 25 MB/s；用 daemon 的 `vm_import`，App 匯入畫面呼叫的就是它）：
+
+| | iPadOS 27 | macOS 27 |
+|---|---|---|
+| 封包 | 9.7 GB／原始 31 GB（20 卷），打包 1.5 分鐘 | 12.4 GB／原始 49 GB（26 卷），打包 2.5 分鐘 |
+| 傳到手機 | 398 秒 | 628 秒 |
+| 匯入 | 約 90 秒；VM 目錄實佔 14.4 GB（16 GiB Data 只佔 64 KB） | 約 2 分鐘；實佔約 16.8 GB |
+| 匯入後的設定 | 綁核自動換算成 `0=2…5=7`、網卡加入 `br-wifi`、音效卡／陀螺儀／電池／視訊加速、`extra_options` 空、韌體用 App 內建 | 同左 |
+| 開機 | Data（全新 store）、SpringBoard、13 個 GPU client、網路；App 畫面上是 iPadOS 27 預設桌布的鎖定畫面 | 直接到桌面（Finder、Dock、選單列電池），網路；全新 Data 跳出「鍵盤設定輔助程式」 |
+
+兩台測完都停機、從 daemon 刪掉、刪檔（測試用的；封包留在 Mac 的 `/Volumes/DATA/UniXNU/vmpkg/`）。主 iPadOS 27 VM 已開回來。
+App 的匯入畫面在完成時會把 VM、磁碟、網路寫進 App 自己的設定檔；走 IPC 匯入的只在 daemon 記憶體裡，重啟就沒了。
+
+**手機空間**（使用者 11-21 同意刪）：`UniXNU27/data-store.img.before-x-20261102`（6.4 GB）、`UniXNU27fresh`（3.5 GB）、
+`UniXNU27/droidvm-disk.{smp,amp}.img`（0.6 GB）、iPadOS 17 VM 目錄 `UniXNU`（11.4 GB）。手機從 24 GB 變成 46 GB 可用。
+App 裡「UniXNU (DroidVM)」（17）那筆 VM 還在，但它的檔案已經沒了。
+
+**陷阱**：
+
+- `adb exec-in` 結束時手機端可能還在寫：推完要等檔案大小穩定再比（`stat` 太早會差 1 MiB）。
+- rig 的工具用命令列裡的「UniXNU」認 VM；vmpkg 匯入的 VM 名字不一樣：rig.env 設 `VM_MATCH`（device 283f251），VM id 的前綴就行。
+- `vm.sh` 要 rig 目錄裡有 `unixnu-vm.config.json`；`peek.py` 的位址換算要 `out/handoff.env`（`vm.sh start` 從主控台抓）。
+- 全新 Data 第一次開機：locationd 會有 PAC 失敗（`0xdac11a30`，綁核也會），iPad 的 AegirPoster 也當過一次；沒查。
+- 大量傳輸時 Wi-Fi adb 會斷幾秒（hostwatch 報 UNREACHABLE／BACK），手機沒重開。
+
+**還沒做的**：`build-vmpkg.py` 一條指令（建置＋打包）；Mac 端直接推手機的流程（現在是測試用的暫用腳本）；四份還綁著 24A446 的資料；
+iPhone（要使用者決定）。
