@@ -255,6 +255,9 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   guest 編碼佇列 64 幀滿了就讓 session 失敗；App 兩個後端預設仍是 MediaCodec。→ [細節](todo/builds.md)
 - ⬜ **11-19** host 原始碼都已合進 `wip/hackintosh`（含 macOS 線新功能），但 App 打包的 runtime（DroidVM-Prebuilt-Root `manual-build/`）沒跟上：crosvm 是 10-27、virglrenderer／host Turnip 09-02、edk2 09-09、udmabuf 沒有 `msm_prime`；
   App 在 MMIO 模式不會自動加 `--virtio-mmio-media`。webui 線、UVC 攝影機、外部 PR 沒合，要使用者決定。→ [細節](todo/builds.md)（第 7 節 11-19）
+- ⬜ **11-21** 構建流水線（`--os`、`--device ipad|iphone|mac` → App 可直接匯入的 vmpkg）：已盤點 guest 端的倉庫、設計好流水線並查清 App 的 vmpkg 格式，還沒實作。
+  差的是：VM 設定裡的磁碟路徑寫死、Data store 匯入時會被實寫 16–32 GiB、App 附帶的 crosvm 太舊；iPhone 和 MacBook 身分都還沒做。
+  第一步是打包現有的 iPad／Mac 27.0.1。→ [細節](todo/vmpkg-pipeline.md)
 - ⬜ **11-13** host 合併後還沒驗證的：Windows guest（11-17 開到桌面、連網、PPTT 生效；xHCI、游標沒測）、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（macOS guest 11-15 驗過；基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率
   下限對所有 guest 生效，耗電沒量；合併後的音訊只看了日誌沒用耳朵聽。
