@@ -1,6 +1,6 @@
 # iPadOS on DroidVM（UniXNU guest）：開發進度與交接
 
-更新：2026-11-18。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
+更新：2026-11-21。目標：讓 iPadOS 在手機（Snapdragon 8 Gen 3／8 Elite Gen 5、Gunyah）上的 DroidVM 裡能日常使用。
 App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A446，iPad17,3／iPad Pro 13" M5，arm64e）**；
 原本的 iPadOS 17.7.11（21H461，iPad7,1）10-29 之後沒有再建置。兩條線、建置樹與機型的盤點見 [todo/builds.md](todo/builds.md)。
 
@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-21** UniXNU 的 VM 設定不再寫死：OS 映像與 Data store 變成 VM 自己的磁碟，音效卡、視訊加速、記憶體池、電池（新周邊）都是 App 的設定，`extra_options` 是空的；空白的新磁碟第一次開機自己變成 Data store；App 自動一顆 vCPU 綁一顆核心（`cpu_pin_auto`，vmpkg 匯入時換算成這支手機的核心；XNU guest 不綁核會因 vCPU 被搬動而當掉）；DarwinBoot 在 capacity 相同時不再全標 P；匯入改成稀疏寫出。5566 上 iPadOS 27、macOS 27 都驗過（app 8fca948、ca5db51，device be12c79、3eab5bb，DarwinBoot 7baa221，fork 8789b8d）→ [細節](todo/vmpkg-pipeline.md)（第 10 節）
 - ✅ **11-18** 我們的 GPU、media、音訊、Data 盤驅動也能接 PCI 上的 virtio 裝置：macOS 可以除 OS 映像外全部走 PCI，連續 6 次開機正常；順帶修掉 Data 卷與根磁碟的開機競態（全 PCI 時約 1/4 次 panic）、關掉 VM 裡不適用的 MMIO 逾時 panic（device c4b6a7a，DarwinBoot e27c1c2，fork dba62c1）→ [細節](todo/pcie-msi.md)
 - ✅ **11-18** macOS PCI 後續依序處理：USB（xHCI）驅動起來了（KC 只留 roots 的 personality，IOUSBHostFamily 改列 root）；MSI 其實有分散到各 CPU（Gunyah 讀 IROUTER 永遠是 0，之前被讀回值誤導）；我們的輸入驅動能接 PCI 上的 virtio-input（觸控、鍵盤、筆、觸控板、感測器，MSI-X）；Windows 用新 crosvm 正常；iPadOS 部署了 ioreg 工具（device 8d1b84c、67e84ee，ArmCpu 652675b，fork f54247a）→ [細節](todo/pcie-msi.md)
 - ✅ **11-18** 開了 USB（xHCI）時 macOS 的 PCI 網卡起不來，修好了：crosvm 把 goldfish 電池配在 PCI 視窗裡，macOS 自己重排 BAR 時把網卡蓋在電池上，crosvm 拒絕映射又把錯誤丟掉，網卡的存取全落空。電池移到視窗外固定位址，被拒的 BAR 搬移改成等對方搬走再補上。5566 上 macOS PCI＋USB 有 en0、能上網；macOS 原設定、iPadOS 27、Ubuntu 照常。另加 kernel 檔案信箱的 IORegistry 匯出（`export.py ioreg`，沒桌面也能看 ioreg）（crosvm da647254c，device efde148）→ [細節](todo/pcie-msi.md)
@@ -255,9 +256,9 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
   guest 編碼佇列 64 幀滿了就讓 session 失敗；App 兩個後端預設仍是 MediaCodec。→ [細節](todo/builds.md)
 - ⬜ **11-19** host 原始碼都已合進 `wip/hackintosh`（含 macOS 線新功能），但 App 打包的 runtime（DroidVM-Prebuilt-Root `manual-build/`）沒跟上：crosvm 是 10-27、virglrenderer／host Turnip 09-02、edk2 09-09、udmabuf 沒有 `msm_prime`；
   App 在 MMIO 模式不會自動加 `--virtio-mmio-media`。webui 線、UVC 攝影機、外部 PR 沒合，要使用者決定。→ [細節](todo/builds.md)（第 7 節 11-19）
-- ⬜ **11-21** 構建流水線（`--os`、`--device ipad|iphone|mac` → App 可直接匯入的 vmpkg）：已盤點 guest 端的倉庫、設計好流水線並查清 App 的 vmpkg 格式，還沒實作。
-  差的是：VM 設定裡的磁碟路徑寫死、Data store 匯入時會被實寫 16–32 GiB、App 附帶的 crosvm 太舊；iPhone 和 MacBook 身分都還沒做。
-  第一步是打包現有的 iPad／Mac 27.0.1。→ [細節](todo/vmpkg-pipeline.md)
+- ⬜ **11-21** 構建流水線（`--os`、`--device ipad|iphone|mac` → App 可直接匯入的 vmpkg）：倉庫盤點、設計、vmpkg 格式、兩份沒有手機資訊的
+  VM 範本都有了，寫死的設定也改掉了；還沒寫打包器（`make-vmpkg.py`）與一條指令的流水線。App 編輯器沒有自動綁核的開關；iPhone 和
+  MacBook 身分沒做，要使用者決定。→ [細節](todo/vmpkg-pipeline.md)
 - ⬜ **11-13** host 合併後還沒驗證的：Windows guest（11-17 開到桌面、連網、PPTT 生效；xHCI、游標沒測）、KMS 接管與 WebRTC 輸出、Linux guest 的音訊與視訊（macOS guest 11-15 驗過；基本回歸
   已過）；Adreno 830 上 virglrenderer 會在任意 IB 邊界拆 submission（和 11-13 修的 GPU hang 同一類風險）；合併帶進的 GPU 頻率
   下限對所有 guest 生效，耗電沒量；合併後的音訊只看了日誌沒用耳朵聽。

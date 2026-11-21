@@ -4,7 +4,7 @@
 vmpkg 可以直接 app 匯入使用。流水線過程可以指定 ios/macos 版本，設備類型（ipad 還是 iphone 還是 macbook）」
 
 第 1 節是倉庫清單，第 2 節是現在的流程和它離「App 匯入」還差什麼，第 3–5 節是設計與 vmpkg 格式，第 6–7 節是 App 端要補的與還沒驗證的，
-第 8 節是分階段的做法，第 9 節是要使用者決定的事。建置樹、rig 與 17／27 兩條線的現況見 [builds.md](builds.md)（第 2–3 節）。
+第 8 節是分階段的做法，第 9 節是要使用者決定的事，第 10 節是 11-21 把 VM 設定裡寫死的部分改掉。建置樹、rig 與 17／27 兩條線的現況見 [builds.md](builds.md)（第 2–3 節）。
 
 ## 1. XNU guest 相關的倉庫
 
@@ -66,14 +66,14 @@ vmpkg 可以直接 app 匯入使用。流水線過程可以指定 ios/macos 版�
 **還差的**：
 
 1. **沒有 vmpkg 輸出。**
-2. **VM 設定搬不走。** rig 的設定把 OS 映像和 Data store 寫在 `extra_options`（`--virtio-mmio-block /data/media/0/…`），不是 `disks`；
-   音訊、media 的 `uid=` 也寫死。App 匯出只帶 `disks` 和韌體，匯入也只重寫這兩者的路徑：照現在的設定打包，換一支手機就找不到磁碟。
-3. **Data store 是在手機上生的**（`make-data-store.sh`：16–32 GiB 的稀疏檔，block 0 是標籤）。放進 vmpkg 壓縮後幾乎不佔空間，
-   但 App 匯入是逐 byte 寫出（`VMImportTask.copyEntry` 不跳過全 0 的區塊），手機會真的被寫掉 16–32 GiB。
-4. **韌體**：5566 上 iPadOS VM 用另外放的 `edk2-virtio-gpu.fd`，macOS VM 用 App 內建的；App 內建的 edk2 是 09-09 的。
+2. ✅ **VM 設定搬不走**（11-21 改掉，見第 10 節）。rig 的設定把 OS 映像和 Data store 寫在 `extra_options`
+   （`--virtio-mmio-block /data/media/0/…`），不是 `disks`；音訊、media 的 `uid=` 也寫死。App 匯出只帶 `disks` 和韌體，匯入也只重寫
+   這兩者的路徑：照原本的設定打包，換一支手機就找不到磁碟。
+3. ✅ **Data store 是在手機上生的**（11-21 改掉，見第 10 節）。原本是 `make-data-store.sh` 做 16–32 GiB 的稀疏檔、block 0 寫標籤；
+   放進 vmpkg 壓縮後幾乎不佔空間，但 App 匯入原本逐 byte 寫出，手機會真的被寫掉 16–32 GiB。
+4. ✅ **韌體**：不是蘋果專用（第 10 節）。11-16 起兩台都用 App 內建的 `edk2-gunyah.fd`；`edk2-virtio-gpu.fd` 是 17 時代的舊檔。
 5. **App 附帶的 runtime 太舊**（11-19 查到）：crosvm 是 10-27 的，沒有 `--virtio-mmio-snd`、`--virtio-mmio-console`、`--virtio-mmio-media`、
-   `--mbi-spis`。所以 MMIO 音訊、media 的 vmpkg 在「只裝了 App」的手機上開不起來；我們的手機能跑，是因為手動換過 binary。
-   **這是 vmpkg 能不能給別人用的前提**（第 9 節第 1 點）。
+   `--mbi-spis`。11-21 使用者：「crosvm 這邊等分支合併主線，先假設這個就是主線」——流水線照 `wip/hackintosh` 的 crosvm 與 edk2 設計。
 6. **unique chip id**（`--unique-chip-id`，平台 seed）現在每個 rig 一個。vmpkg 要嘛每次建置隨機產生，要嘛固定一個；同一個 vmpkg 匯入幾次，
    這些 VM 的 chip id 都一樣。
 7. **macOS 的 Data seed 要 root 權限才做得出來**：Mac 上沒有免密碼 sudo，現在是在 lima 裡做。
@@ -152,24 +152,24 @@ resolve → build（Mac）→ package（make-vmpkg.py）→ verify（格式、�
 
 ## 6. App 端要補的
 
-1. **匯入時稀疏寫出**：整塊都是 0 就 seek 跳過，最後 `setLength`。Data store 才不會真的寫滿，`os.img` 裡的空洞也省下來。
+1. ✅ **匯入時稀疏寫出**（app 8fca948）：整塊都是 0 就 seek 跳過，最後 `setLength`。Data store 才不會真的寫滿，`os.img` 裡的空洞也省下來。
    舊版 App 一樣讀得懂這種 vmpkg，只是會把空間寫滿。
-2. **MMIO 模式自動加 `--virtio-mmio-media`**（11-19 查到的缺口）。
-3. **App 附帶 runtime 的更新**（crosvm、virglrenderer、host Turnip、edk2、udmabuf）：要使用者同意，因為會經 CI 發到 DroidVM-Prebuilts，
-   影響每一個人。
+2. ✅ **MMIO 模式自動加 `--virtio-mmio-media`**（app 8fca948）。
+3. **App 附帶 runtime 的更新**（crosvm、virglrenderer、host Turnip、edk2、udmabuf）：使用者 11-21 說先假設 `wip/hackintosh` 就是主線；
+   真的更新 DroidVM-Prebuilt-Root 仍要使用者點頭（CI 會發到 DroidVM-Prebuilts，影響每一個人）。
 
 ## 7. 還沒驗證的
 
-- **iPadOS 全部磁碟走 MMIO、開機碟排第一個。** macOS VM 本來就是這樣，iPadOS 的範本則是開機碟走 PCI。兩邊是同一份驅動，但 iPadOS 沒在這個
-  順序下開過機。
+- ✅ **iPadOS 全部磁碟走 MMIO、開機碟排第一個**：11-21 驗過（第 10 節）。其實 5566 上的 iPadOS 27 VM 早就是 MMIO 傳輸（`virtio_transport`
+  mmio），只有 rig 的舊範本寫 pci。
 - **壓縮率**沒量。全是 0 的 Data store 幾乎不佔空間；OS 映像能壓多少要實測。
 - **同一個 vmpkg 匯入兩次**：兩台 VM 的 chip id 與 Data seed UUID 相同，各有自己的 Data store，照理沒事，但沒試過。
 - **建置只能在 Mac 上跑**（hdiutil、Apple 的工具鏈）。GitHub 代管的 macOS runner 磁碟偏小，CI 大概要用自己的 Mac；沒試過。
 
 ## 8. 分階段的做法
 
-1. **先打包現有的兩個組合**（`ipad` 加 27.0.1、`mac` 加 27.0.1）：`make-vmpkg.py`（含格式驗證）、兩份 VM 範本，App 補上稀疏匯入與
-   `--virtio-mmio-media`；在 5566 用 App 匯入並開機。這一步不用等任何決定。
+1. **先打包現有的兩個組合**（`ipad` 加 27.0.1、`mac` 加 27.0.1）：`make-vmpkg.py`（含格式驗證）；在 5566 用 App 匯入並開機。
+   11-21 已做完的前置：兩份 VM 範本（`ipados27/vmpkg/`）、App 的稀疏匯入、`--virtio-mmio-media`、電池周邊、自動綁核（第 10 節）。
 2. **一條指令**：`build-vmpkg.py --os --device` 把 build 與 package 包在一起；組合表放在裝置 repo（`vmpkg/targets.toml`）。
 3. **整理機型 profile**：把綁著「一版 build、一個機型」的資料搬進每個組合自己的目錄，讓「加一個組合」只是加一個目錄和一組資料。
 4. **iPhone**：限時試作（[builds.md](builds.md) 5.3 的建議），從社群的 iPhone17,x profile 起步。要使用者決定。
@@ -177,7 +177,63 @@ resolve → build（Mac）→ package（make-vmpkg.py）→ verify（格式、�
 
 ## 9. 要使用者決定
 
-1. **App 附帶的 runtime 要不要更新**（第 6 節第 3 點）。不更新的話，vmpkg 只能用在我們手動換過 binary 的手機上。
+1. ~~App 附帶的 runtime 要不要更新~~：11-21 使用者說先假設 `wip/hackintosh` 的 crosvm 就是主線（第 6 節第 3 點）。
 2. **iPhone 要不要開始**：11-13 的建議是先不開、之後限時試作；這次流水線把它列成了參數。
 3. **「macbook」指的是什麼**：只要 macOS（現在的 VirtualMac2,1 就夠），還是要真的 MacBook 機型身分。
 4. **vmpkg 要不要發布、發到哪裡**：見第 4 節第 5 點的授權問題。
+
+## 10. 11-21：VM 設定裡寫死的部分改掉
+
+使用者：「先把寫死的部分改掉，變成 app 可操作 or 開機時自動判斷」「crosvm 這邊等分支合併主線，先假設這個就是主線」
+「edk2 這個是蘋果專用的嗎？如果是，印象中有個自訂 edk2 的選項」。
+
+| 原本寫死的 | 現在 | 在哪 |
+|---|---|---|
+| OS、SystemOS、App 映像與 Data store：`extra_options` 裡 `--virtio-mmio-block /data/media/0/…` | VM 自己的 `disks`，`virtio_transport: mmio`（App 自己加各個 MMIO 開關）。guest 照內容認磁碟：DarwinBoot 把唯讀磁碟命名為 `virtio-mmio-N`、第一顆可寫的當 Data store；NativeVirtioBlock 照磁碟大小對 root policy。順序無所謂 | rig `vmportable.py`（device be12c79） |
+| 音效卡 `--virtio-snd …,uid=<這次安裝的 App uid>` | App 的 VirtIO 音效卡周邊（喇叭加麥克風，uid 由 App 自己填） | 既有設定 |
+| 解碼器 `--virtio-media kind=decoder,uid=…` 與 `--virtio-mmio-media` | App 的視訊加速開關（解碼與編碼兩個裝置、後端）；MMIO 時 App 自動加 `--virtio-mmio-media` | app 8fca948 |
+| `--pre-alloc drm-host-mb=8,media-host-mb=64` | `gpu_drm2kgsl_pool_mb`、`vpu_host_pool_mb` | 既有設定 |
+| `--battery type=goldfish` | 新的周邊「電池（goldfish）」（每台一個；舊設定 extra_options 裡已有就不重複） | app 8fca948 |
+| `--dump-device-tree-blob /data/local/tmp/…` | 拿掉（rig 除錯用；`vmportable.py --keep-debug` 保留） | |
+| Data store 要 rig 先寫好標籤 | 第一顆可寫的 MMIO 磁碟若 block 0 全是 0（App 建的新 raw 磁碟），第一次開機自己寫上標籤；只在讀寫模式，block 0 有任何東西就不碰，PCI 上仍要標籤 | device be12c79 |
+| vCPU 綁核（rig 手設 `0=2:…:5=7`） | `cpu_pin_auto`：VM 沒有自己的綁核時，App 在這支手機上一顆 vCPU 綁一顆核心（最強的幾顆，避開 cpu0／1，vCPU 0 給最弱的）；vmpkg 匯入時換算成明確的綁核，編輯器看得到也能改 | app ca5db51 |
+| DarwinBoot：capacity 全相同或沒有時全部標 P | 前一半 E、後一半 P | DarwinBoot 7baa221、fork 8789b8d |
+| 匯入逐 byte 寫 | 稀疏寫（全 0 的區塊跳過） | app 8fca948 |
+
+兩份沒有任何手機資訊的 VM 範本（vmpkg 的輸入）：`ipados27/vmpkg/ipad.vm.json`、`mac.vm.json`（device 3eab5bb，`vmportable.py template` 產生）：
+沒有 id、網卡不接任何網路、磁碟只寫檔名、`cpu_pin_auto` 取代核心編號、GPU worker 不指定核心。
+
+**edk2 不是蘋果專用。** edk2-gunyah 是所有 guest 共用的通用韌體；11-16 起 iPadOS 與 macOS 的 VM 都用 App 內建的 `edk2-gunyah.fd`
+（設定裡韌體留空）。`edk2-virtio-gpu.fd` 是 17 時代另外放的舊檔。`VIRTIO_GPU_ENABLE=FALSE` 只是編譯選項（給要 simplefb GOP 的
+bootloader）。App 的開機分頁有「自訂 UEFI 韌體」，vmpkg 也能帶一個（`boots` 的 kind `uefi`）；但照「`wip/hackintosh` 就是主線」，App
+內建的就是 ee11a29（a7903f0 之後，device tree 有 128 KB 空間），不需要另外帶。
+
+**驗證（5566，8 Elite Gen 5）：**
+
+- macOS 27 與 iPadOS 27 改成「磁碟加周邊加設定、`extra_options` 為空」：開機正常。iPadOS：Data、SpringBoard、GPU 12–14 個 client、
+  音訊輸出入各一個裝置有 client、media 裝置 found 2／up 2（解碼與編碼）、電池驅動；macOS：鎖定畫面的航拍（硬體解碼）、選單列電池圖示。
+- 空白 16 GiB 稀疏檔當 Data store：第一次開機寫上標籤（`DroidVMDataStore` + 1），NativeRamBlock 是「Fresh」（state 3）；第二次開機
+  「接續」（state 2），資料有存下來。
+- **不綁核開不了機**：舊 DarwinBoot 把六顆都標 P → `sched_clutch.c` 的 `low_node != high_node` assert panic；新 DarwinBoot 過了這關，
+  但 DriverKit 的 HID 驅動連續當掉到 kernel panic（「crashed too many times」），locationd 有 PAC 失敗。同一個 build、同一份 Data，綁核就
+  正常：vCPU 被 Gunyah 搬動，和 10-26 的記憶體錯亂同一類（XNU 有些 TLB 清除只做在目前這顆實體核心）。所以 XNU guest 一律綁核，
+  由 `cpu_pin_auto` 自動做。
+- `cpu_pin_auto`（iPadOS 與 macOS 各一次）：算出 `0=2:1=3:2=4:3=5:4=6:5=7`、capacity 762×4／1024×2、兩個叢集、virtual cpufreq，
+  跟 rig 手設的一樣；兩台都正常開機。
+- App 單元測試：PortableDevicesTest、SparseImportTest、AutoPinTest，加上相鄰的 CodecDeviceConfig、CrosvmMediaPool。
+
+**陷阱：**
+
+- `deploy27.sh --keep-plugin` 在 fork 換過 commit 之後不能用：plugin 會重建，新 release 只信任新的 cdhash，guest 裡留著的舊 plugin
+  被 AMFI 拒絕（GPU client 0）。照常部署（把 release 的 plugin 推進 guest）就好。
+- 從 generation 的舊 seed 起的全新 Data，帶的是舊 plugin，一樣不被信任。全新的 VM 要用不帶 `--generation` 的新 seed（vmpkg 本來就是）。
+- hostwatch 只認自己 rig 目錄的停機紀錄；在另一個 rig 停機，它會報 UNEXPECTED。
+- 停掉 App 的 daemon 時，手機的 adb（網路）會斷幾秒。
+- Mac 的正式樹 `ipados27` 還停在 fork 6efbb97（子模組 fetch 會報 `not our ref`）；11-17 之後的建置都在 `gpumerge`。
+
+**還沒做的：**
+
+- App 編輯器沒有 `cpu_pin_auto` 的開關：它只在範本與匯入時用；明確的綁核在編輯器裡照常能改。
+- macOS 的媒體現在也有編碼裝置（視訊加速開關一律加解碼與編碼），macOS 上的硬體編碼沒測。
+- 5567 的 rig 與 17 的範本（`unixnu-vm.template.json`）沒轉換。
+- 觀察到但沒查：兩個 guest 的時鐘都慢了一天多（鎖定畫面顯示 11-20 早上，實際是 11-21 下午）。
