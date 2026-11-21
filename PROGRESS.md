@@ -9,6 +9,7 @@ App Store 不在範圍內。10-30 起開發與測試都在 **iPadOS 27.0.1（24A
 
 ## 已完成
 
+- ✅ **11-21** 2x 縮放補丁不再綁 24A446：board.toml 只寫上限高度（1920），建置時從該版 shared cache 照程式在做的事找出兩條 QuartzCore 指令（認不出就讓建置失敗）；24A446 找到的與原本寫死的逐位元相同，macOS 27、iPadOS 17 的快取也都找對了，5566 上 kernel 套用 2 個（device 051f787）→ [細節](todo/vmpkg-pipeline.md)（第 11 節）
 - ✅ **11-21** UniXNU 的 VM 設定不再寫死：OS 映像與 Data store 變成 VM 自己的磁碟，音效卡、視訊加速、記憶體池、電池（新周邊）都是 App 的設定，`extra_options` 是空的；空白的新磁碟第一次開機自己變成 Data store；App 自動一顆 vCPU 綁一顆核心（`cpu_pin_auto`，vmpkg 匯入時換算成這支手機的核心；XNU guest 不綁核會因 vCPU 被搬動而當掉）；DarwinBoot 在 capacity 相同時不再全標 P；匯入改成稀疏寫出。5566 上 iPadOS 27、macOS 27 都驗過（app 8fca948、ca5db51，device be12c79、3eab5bb，DarwinBoot 7baa221，fork 8789b8d）→ [細節](todo/vmpkg-pipeline.md)（第 10 節）
 - ✅ **11-18** 我們的 GPU、media、音訊、Data 盤驅動也能接 PCI 上的 virtio 裝置：macOS 可以除 OS 映像外全部走 PCI，連續 6 次開機正常；順帶修掉 Data 卷與根磁碟的開機競態（全 PCI 時約 1/4 次 panic）、關掉 VM 裡不適用的 MMIO 逾時 panic（device c4b6a7a，DarwinBoot e27c1c2，fork dba62c1）→ [細節](todo/pcie-msi.md)
 - ✅ **11-18** macOS PCI 後續依序處理：USB（xHCI）驅動起來了（KC 只留 roots 的 personality，IOUSBHostFamily 改列 root）；MSI 其實有分散到各 CPU（Gunyah 讀 IROUTER 永遠是 0，之前被讀回值誤導）；我們的輸入驅動能接 PCI 上的 virtio-input（觸控、鍵盤、筆、觸控板、感測器，MSI-X）；Windows 用新 crosvm 正常；iPadOS 部署了 ioreg 工具（device 8d1b84c、67e84ee，ArmCpu 652675b，fork f54247a）→ [細節](todo/pcie-msi.md)

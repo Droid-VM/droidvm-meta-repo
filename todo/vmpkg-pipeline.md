@@ -237,3 +237,40 @@ bootloader）。App 的開機分頁有「自訂 UEFI 韌體」，vmpkg 也能帶
 - macOS 的媒體現在也有編碼裝置（視訊加速開關一律加解碼與編碼），macOS 上的硬體編碼沒測。
 - 5567 的 rig 與 17 的範本（`unixnu-vm.template.json`）沒轉換。
 - 觀察到但沒查：兩個 guest 的時鐘都慢了一天多（鎖定畫面顯示 11-20 早上，實際是 11-21 下午）。
+
+## 11. 11-21：2x 縮放補丁不再綁版本
+
+使用者：「印象中有個 2x scaling 的補丁，綁死版本，看這個能不能通用化」。
+
+那是 11-03 的兩個 QuartzCore 文字修補（讓 1920 像素高以下的 VM 畫面是 @1x）：board.toml 寫死 24A446 `dyld_shared_cache_arm64e.01` 的
+檔案偏移與 bytes。換一版 iPadOS，偏移和 bytes 都對不上，kernel 只會默默跳過（它只在原 bytes 相符時套用）。
+
+現在（device 051f787）：
+
+- **board.toml 只寫高度**：`[payload.adt] ui_scale_max_height = 1920`（macOS 設 0，不做）。
+- **建置時自己找**：`ipados27/scripts/find-ui-scale-fixups.py` 打開那一版 SystemOS cryptex 的 shared cache，照程式在做的事找兩條指令：
+  - `-[CADisplayMode preferredScale]`：用本地符號找。
+  - 「是不是虛擬機」的判斷：讀 `CADeviceIsVirtualized` 快取那個位元組（本地符號 `…is_virtualized`）的 `adrp`＋`ldrb`，以及測它的
+    分支（`cmp #1`＋`b.eq/ne`、`tbz/tbnz #0`、`cbz/cbnz`）。虛擬機那一側的第一條指令改成跳到另一側（跟 11-03 驗過的行為一樣，連
+    同一個也跳進那一側的模式旗標路徑）。
+  - 高度規則：方法裡唯一一個跟 1080 比的 64 位元比較，改成上限高度。
+  - 認不出來就讓建置失敗並說缺什麼，不會產生默默無效的補丁。
+- `build-droidvm-all.py` 的 payload 步驟跑它（SystemOS 映像複製到 `/tmp` 掛載；每個 OS 版本、找法、高度只找一次，結果存在 IPSW 旁），
+  寫 `build/ui-scale-fixups.txt`，`make-droidvm-adt.py --text-fixups-file` 讀它；`release.json` 多一個 `ui_scale_fixups`。
+
+驗證：
+
+| shared cache | 結果 |
+|---|---|
+| iPadOS 27 24A446 | 與 11-03 寫死的兩個補丁逐位元相同 |
+| macOS 27 26A434 | 子快取 `.03`、不同偏移；判斷是 `tbz` 不是 `cmp`。第一版只認「`ldrb`＋`cmp #1`」時在這裡抓錯成 Catalyst 的判斷，所以改用符號認 |
+| iPadOS 17 21H461（arm64） | 方法裡沒有虛擬機判斷：只有高度補丁（stderr 會說） |
+
+5566：gpumerge 正式流程建出的開機碟（找到的補丁與舊開機碟逐字相同），部署後 kernel `cs_text_fixup_parsed` 2、`cs_text_fixup_applied` 2；
+Data、SpringBoard、13 個 GPU client 正常。
+
+順手修的：`release.json` 的 `board` 改寫 `--os` 的 profile（macOS 原本寫成 iPadOS 的）；rig 的 `dsc_sym.py` 讀
+`dyld_shared_cache_arm64e.symbols`（之前只找 arm64 的檔名，所以 `dsc_dis.py` 在 27 的快取裡找不到任何 ObjC 方法）。
+
+其他還綁著 24A446、換版本要重做的資料（[builds.md](builds.md) 第 4 節）：`fileset-reviewed.json`、`legacy-display-24A446.json`、
+`hid-device-24A446.json`、profile 的 `original-classes.json`。

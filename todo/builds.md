@@ -132,7 +132,8 @@ Data seed 的紀錄把 OS 映像檔名寫成 `lsdiag`（變數被迴圈蓋掉，
 - **17 的狀態不明。** 10-29 之後沒建過，共用的 `package/` 多了 55 個 commit。見 5.1。
 - **跟機型／build 綁定的資料散在多處**：`fileset-reviewed.json`、`legacy-display-24A446.json`、`hid-device-24A446.json`、
   profile 的 `original-classes.json`、QuartzCore 的 text fixup、trust、root policy、Data seed 都對著「24A446 的 iPad17,3」。
-  換 OS 版本或換機型，每一樣都要重做。
+  換 OS 版本或換機型，每一樣都要重做。（11-21：QuartzCore 的 text fixup 改成建置時從該版的 shared cache 找，不再綁版本，
+  見 [vmpkg-pipeline.md](vmpkg-pipeline.md) 第 11 節；trust、root policy、Data seed 本來就是每次建置產生的。）
 - **二進位不是逐位元可重現**：路徑會寫進去（兩棵樹建出的 plugin 雜湊不同）。驗證靠 `release.json` 的 commit 與上機測試。
 - **PROGRESS 的第 1、3、4 節還是 17 時代的內容**（本機路徑、建置表）。
 
